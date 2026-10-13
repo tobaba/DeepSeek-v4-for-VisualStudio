@@ -669,6 +669,12 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 // 修复 VS 自动隐藏弹窗（如「Git 更改」）被聊天内容覆盖的问题 (issue #31)。
                 ChatWebView = new Microsoft.Web.WebView2.Wpf.WebView2CompositionControl();
 
+                // ── 清除「实例已失效」标记：新控件拥有全新的浏览器实例 ──
+                // 该标记由 ChatWebView_Unloaded 置位（卸载后旧实例导航无效）。
+                // 必须在创建新实例后立即清除，否则 TryGetLiveCoreWebView 会持续
+                // 把新控件判为失效，导致重建死循环。
+                _webViewInstanceStale = false;
+
                 // ── 关键规避：禁止把 0 尺寸传给 WebView2CompositionControl ──
                 // 该控件在 SizeChanged 中调用 GraphicsItemD3DImage.UpdateSize →
                 // framePool.Recreate(width, height)。任一边为 0 时该调用失败并抛
