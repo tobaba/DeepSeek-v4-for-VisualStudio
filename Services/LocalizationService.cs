@@ -75,7 +75,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 {
                     _currentLanguage = value;
                     Reload();
-                    LanguageChanged?.Invoke(this, EventArgs.Empty);
+                    RaiseLanguageChanged();
                 }
             }
         }
@@ -83,7 +83,77 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// <summary>
         /// 语言变更事件，供 UI 组件订阅以刷新显示。
         /// </summary>
+        /// <remarks>
+        /// <para>
+        /// 该事件在调用 <see cref="SetLanguage"/>/<see cref="Initialize"/> 的线程上
+        /// 同步逐个触发（见 <see cref="RaiseLanguageChanged"/>）：
+        /// 订阅者可安全地直接访问本线程拥有的 UI 对象，也无需自己封送。
+        /// </para>
+        /// <para>
+        /// <b>订阅者契约</b>：处理器必须尽快返回并自行保证不阻塞——
+        /// 需要跨线程更新界面时用 <c>Dispatcher.BeginInvoke</c>，
+        /// 不要用会同步等待消息泵的 <c>Dispatcher.Invoke</c>。
+        /// 处理器在异常上互相隔离，但<b>无法</b>隔离阻塞：事件在调用线程上同步执行，
+        /// 任一处理器永久阻塞都会拖住语言切换的调用方（历史缺陷：
+        /// 测试运行整体挂起、失败数为 0）。同理，UI 组件必须在释放时退订，
+        /// 否则已释放对象会被进程级单例长期引用。
+        /// </para>
+        /// </remarks>
         public event EventHandler? LanguageChanged;
+
+        /// <summary>
+        /// 逐个通知 <see cref="LanguageChanged"/> 订阅者，并隔离单个订阅者的异常。
+        /// <para>
+        /// 为什么不能直接 <c>LanguageChanged?.Invoke(...)</c>：
+        /// 多播委托按注册顺序同步执行，任一订阅者抛异常会中断后续订阅者，
+        /// 导致部分界面元素停在旧语言上。这里拆散多播链，每个订阅者单独调用，
+        /// 异常只记录不外抛。
+        /// </para>
+        /// <para>
+        /// 注意：订阅者仍在本线程同步执行（保持 UI 线程语义），
+        /// 因此本方法不能也不应给订阅者设超时——真正防挂起依赖订阅者遵守
+        /// <see cref="LanguageChanged"/> 的契约：不阻塞、且在释放时退订。
+        /// </para>
+        /// </summary>
+        private void RaiseLanguageChanged()
+        {
+            var handlers = LanguageChanged;
+            if (handlers == null)
+            {
+                return;
+            }
+
+            var args = EventArgs.Empty;
+
+            foreach (Delegate handler in handlers.GetInvocationList())
+            {
+                var callback = (EventHandler)handler;
+                try
+                {
+                    callback(this, args);
+                }
+                catch (Exception ex)
+                {
+                    // 单个订阅者失败不能阻断其余订阅者，更不能让语言切换整体失败
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[I18n] LanguageChanged 订阅者 {Describe(callback)} 抛出异常，已忽略: {ex.Message}");
+                }
+            }
+        }
+
+        /// <summary>订阅者调试描述：取目标类型与方法名，便于定位出错的订阅者。</summary>
+        private static string Describe(EventHandler handler)
+        {
+            try
+            {
+                var method = handler.Method;
+                return $"{method.DeclaringType?.Name ?? "?"}.{method.Name}";
+            }
+            catch
+            {
+                return "<unknown>";
+            }
+        }
 
         #endregion
 

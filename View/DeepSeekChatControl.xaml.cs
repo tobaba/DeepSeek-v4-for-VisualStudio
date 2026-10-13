@@ -539,24 +539,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
             UpdateAllTooltips();
             UpdateUiLabels();
             StartPricingPeriodTimer();
-            LocalizationService.Instance.LanguageChanged += (_, _) =>
-            {
-                Dispatcher.Invoke(() =>
-                {
-                    UpdateInputPlaceholder();
-                    UpdateAllTooltips();
-                    UpdateUiLabels();
-                    // 联网搜索开关的 ToolTip 由状态决定（开/关两套文案），
-                    // 必须在此刷新，否则语言切换后仍停留在旧语言的 ToolTip。
-                    UpdateWebSearchToggleAppearance();
-                    RefreshSearchEngineItems();
-                    // 模型下拉项的「（自定义端点）」后缀在条目构造时固化，
-                    // 必须重建条目才能跟随语言切换。
-                    RefreshModelFromSettings();
-                    RefreshAppendQueuePanel();
-                    RefreshBalanceDisplay();
-                });
-            };
+            LocalizationService.Instance.LanguageChanged += OnLanguageChanged;
 
             // 初始化模型和推理强度下拉框
             ModelComboBox.ItemsSource = BuildModelListItems();
@@ -619,6 +602,52 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     e.Handled = hasImage; // 仅在有图像时拦截，文本粘贴交给 TextBox 默认行为
                     Logger.Info($"CommandBinding.Paste CanExecute: hasImage={hasImage}, CanExecute={e.CanExecute}, Handled={e.Handled}");
                 }));
+        }
+
+        /// <summary>
+        /// 语言切换时刷新界面文案。
+        /// <para>
+        /// 必须用具名方法订阅而非匿名 lambda：控件释放时要能退订，
+        /// 否则残留在全局单例 <see cref="LocalizationService.LanguageChanged"/> 上的回调
+        /// 会长期持有已释放控件，并在后续任意一次语言切换时被调用。
+        /// </para>
+        /// <para>
+        /// 这里用 <see cref="Dispatcher.BeginInvoke(Delegate, object[])"/> 异步封送，
+        /// 而不是 <c>Dispatcher.Invoke</c> 同步等待：本处理器可能在线程池线程上被调用，
+        /// 若该线程的 Dispatcher 从不运行消息循环（典型：测试中在专用 STA 线程上构造控件），
+        /// 同步等待会永久阻塞语言切换调用方，表现为整个测试运行挂起且失败数为 0。
+        /// 异步封送在无人泵消息时只是排队不执行，不会拖住调用方。
+        /// </para>
+        /// </summary>
+        private void OnLanguageChanged(object? sender, EventArgs e)
+        {
+            if (_disposed) return;
+
+            try
+            {
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (_disposed) return;
+
+                    UpdateInputPlaceholder();
+                    UpdateAllTooltips();
+                    UpdateUiLabels();
+                    // 联网搜索开关的 ToolTip 由状态决定（开/关两套文案），
+                    // 必须在此刷新，否则语言切换后仍停留在旧语言的 ToolTip。
+                    UpdateWebSearchToggleAppearance();
+                    RefreshSearchEngineItems();
+                    // 模型下拉项的「（自定义端点）」后缀在条目构造时固化，
+                    // 必须重建条目才能跟随语言切换。
+                    RefreshModelFromSettings();
+                    RefreshAppendQueuePanel();
+                    RefreshBalanceDisplay();
+                }));
+            }
+            catch (Exception ex)
+            {
+                // 控件已释放或 Dispatcher 正在关闭时排队会失败，属正常收尾路径
+                Logger.Warn($"[I18n] 语言切换界面刷新排队失败: {ex.Message}");
+            }
         }
 
         /// <summary>
@@ -1500,6 +1529,19 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
             DeepSeekOptionsPage.SettingsChanged -= OnSettingsChanged;
             OfficialModelCatalogService.ModelsChanged -= OnOfficialModelsChanged;
+
+            // ── 退订全局语言变更事件 ──
+            // 必须退订：LocalizationService 是进程级单例，其事件列表会强引用本控件。
+            // 控件在测试里于临时 STA 线程上构造，若不退订，该线程的 Dispatcher
+            // 会被后续任何一次 SetLanguage 命中，使整个测试运行挂起。
+            try
+            {
+                LocalizationService.Instance.LanguageChanged -= OnLanguageChanged;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"[Dispose] 退订语言变更事件失败: {ex.Message}");
+            }
 
             // ── 取消主题事件订阅 ──
             _themeService.ThemeChanged -= OnThemeChanged;
