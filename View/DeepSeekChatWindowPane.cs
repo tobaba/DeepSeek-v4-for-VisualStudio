@@ -44,13 +44,12 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 throw;
             }
 
-            // 订阅语言变更以动态更新标题
+            // 订阅语言变更以动态更新标题。
+            // 用具名方法而非匿名 lambda：Dispose 时要能退订，
+            // 否则进程级单例 LocalizationService 会长期强引用已关闭的工具窗口。
             try
             {
-                LocalizationService.Instance.LanguageChanged += (_, _) =>
-                {
-                    this.Caption = LocalizationService.Instance["chat.windowTitle"];
-                };
+                LocalizationService.Instance.LanguageChanged += OnLanguageChanged;
             }
             catch (Exception ex)
             {
@@ -58,6 +57,22 @@ namespace DeepSeek_v4_for_VisualStudio.View
             }
 
             DiagnosticLog.Write("[DeepSeek Pane] Constructor: completed");
+        }
+
+        /// <summary>
+        /// 语言切换时更新工具窗口标题。
+        /// 事件在触发线程上同步调用，这里只做字符串赋值，不做跨线程封送。
+        /// </summary>
+        private void OnLanguageChanged(object? sender, EventArgs e)
+        {
+            try
+            {
+                this.Caption = LocalizationService.Instance["chat.windowTitle"];
+            }
+            catch (Exception ex)
+            {
+                DiagnosticLog.Write($"[DeepSeek Pane] LanguageChanged handler failed: {ex.Message}");
+            }
         }
 
         /// <summary>
@@ -100,9 +115,15 @@ namespace DeepSeek_v4_for_VisualStudio.View
         {
             // 工具窗口关闭或 VS 重建布局都会走到这里，是「控件被卸出视觉树」的强候选原因
             Logger.Info($"[WebViewLifecycle] pane.dispose | disposing={disposing} | content={Content?.GetType().Name ?? "null"}");
-            if (disposing && Content is IDisposable disposable)
+            if (disposing)
             {
-                disposable.Dispose();
+                // 先退订全局事件，再释放内容，避免释放过程中被语言切换回调重入
+                LocalizationService.Instance.LanguageChanged -= OnLanguageChanged;
+
+                if (Content is IDisposable disposable)
+                {
+                    disposable.Dispose();
+                }
             }
             base.Dispose(disposing);
         }

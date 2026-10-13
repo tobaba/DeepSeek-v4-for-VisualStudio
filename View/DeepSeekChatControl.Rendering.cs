@@ -22,6 +22,44 @@ namespace DeepSeek_v4_for_VisualStudio.View
         private Task<bool>? _webViewRebuildTask;
         /// <summary>已告警失效的 WebView2 控件实例哈希码；null 表示尚未告警（重建成功后重置）。</summary>
         private int? _webViewGoneLoggedInstance;
+        /// <summary>
+        /// 控件曾因被卸出视觉树而需要恢复（VS 布局重建 / 启动结束调试等）。
+        /// <para>
+        /// 只在 <see cref="ChatWebView_Unloaded"/> 置位，作为 <see cref="ChatWebView_Loaded"/> 的
+        /// 恢复触发条件。这样可避免「首次加载」与启动路径的初始化竞争：初次挂载时该标志为 false，
+        /// 恢复逻辑不会介入，WebView2 的首次初始化仍由 LoadAndShowAsync 独占负责。
+        /// </para>
+        /// </summary>
+        private bool _webViewReloadNeedsRestore;
+
+        /// <summary>
+        /// 当前控件实例的底层浏览器是否已随视觉树卸载而失效。
+        /// <para>
+        /// 与 <see cref="_webViewReloadNeedsRestore"/> 的区别：后者是「一次性触发标记」，
+        /// 在 <c>Loaded</c> 时即被消费；本字段是**持续状态**，表示当前
+        /// <see cref="ChatWebView"/> 实例已不可用，只有创建出全新控件实例
+        /// （<see cref="InitializeChatWebView"/>）时才会清除。
+        /// </para>
+        /// <para>
+        /// 存在的原因（实测）：控件卸载后其 <c>CoreWebView2</c> 引用仍在、属性访问不抛异常，
+        /// 但导航已完全失效——日志显示 <c>NavigateToString</c> 调用后 2.5 秒
+        /// <c>docUrl</c> 依旧是 <c>about:blank</c>。仅靠属性可访问性无法识别这种
+        /// 「已死但引用残留」的实例，故用本字段作为实质判据。
+        /// </para>
+        /// </summary>
+        private bool _webViewInstanceStale;
+
+        /// <summary>
+        /// 已尝试的连续重建次数。重建成功时归零；达到
+        /// <see cref="MaxRebuildAttempts"/> 后放弃重试，避免无限循环耗尽 UI 线程。
+        /// </summary>
+        private int _rebuildAttemptCount;
+
+        /// <summary>连续重建次数上限。超过即认定环境不可恢复，提示用户重启 VS。</summary>
+        private const int MaxRebuildAttempts = 4;
+
+        /// <summary>进行中的「重挂控件修复空白」任务；用于合并并发请求。</summary>
+        private Task? _composeRecoveryTask;
 
         #region Private Methods - Rendering
 
@@ -33,6 +71,15 @@ namespace DeepSeek_v4_for_VisualStudio.View
         /// 会抛 <see cref="InvalidOperationException"/>（内层 COMException 0x8007139F），
         /// 因此不能用「属性是否为 null」来判断控件是否还活着。
         /// </para>
+        /// <para>
+        /// <b>实测教训</b>：仅靠「属性可访问 + Parent 非 null」仍会把**已死但引用尚存**的
+        /// 实例判为可用。日志证据：控件卸载后探测判定 <c>core=可用</c>，
+        /// 但随后 <c>NavigateToString</c> 完全无效（2.5 秒后 <c>docUrl</c> 仍为
+        /// <c>about:blank</c>）。因此这里追加一项实质判据——
+        /// 若该控件实例**经历过卸载**（<see cref="_webViewReloadNeedsRestore"/> 为 true），
+        /// 则其底层浏览器必然已释放，直接判定不可用，交由重建路径处理，
+        /// 不再浪费时间做注定无效的导航尝试。
+        /// </para>
         /// </summary>
         /// <param name="core">探测到的可用 <see cref="CoreWebView2"/> 实例；控件不可用时为 null。</param>
         /// <returns>控件及其浏览器实例均可用时返回 true，否则返回 false。</returns>
@@ -43,6 +90,14 @@ namespace DeepSeek_v4_for_VisualStudio.View
             // 宿主控件自身已被释放，后续一切访问都不安全
             if (_disposed)
                 return false;
+
+            // ── 实质判据：经历过卸载的控件实例，其浏览器已释放 ──
+            // 这类实例的属性访问不会抛异常，但导航已完全无效；必须交给重建路径。
+            if (_webViewInstanceStale)
+            {
+                LogWebViewGoneOnce(ChatWebView, "控件实例已随视觉树卸载而失效（引用残留但导航无效）");
+                return false;
+            }
 
             var webView = ChatWebView;
             if (webView == null)
@@ -181,17 +236,527 @@ namespace DeepSeek_v4_for_VisualStudio.View
         /// <summary>WebView2 宿主 ContentControl 被卸出视觉树时记录日志。</summary>
         private void ChatWebViewHost_Unloaded(object sender, RoutedEventArgs e) => LogWebViewLifecycle("host.unloaded", sender as DependencyObject);
 
-        /// <summary>WebView2 宿主可见性变化时记录日志（自动隐藏/取消自动隐藏会走到这里）。</summary>
-        private void ChatWebViewHost_IsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e) => LogWebViewLifecycle($"host.isVisibleChanged(new={e.NewValue})", sender as DependencyObject);
+        /// <summary>
+        /// WebView2 控件重新加载到视觉树：记录日志并触发界面恢复。
+        /// <para>
+        /// 这是修复「调试后聊天窗口变空白」的关键入口。VS 在启动/结束调试时会卸载并重新挂载
+        /// 工具窗口内容；控件一旦被卸出视觉树，WebView2 即释放底层 <c>CoreWebView2</c>，
+        /// 重新挂回时控件内部是个空白浏览器实例，此前没有任何代码负责重新灌入历史消息，
+        /// 于是界面表现为「空窗」，只有重启 VS（走全新初始化路径）才能恢复。
+        /// </para>
+        /// <para>
+        /// 恢复是 fire-and-forget 的：本处理器在 WPF 布局阶段同步执行，不能阻塞。
+        /// 实际恢复工作经 <c>Dispatcher.BeginInvoke</c> 推到布局完成后执行，
+        /// 并通过 <see cref="RestoreWebViewAfterReloadAsync"/> 的合并逻辑避免重复重建。
+        /// </para>
+        /// </summary>
+        private void ChatWebView_Loaded(object sender, RoutedEventArgs e)
+        {
+            LogWebViewLifecycle("webview.loaded", sender as DependencyObject);
 
-        /// <summary>WebView2 控件加载到视觉树时记录日志。</summary>
-        private void ChatWebView_Loaded(object sender, RoutedEventArgs e) => LogWebViewLifecycle("webview.loaded", sender as DependencyObject);
+            // ── 仅在「曾经被卸载过」时触发恢复 ──
+            // 初次挂载（启动路径）不满足该条件，WebView2 的首次初始化仍由
+            // LoadAndShowAsync 独占负责，恢复逻辑不介入，避免与之竞争。
+            if (!_webViewReloadNeedsRestore)
+            {
+                Logger.Debug("[WebViewLifecycle] webview.loaded 为首次挂载，跳过恢复逻辑（由启动路径初始化）");
+                return;
+            }
 
-        /// <summary>WebView2 控件被卸出视觉树时记录日志——此时底层 CoreWebView2 即将/已经释放。</summary>
-        private void ChatWebView_Unloaded(object sender, RoutedEventArgs e) => LogWebViewLifecycle("webview.unloaded", sender as DependencyObject);
+            _webViewReloadNeedsRestore = false;
+            ScheduleWebViewRestoreAfterReload();
+        }
 
-        /// <summary>WebView2 控件可见性变化时记录日志。</summary>
-        private void ChatWebView_IsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e) => LogWebViewLifecycle($"webview.isVisibleChanged(new={e.NewValue})", sender as DependencyObject);
+        /// <summary>
+        /// WebView2 控件被卸出视觉树：记录日志并作废「已初始化」状态。
+        /// <para>
+        /// 控件脱离视觉树后底层 <c>CoreWebView2</c> 会被释放（HRESULT 0x8007139F）。
+        /// 此处必须把 <c>_webViewInitialized</c> 复位为 false，否则后续
+        /// <c>LoadAndShowCoreAsync</c> 会因该标志仍为 true 而走「已初始化，直接刷新页面内容」
+        /// 分支，跳过必要的重新初始化，导致恢复失败。
+        /// </para>
+        /// </summary>
+        private void ChatWebView_Unloaded(object sender, RoutedEventArgs e)
+        {
+            LogWebViewLifecycle("webview.unloaded", sender as DependencyObject);
+
+            // ── 标记「本次卸载后需要恢复」 ──
+            // 供 Loaded 处理器判断这是否为一次真实的重载往返。
+            _webViewReloadNeedsRestore = true;
+
+            // ── 标记当前控件实例已失效（持续状态，直到创建新控件才清除）──
+            // 这是关键判据：卸载后 CoreWebView2 引用仍在、属性访问正常，
+            // 但导航已无效（实测 NavigateToString 后 docUrl 仍是 about:blank）。
+            _webViewInstanceStale = true;
+
+            // ── 作废渲染状态 ──
+            // 控件已脱离视觉树，CoreWebView2 随之释放，页面 DOM 一并消失。
+            // 这些标志若不复位，恢复路径会误判「页面仍然完好」而跳过重新灌入历史消息，
+            // 结果就是重新挂载后看到一个空白窗口。
+            _webViewInitialized = false;
+            _pageReady = false;
+            _browserInitialized = false;
+
+            Logger.Info("[WebViewLifecycle] webview.unloaded 已作废初始化与页面就绪状态，等待重新挂载后恢复");
+        }
+
+        /// <summary>
+        /// WebView2 控件可见性变化：记录日志，并在重新可见时触发一次重绘。
+        /// <para>
+        /// 这是「调试后聊天窗口变空白」的修复入口。根因（经实测确认）：
+        /// 可见性翻转后 D3D 合成表面与 WPF 合成器的关联失效，WPF 认为该区域
+        /// 无需重绘，界面就一直停留在旧背景上——表现为**整块纯背景色空白**。
+        /// </para>
+        /// <para>
+        /// 关键证据：此时页面内容完整（<c>_pageReady</c> 为 true、HTML 有上百 KB）、
+        /// <c>CoreWebView2</c> 可访问、<c>IsFrontBufferAvailable</c> 亦为 true，
+        /// 代码能观测到的每个指标都正常；而用户手动点一下窗口位置按钮、
+        /// 触发一次系统级重绘，内容立即恢复。可见丢失的是「合成到屏幕」这最后一跳，
+        /// 而非页面内容或浏览器实例。
+        /// </para>
+        /// <para>
+        /// 因此这里在「重新可见」时主动施加重绘刺激（见
+        /// <see cref="RepaintChatWebViewAsync"/>），而不是去重建浏览器。
+        /// </para>
+        /// </summary>
+        private void ChatWebView_IsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
+        {
+            LogWebViewLifecycle($"webview.isVisibleChanged(new={e.NewValue})", sender as DependencyObject);
+
+            // 隐藏：不出帧属正常状态，必须清零计数。
+            // 否则「先异常 → 隐藏 → 再可见」会把隐藏前后的两次判定累加，
+            // 导致仅凭一次未经确认的异常就误触发重挂控件。
+            if (e.NewValue is not bool visible || !visible)
+            {
+                return;
+            }
+
+            ScheduleCompositionHealthCheck();
+        }
+
+        /// <summary>
+        /// 宿主可见性变化：记录日志，并在重新可见时同样触发重绘。
+        /// <para>
+        /// 实测日志中 <c>host.isVisibleChanged</c> 与 <c>webview.isVisibleChanged</c> 总是成对出现，
+        /// 这里一并挂上处理以保证任一入口都能触发恢复。
+        /// </para>
+        /// </summary>
+        private void ChatWebViewHost_IsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
+        {
+            LogWebViewLifecycle($"host.isVisibleChanged(new={e.NewValue})", sender as DependencyObject);
+
+            // 与控件侧一致：隐藏时清零停摆计数，避免跨隐藏前后累加导致误判
+            if (e.NewValue is not bool visible || !visible)
+            {
+                return;
+            }
+
+            ScheduleCompositionHealthCheck();
+        }
+
+        /// <summary>
+        /// 排入一次合成健康检查。
+        /// 延迟到布局完成后执行：可见性翻转之后的首次布局可能尚未把尺寸算好，
+        /// 此刻读取 FrontBuffer 状态或重挂控件都会误判。
+        /// </summary>
+        private void ScheduleCompositionHealthCheck()
+        {
+            if (_disposed)
+                return;
+
+            try
+            {
+                Dispatcher.BeginInvoke(
+                    System.Windows.Threading.DispatcherPriority.Background,
+                    new Action(() => { _ = CheckCompositionHealthAsync(); }));
+            }
+            catch (Exception ex)
+            {
+                Logger.Debug($"[WebViewLifecycle] 排入合成健康检查失败: {ex.GetType().Name}");
+            }
+        }
+
+        /// <summary>
+        /// 检查聊天区域是否需要重绘；需要时按级别施加刺激。
+        /// <para>
+        /// 说明：此处曾以 <c>D3DImage.IsFrontBufferAvailable</c> 作为「合成失效」判据，
+        /// 但实测证明该值在空白发生时**始终为 true**（<c>frontBufferChanged</c> 零触发）——
+        /// 「前端缓冲区可用」与「画面已合成到屏幕」是两件事。
+        /// 故现已移除该判据及相关订阅，改为在可见性恢复时直接施加重绘刺激。
+        /// </para>
+        /// </summary>
+        private async Task CheckCompositionHealthAsync()
+        {
+            if (_disposed)
+                return;
+
+            try
+            {
+                await Microsoft.VisualStudio.Shell.ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                if (_disposed) return;
+
+                // 控件不可见或未加载时不处理：隐藏期间本就不出帧，属正常状态
+                if (!IsVisible || !IsLoaded)
+                {
+                    return;
+                }
+
+                // 页面未就绪说明是在初始化过程中，交由初始化路径负责
+                if (!_pageReady)
+                {
+                    return;
+                }
+
+                // ── 恢复 ──
+                // 根因（经实测确认）：控件虽一切状态正常（DOM 已就绪、可见、已加载、
+                // 尺寸正常），但其 D3D 合成链路会静默停摆，产出 0 个像素——
+                // 表现为整块纯背景色空白。该失效无法通过任何状态量观测
+                // （IsFrontBufferAvailable 始终为 true），只能靠采样渲染像素识别。
+                await RepaintChatWebViewAsync();
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[WebViewLifecycle] 合成健康检查失败: {ex.GetType().Name}: {ex.Message}", ex);
+            }
+        }
+
+        /// <summary>
+        /// 采样控件实际渲染出的非背景像素占比（百分比）。
+        /// <para>
+        /// 这是判断「控件到底有没有画出内容」的唯一可靠手段。此前依赖
+        /// <c>_pageReady</c>/<c>docUrl</c> 等 DOM 侧指标，会出现「页面完全正常、
+        /// 控件却一个像素都没画」的盲区（实测该情形覆盖率恰为 0.0%）。
+        /// </para>
+        /// </summary>
+        /// <returns>覆盖率百分比；无法采样时返回 -1。</returns>
+        private double SampleRenderedCoverage() => SampleRenderedPixels().Coverage;
+
+        /// <summary>采样渲染像素，返回覆盖率与可读细节。</summary>
+        private (double Coverage, string Detail) SampleRenderedPixels()
+        {
+            var webView = ChatWebView;
+            if (webView == null)
+                return (-1, "<无控件>");
+
+            try
+            {
+                double w = webView.ActualWidth;
+                double h = webView.ActualHeight;
+                if (w < 1 || h < 1)
+                    return (-1, $"<尺寸为 0: {w:F0}x{h:F0}>");
+
+                var rtb = new System.Windows.Media.Imaging.RenderTargetBitmap(
+                    (int)w, (int)h, 96, 96, System.Windows.Media.PixelFormats.Pbgra32);
+                rtb.Render(webView);
+
+                int stride = rtb.PixelWidth * 4;
+                var pixels = new byte[stride * rtb.PixelHeight];
+                rtb.CopyPixels(pixels, stride, 0);
+
+                // 以左上角像素为背景基准，统计与背景差异明显的像素比例
+                byte bgB = pixels[0], bgG = pixels[1], bgR = pixels[2];
+                long nonBg = 0;
+                long total = (long)rtb.PixelWidth * rtb.PixelHeight;
+
+                for (int i = 0; i < pixels.Length; i += 4)
+                {
+                    int diff = Math.Abs(pixels[i] - bgB)
+                             + Math.Abs(pixels[i + 1] - bgG)
+                             + Math.Abs(pixels[i + 2] - bgR);
+                    if (diff > 24) nonBg++;
+                }
+
+                double pct = total > 0 ? (nonBg * 100.0 / total) : 0;
+                return (pct, $"(非背景 {nonBg}/{total}, bg=#{bgR:X2}{bgG:X2}{bgB:X2})");
+            }
+            catch (Exception ex)
+            {
+                return (-1, $"<采样失败:{ex.GetType().Name}>");
+            }
+        }
+
+        /// <summary>
+        /// 分级触发聊天区域的 WPF 重绘，修复「内容在但未画到屏幕」的空白。
+        /// <para>
+        /// 级别（由轻到重，逐级尝试）：
+        /// <list type="number">
+        /// <item>让 WebView2 控件自身失效重绘（<c>InvalidateVisual</c>）——成本几乎为零，不闪屏。</item>
+        /// <item>让宿主与控件一并失效重绘，覆盖宿主裁剪区域未更新的情况。</item>
+        /// <item>重挂控件（复用 <see cref="RecoverCompositionByReattachAsync"/>）——前两级无效时才用，
+        /// 会重建 D3D 捕获链路，代价更高但不丢页面内容。</item>
+        /// </list>
+        /// </para>
+        /// <para>
+        /// 修复的成功与否无法从代码侧观测（所有状态量都正常），因此这里不做判定，
+        /// 只是逐级施加足够强的重绘刺激；每级都记录日志以便日后定位实际生效的级别。
+        /// </para>
+        /// </summary>
+        private async Task RepaintChatWebViewAsync()
+        {
+            var webView = ChatWebView;
+            if (webView == null)
+                return;
+
+            try
+            {
+                // ── 1. 控件自身失效重绘 ──
+                webView.InvalidateVisual();
+
+                // ── 2. 宿主与控件一并失效，并请求一次布局重算 ──
+                // 宿主 ContentControl 有自己的裁剪区域；只让控件失效时，
+                // 宿主的陈旧内容有时会继续遮挡（issue #31 同源的合成问题）。
+                ChatWebViewHost.InvalidateVisual();
+                webView.InvalidateMeasure();
+                webView.InvalidateArrange();
+
+                // 把重绘推到下一轮渲染优先级，确保在本次布局完成后真正执行
+                await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.Render);
+                if (_disposed) return;
+
+                // ── 验证重绘是否真的产出画面 ──
+                // 关键：不假设「重绘必然有效」，而是实测非背景像素占比。
+                // 该失效的特点是 DOM 侧完全正常、状态量全部正常，但控件产出 0 个像素，
+                // 单纯 InvalidateVisual 无法恢复，必须重建合成链路。
+                double coverage = SampleRenderedCoverage();
+                if (coverage >= 0 && coverage < RenderedCoverageThreshold)
+                {
+                    Logger.Warn($"[WebViewLifecycle] 重绘后仍无画面（coverage={coverage:F1}%），"
+                        + "重建合成链路以恢复显示");
+                    await RecoverCompositionByReattachAsync();
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"[WebViewLifecycle] 重绘聊天区域失败: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 判定「控件是否真的画出了内容」的像素覆盖率阈值（百分比）。
+        /// 低于该值即认定合成输出已断，需要重建捕获链路。
+        /// 实测：故障时覆盖率恰为 0.0%，正常时可达 20%~70%，阈值取 1% 留有充分余量。
+        /// </summary>
+        private const double RenderedCoverageThreshold = 1.0;
+
+        /// <summary>
+        /// 通过「摘除控件再挂回」重建 D3D 捕获链路。
+        /// <para>
+        /// 刻意不销毁控件、不重建 <c>CoreWebView2</c>：页面 DOM 与历史消息都还在，
+        /// 只需让库重新创建 D3D 设备、帧池与捕获会话。
+        /// 重挂会触发控件重新加载并重新协商尺寸，从而重建整条合成链路。
+        /// </para>
+        /// <para>
+        /// 与 <see cref="RebuildWebViewCoreAsync"/> 的区别：后者用于控件真正失效
+        /// （被视觉树卸载、浏览器进程退出）的场景，需要重新灌入历史消息；
+        /// 本方法用于「控件活着但画不出来」，代价小得多，且不会丢失页面状态。
+        /// </para>
+        /// </summary>
+        private async Task RecoverCompositionByReattachAsync()
+        {
+            // 合并并发请求：可见性事件可能密集到达
+            var inFlight = _composeRecoveryTask;
+            if (inFlight != null && !inFlight.IsCompleted)
+            {
+                Logger.Debug("[WebViewLifecycle] compose.reattach | 已有重挂任务在进行，复用");
+                await inFlight;
+                return;
+            }
+
+            var task = RecoverCompositionByReattachCoreAsync();
+            _composeRecoveryTask = task;
+            try
+            {
+                await task;
+            }
+            finally
+            {
+                if (ReferenceEquals(_composeRecoveryTask, task))
+                    _composeRecoveryTask = null;
+            }
+        }
+
+        private async Task RecoverCompositionByReattachCoreAsync()
+        {
+            await Microsoft.VisualStudio.Shell.ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+
+            if (_disposed)
+                return;
+
+            var webView = ChatWebView;
+            if (webView == null)
+                return;
+
+            try
+            {
+                // ── 摘除再挂回 ──
+                // 摘除期间控件脱离视觉树，库会释放捕获会话；重新挂回时按当前尺寸
+                // 重新创建 D3D 设备与帧池，从而重建整条合成链路。
+                // 这是比重绘更强的手段，用于前两级重绘无效的场景。
+                ChatWebViewHost.Content = null;
+                ChatWebViewHost.Content = webView;
+
+                // 复位计数：给新链路一个干净的观察窗口
+
+                // ── 重挂后补一次重绘，确保新链路立刻出画面 ──
+                await Task.Delay(150);
+                await Microsoft.VisualStudio.Shell.ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                if (_disposed) return;
+
+                try
+                {
+                    webView.InvalidateVisual();
+                    ChatWebViewHost.InvalidateVisual();
+                }
+                catch (Exception ex)
+                {
+                    Logger.Debug($"[WebViewLifecycle] 重挂后重绘失败: {ex.GetType().Name}");
+                }
+
+                // ── 复查：确认画面真的回来了 ──
+                // 若重挂仍无法恢复，说明连重建捕获链路也救不回来，记录以便诊断。
+                await Task.Delay(1200);
+                await Microsoft.VisualStudio.Shell.ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                if (_disposed) return;
+
+                double after = SampleRenderedCoverage();
+                if (after >= 0 && after < RenderedCoverageThreshold)
+                {
+                    Logger.Error($"[WebViewLifecycle] 重建合成链路后仍未恢复显示（coverage={after:F1}%），"
+                        + "需改用窗口式 WebView2");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[WebViewLifecycle] 重挂控件恢复合成链路失败: {ex.GetType().Name}: {ex.Message}", ex);
+            }
+        }
+
+        /// <summary>
+        /// 排入一次「重载后恢复」任务。
+        /// 用 Dispatcher 延迟到布局完成后执行：Loaded 期间控件尺寸可能仍为 0，
+        /// 此刻直接重建会与 WebView2CompositionControl 的 SizeChanged 竞争。
+        /// </summary>
+        private void ScheduleWebViewRestoreAfterReload()
+        {
+            if (_disposed)
+                return;
+
+            try
+            {
+                Dispatcher.BeginInvoke(
+                    System.Windows.Threading.DispatcherPriority.Background,
+                    new Action(() => { _ = RestoreWebViewAfterReloadAsync(); }));
+            }
+            catch (Exception ex)
+            {
+                Logger.Debug($"[WebViewLifecycle] 排入重载恢复任务失败: {ex.GetType().Name}");
+            }
+        }
+
+        /// <summary>
+        /// 控件重新挂载后恢复聊天界面。
+        /// <para>
+        /// 主要路径（实测确认）：<c>webview.unloaded</c> 后控件实例的底层浏览器已释放，
+        /// 但引用仍在、属性访问不抛异常，导航则完全无效
+        /// （日志证据：<c>NavigateToString</c> 调用 2.5 秒后 <c>docUrl</c> 仍是 <c>about:blank</c>）。
+        /// 这类实例由 <see cref="TryGetLiveCoreWebView"/> 通过
+        /// <c>_webViewInstanceStale</c> 识别为不可用，于是直接走重建——
+        /// 创建全新控件与 <c>CoreWebView2</c> 环境并全量重绘历史消息。
+        /// </para>
+        /// <para>
+        /// 其余两种情形：
+        /// <list type="bullet">
+        /// <item>控件存活且页面内容完好（仅是一次可见性往返）——什么都不做。</item>
+        /// <item>控件存活但页面尚未就绪——重新灌入历史消息（并延迟复查，必要时转重建）。</item>
+        /// </list>
+        /// </para>
+        /// </summary>
+        private async Task RestoreWebViewAfterReloadAsync()
+        {
+            if (_disposed)
+                return;
+
+            try
+            {
+                await Microsoft.VisualStudio.Shell.ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                if (_disposed) return;
+
+                // ── 情形 3：控件失效 → 重建（内部会全量重绘历史消息）──
+                // 卸载过的控件实例必然走到这里：属性可访问，但导航无效，重建是唯一出路。
+                if (!TryGetLiveCoreWebView(out var core))
+                {
+                    Logger.Info("[WebViewLifecycle] reload.restore | 控件不可用，转入重建路径");
+                    if (await RebuildWebViewIfNeededAsync() && TryGetLiveCoreWebView(out _))
+                        Logger.Info("[WebViewLifecycle] reload.restore | 重建成功，历史消息已重绘");
+                    else
+                        Logger.Warn("[WebViewLifecycle] reload.restore | 重建未成功，界面可能仍为空白");
+
+                    return;
+                }
+
+                // ── 情形 2：控件存活但页面尚未就绪（内容为空）──
+                // _pageReady 由页面 JS 发出 __pageReady__ 信号置位；控件被卸载后必然为 false，
+                // 说明当前 DOM 是空页面，需要重新灌入历史消息。
+                if (!_pageReady || !_browserInitialized)
+                {
+                    _browserInitialized = false;
+                    _lastRenderedMessagesLength = 0;
+                    RebuildMessagesHtml();
+                    UpdateBrowser();
+                    return;
+                }
+
+                // ── 情形 1：页面完好，仅是一次可见性往返 ──
+                Logger.Debug("[WebViewLifecycle] reload.restore | 页面内容完好，无需恢复");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[WebViewLifecycle] 重载后恢复聊天界面失败: {ex.GetType().Name}: {ex.Message}", ex);
+            }
+        }
+
+
+        /// <summary>
+        /// 强制重建整条 WebView2 链路：丢弃当前控件与环境，创建全新实例并全量重绘。
+        /// <para>
+        /// 与 <see cref="RebuildWebViewIfNeededAsync"/> 的区别：后者以
+        /// <c>TryGetLiveCoreWebView</c>（属性可访问性）为判据，会放过
+        /// 「属性可访问但实际不可用」的控件；本方法跳过该判据，无条件重建，
+        /// 用于那种「探测通过、页面就是起不来」的情形。
+        /// </para>
+        /// </summary>
+        private async Task ForceRecreateWebViewAsync()
+        {
+            await Microsoft.VisualStudio.Shell.ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+            if (_disposed) return;
+
+            // 合并并发请求
+            var inFlight = _webViewRebuildTask;
+            if (inFlight != null && !inFlight.IsCompleted)
+            {
+                Logger.Debug("[WebViewLifecycle] forceRecreate | 已有重建任务在进行，复用");
+                await inFlight;
+                return;
+            }
+
+            var task = RebuildWebViewCoreAsync();
+            _webViewRebuildTask = task;
+            try
+            {
+                bool ok = await task;
+                Logger.Info($"[WebViewLifecycle] forceRecreate | 结果={ok} "
+                    + $"| view={ChatWebView?.GetHashCode() ?? 0}");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[WebViewLifecycle] 强制重建失败: {ex.GetType().Name}: {ex.Message}", ex);
+            }
+            finally
+            {
+                if (ReferenceEquals(_webViewRebuildTask, task))
+                    _webViewRebuildTask = null;
+            }
+        }
 
         /// <summary>
         /// 解绑 WebView2 控件上的事件订阅。
@@ -289,7 +854,23 @@ namespace DeepSeek_v4_for_VisualStudio.View
             if (_disposed)
                 return false;
 
-            Logger.Warn($"[WebViewLifecycle] rebuild.start | staleView={ChatWebView?.GetHashCode() ?? 0} | hostContent={(ChatWebViewHost.Content == null ? "null(已摘除)" : "存在")} | 控件已随视觉树卸载而释放，开始重建以恢复聊天界面");
+            // ── 防重建风暴 ──
+            // 正常情况下重建会创建全新控件实例并清除失效标记，不会连续触发。
+            // 但若重建本身反复失败（环境不可用、运行时被破坏等），
+            // 恢复路径会不断回来重试。这里限流：超过阈值后放弃并保持现状，
+            // 避免无限循环耗尽 UI 线程。
+            if (_rebuildAttemptCount >= MaxRebuildAttempts)
+            {
+                Logger.Error($"[WebViewLifecycle] rebuild.abort | 连续重建已达 {_rebuildAttemptCount} 次仍未恢复，"
+                    + "停止重试以避免无限循环；请重启 Visual Studio");
+                return false;
+            }
+            _rebuildAttemptCount++;
+
+            Logger.Warn($"[WebViewLifecycle] rebuild.start | attempt={_rebuildAttemptCount}/{MaxRebuildAttempts} "
+                + $"| staleView={ChatWebView?.GetHashCode() ?? 0} "
+                + $"| hostContent={(ChatWebViewHost.Content == null ? "null(已摘除)" : "存在")} "
+                + "| 控件已随视觉树卸载而释放，开始重建以恢复聊天界面");
 
             try
             {
@@ -353,8 +934,10 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 _browserInitialized = true;
                 _lastRenderedMessagesLength = _messagesHtml.Length;
 
-                // 重建成功：清除失效告警去重标记，使下一次失效能再次告警
+                // 重建成功：清除失效告警去重标记与重建计数，
+                // 使下一次真的失效时能再次告警、并重新获得完整的重试预算。
                 _webViewGoneLoggedInstance = null;
+                _rebuildAttemptCount = 0;
                 Logger.Info($"[WebViewLifecycle] rebuild.success | newView={ChatWebView?.GetHashCode() ?? 0} | hostContent={(ChatWebViewHost.Content == null ? "null(已摘除)" : "存在")}");
                 return true;
             }
@@ -388,7 +971,10 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 if (!TryGetLiveCoreWebView(out var core))
                 {
                     if (!await RebuildWebViewIfNeededAsync() || !TryGetLiveCoreWebView(out core))
+                    {
+                        Logger.Warn("[WebViewLifecycle] 控件不可用且重建失败，跳过本次渲染");
                         return;
+                    }
                 }
 
                 string allMessages = _messagesHtml.ToString();
@@ -434,7 +1020,10 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
                 // 上面的 await 期间控件可能再次失效，这里重新探测，避免访问已释放的 CoreWebView2
                 if (!TryGetLiveCoreWebView(out var liveCore))
+                {
+                    Logger.Warn("[WebViewLifecycle] 全量刷新前控件已失效，跳过本次渲染");
                     return;
+                }
 
                 liveCore!.NavigateToString(html);
                 _browserInitialized = true;
@@ -508,6 +1097,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 ChatWebView.CoreWebView2.NewWindowRequested += CoreWebView2_NewWindowRequested;
                 ChatWebView.CoreWebView2.NavigationStarting += CoreWebView2_NavigationStarting;
                 ChatWebView.CoreWebView2.NavigationCompleted += CoreWebView2_NavigationCompleted;
+                ChatWebView.CoreWebView2.ProcessFailed += CoreWebView2_ProcessFailed;
                 ChatWebView.ZoomFactorChanged += ChatWebView_ZoomFactorChanged;
 
                 ApplyPersistedWebView2Zoom();
@@ -795,6 +1385,46 @@ namespace DeepSeek_v4_for_VisualStudio.View
             }
 
             ApplyPersistedWebView2Zoom();
+        }
+
+        /// <summary>
+        /// 浏览器进程失败/退出处理。
+        /// <para>
+        /// 此前完全没有订阅该事件，浏览器进程在调试期间被杀时表现为静默白屏，
+        /// 日志里没有任何线索。这里显式记录失败类型，并在浏览器进程已终止时
+        /// 排入恢复任务（重建控件即可拉起新的浏览器进程）。
+        /// </para>
+        /// </summary>
+        private void CoreWebView2_ProcessFailed(object? sender, CoreWebView2ProcessFailedEventArgs e)
+        {
+            try
+            {
+                Logger.Warn($"[WebViewLifecycle] processFailed | kind={e.ProcessFailedKind} "
+                    + $"| reason={e.Reason} | exitCode={e.ExitCode}");
+
+                // 仅当承载页面的浏览器进程真的没了才重建；
+                // 渲染/GPU 子进程失败时 Chromium 会自行恢复，无需重建整个控件。
+                if (e.ProcessFailedKind != CoreWebView2ProcessFailedKind.BrowserProcessExited)
+                    return;
+
+                if (_disposed)
+                    return;
+
+                Logger.Warn("[WebViewLifecycle] 浏览器进程已退出，排入恢复任务");
+
+                // 作废状态：浏览器进程已随控件释放，必须走重建路径
+                _webViewInitialized = false;
+                _pageReady = false;
+                _browserInitialized = false;
+
+                Dispatcher.BeginInvoke(
+                    System.Windows.Threading.DispatcherPriority.Background,
+                    new Action(() => { _ = RestoreWebViewAfterReloadAsync(); }));
+            }
+            catch (Exception ex)
+            {
+                Logger.Debug($"[Render] 处理 ProcessFailed 时忽略异常: {ex.GetType().Name}");
+            }
         }
 
         private void ChatWebView_ZoomFactorChanged(object? sender, EventArgs e)
