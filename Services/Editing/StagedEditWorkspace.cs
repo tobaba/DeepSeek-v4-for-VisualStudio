@@ -116,6 +116,12 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Editing
             var normalizedPath = NormalizePath(filePath);
             string content = newContent ?? string.Empty;
 
+            // ── 换行风格收口 ──
+            // 写穿是编辑链路落盘（含 VS 编辑器 buffer 路径）的必经点，统一在此把行尾
+            // 调整为目标文件原本的风格，避免 AI 编辑把 LF 文件整体改写成 CRLF。
+            // 新建文件探测不到风格 → LineEndingHelper 回退系统默认（Environment.NewLine）。
+            content = LineEndingHelper.ConformToFile(content, normalizedPath);
+
             // 首次接触时直接读取当前 buffer 作为 Baseline。这里只读不保存，
             // 避免把可能阻塞的 VS Save 调用插进工具执行关键路径。
             string? openBufferContent = null;
@@ -462,8 +468,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Editing
                         if (!prev.IsReverted && !prev.IsAccepted)
                             continue;
 
-                        if (string.Equals(prev.OldText, hunk.OldText, StringComparison.Ordinal) &&
-                            string.Equals(prev.NewText, hunk.NewText, StringComparison.Ordinal))
+                        if (HunkTextEquals(prev.OldText, hunk.OldText) &&
+                            HunkTextEquals(prev.NewText, hunk.NewText))
                         {
                             hunk.IsReverted = prev.IsReverted;
                             hunk.IsAccepted = prev.IsAccepted;
@@ -605,15 +611,29 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Editing
 
         /// <summary>
         /// 应用单块回滚：定位 hunk 在当前内容中的行范围，替换为 Baseline 对应内容。
+        ///
+        /// - 纯新增块（OldLineCount == 0）：删掉被插入的那几行；
+        /// - 纯删除块（NewLineCount == 0）：把 Baseline 原文插回 NewAnchorLine 位置；
+        /// - 修改块：用 Baseline 原文替换当前范围。
+        ///
+        /// 回写沿用当前文件自身的换行风格（LF/CRLF/CR），避免撤销一个块把整个文件的行尾改写。
         /// </summary>
         private static string ApplyHunkRevert(string currentContent, DiffHunkInfo hunk)
         {
             string[] currentLines = SplitLines(currentContent);
+            string lineEnding = LineEndingHelper.Detect(currentContent);
 
-            // 定位块在当前文件中的范围
-            int newStart = Math.Max(0, hunk.NewStartLine);
-            int newEnd = newStart + hunk.NewLineCount;
-            if (newStart > currentLines.Length) newStart = currentLines.Length;
+            // 插入锚点：纯删除块在当前文件中没有对应行，位置来自 NewAnchorLine；
+            // 老数据/外部构造的 hunk 没有该字段时退回 NewStartLine。
+            int insertAt = hunk.NewAnchorLine >= 0
+                ? hunk.NewAnchorLine
+                : Math.Max(0, hunk.NewStartLine);
+            if (insertAt > currentLines.Length) insertAt = currentLines.Length;
+
+            // 待移除的当前行数（纯删除为 0），并夹紧到文件实际范围内
+            int removeCount = Math.Max(0, hunk.NewLineCount);
+            if (insertAt + removeCount > currentLines.Length)
+                removeCount = currentLines.Length - insertAt;
 
             // 待替换为 Baseline 内容
             string[] oldLines = SplitLines(hunk.OldText);
@@ -621,50 +641,100 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Editing
             var result = new List<string>();
 
             // 替换前的内容
-            for (int i = 0; i < newStart && i < currentLines.Length; i++)
+            for (int i = 0; i < insertAt; i++)
                 result.Add(currentLines[i]);
 
             // 插入 Baseline 原内容
             result.AddRange(oldLines);
 
             // 替换后的内容
-            for (int i = newStart + hunk.NewLineCount; i < currentLines.Length; i++)
+            for (int i = insertAt + removeCount; i < currentLines.Length; i++)
                 result.Add(currentLines[i]);
 
-            return string.Join("\r\n", result);
+            return string.Join(lineEnding, result);
         }
 
         /// <summary>
         /// 计算 Baseline 与当前内容之间的行级差异块。
-        /// 使用经典 LCS 动态规划 + 回溯，输出连续的变化区域。
+        ///
+        /// 算法：先裁掉首尾完全相同的行（O(n)），只对中间差异区做 LCS 动态规划 + 回溯，
+        /// 输出连续的变化区域。真实编辑通常只动很小一段，裁剪后 DP 规模与"改动行数"同阶，
+        /// 避免大文件按整文件规模建表（整表方案在 5000 行文件上约 95MB）。
+        ///
+        /// 空间：长度用两行滚动数组，回溯方向另存 byte 表 —— 约为全 int 表的 1/4，
+        /// 且裁剪后表尺寸只取决于差异区。
         /// </summary>
         private static List<DiffHunkInfo> ComputeHunks(string baselineText, string currentText)
         {
             var hunks = new List<DiffHunkInfo>();
-            if (baselineText == currentText) return hunks;
+            if (string.Equals(baselineText, currentText, StringComparison.Ordinal)) return hunks;
 
             string[] oldLines = SplitLines(baselineText);
             string[] newLines = SplitLines(currentText);
 
             int n = oldLines.Length, m = newLines.Length;
 
-            // ── LCS DP 表 ──
-            int[,] dp = new int[n + 1, m + 1];
-            for (int i = n - 1; i >= 0; i--)
+            // ── 裁掉公共前后缀 ──
+            // LCS 的前缀/后缀性质保证：首尾相同行一定存在一个包含它们的最优解，
+            // 因此裁掉后再求解不改变结果，只缩小问题规模。
+            int prefix = 0;
+            while (prefix < n && prefix < m &&
+                   string.Equals(oldLines[prefix], newLines[prefix], StringComparison.Ordinal))
+                prefix++;
+
+            int suffix = 0;
+            while (suffix < n - prefix && suffix < m - prefix &&
+                   string.Equals(oldLines[n - 1 - suffix], newLines[m - 1 - suffix], StringComparison.Ordinal))
+                suffix++;
+
+            int midN = n - prefix - suffix;
+            int midM = m - prefix - suffix;
+            if (midN <= 0 && midM <= 0) return hunks;
+
+            var oldMid = new string[midN];
+            Array.Copy(oldLines, prefix, oldMid, 0, midN);
+            var newMid = new string[midM];
+            Array.Copy(newLines, prefix, newMid, 0, midM);
+
+            // ── 中间区 LCS：后缀式 DP（dp[i][j] = LCS(oldMid[i..], newMid[j..])）──
+            // 后缀式填表 + 正向回溯，可直接按文件顺序产出 hunk，无需收集后再翻转。
+            // back: 0=对角(相等) 1=下(删 old) 2=右(增 new)
+            var back = new byte[midN + 1, midM + 1];
+            var prev = new int[midM + 1];   // 第 midN 行（全 0，DP 边界）
+            var curr = new int[midM + 1];
+
+            for (int i = midN - 1; i >= 0; i--)
             {
-                for (int j = m - 1; j >= 0; j--)
+                curr[midM] = 0;             // newMid 已耗尽 → LCS 为 0
+                for (int j = midM - 1; j >= 0; j--)
                 {
-                    dp[i, j] = string.Equals(oldLines[i], newLines[j], StringComparison.Ordinal)
-                        ? dp[i + 1, j + 1] + 1
-                        : Math.Max(dp[i + 1, j], dp[i, j + 1]);
+                    if (string.Equals(oldMid[i], newMid[j], StringComparison.Ordinal))
+                    {
+                        curr[j] = prev[j + 1] + 1;
+                        back[i, j] = 0;
+                    }
+                    else if (prev[j] >= curr[j + 1])
+                    {
+                        curr[j] = prev[j];
+                        back[i, j] = 1;     // 平局优先"删 old"，与 unified diff 先 - 后 + 的惯例一致
+                    }
+                    else
+                    {
+                        curr[j] = curr[j + 1];
+                        back[i, j] = 2;
+                    }
                 }
+                (prev, curr) = (curr, prev);    // prev 变为第 i 行
             }
 
-            // ── 回溯：收集变化块 ──
+            // 展示与回写都沿用文件原本的换行风格
+            string lineEnding = LineEndingHelper.Detect(currentText, baselineText);
+
+            // ── 正向回溯：收集连续变化块 ──
             int oi = 0, ni = 0;
             var oldBlock = new List<string>();
             var newBlock = new List<string>();
-            int oldStart = 0, newStart = 0;
+            int oldStart = 0, newStart = 0, anchor = 0;
             bool inChange = false;
 
             void Flush()
@@ -676,43 +746,50 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Editing
                     OldLineCount = oldBlock.Count,
                     NewStartLine = newBlock.Count > 0 ? newStart : -1,
                     NewLineCount = newBlock.Count,
-                    OldText = string.Join("\r\n", oldBlock),
-                    NewText = string.Join("\r\n", newBlock),
+                    // 纯删除时 NewStartLine 为 -1，撤销要靠这个锚点把原文插回原位
+                    NewAnchorLine = anchor,
+                    OldText = string.Join(lineEnding, oldBlock),
+                    NewText = string.Join(lineEnding, newBlock),
                 });
                 oldBlock.Clear();
                 newBlock.Clear();
                 inChange = false;
             }
 
-            while (oi < n && ni < m)
+            while (oi < midN && ni < midM)
             {
-                if (string.Equals(oldLines[oi], newLines[ni], StringComparison.Ordinal))
+                if (string.Equals(oldMid[oi], newMid[ni], StringComparison.Ordinal))
                 {
                     Flush();
                     oi++; ni++;
                 }
-                else if (dp[oi + 1, ni] >= dp[oi, ni + 1])
-                {
-                    if (!inChange) { oldStart = oi; newStart = ni; inChange = true; }
-                    oldBlock.Add(oldLines[oi]);
-                    oi++;
-                }
                 else
                 {
-                    if (!inChange) { oldStart = oi; newStart = ni; inChange = true; }
-                    newBlock.Add(newLines[ni]);
-                    ni++;
+                    if (!inChange)
+                    {
+                        oldStart = prefix + oi;
+                        newStart = prefix + ni;
+                        anchor = prefix + ni;
+                        inChange = true;
+                    }
+
+                    if (back[oi, ni] == 1) { oldBlock.Add(oldMid[oi]); oi++; }   // 删 old
+                    else { newBlock.Add(newMid[ni]); ni++; }                     // 增 new
                 }
             }
 
             // 尾部残余归入最后一个块
-            if (oi < n || ni < m)
+            if (oi < midN || ni < midM)
             {
-                if (!inChange && oi < n) oldStart = oi;
-                if (!inChange && ni < m) newStart = ni;
-                inChange = true;
-                while (oi < n) { oldBlock.Add(oldLines[oi]); oi++; }
-                while (ni < m) { newBlock.Add(newLines[ni]); ni++; }
+                if (!inChange)
+                {
+                    oldStart = prefix + oi;
+                    newStart = prefix + ni;
+                    anchor = prefix + ni;
+                    inChange = true;
+                }
+                while (oi < midN) { oldBlock.Add(oldMid[oi]); oi++; }
+                while (ni < midM) { newBlock.Add(newMid[ni]); ni++; }
             }
 
             Flush();
@@ -720,13 +797,30 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Editing
             return hunks;
         }
 
-        private static string[] SplitLines(string text)
+        /// <summary>
+        /// 按行切分（三种行尾都支持，保留末尾空元素）—— 委托 <see cref="LineEndingHelper.SplitLines"/>，
+        /// 保证与编辑链路其它环节使用同一套切分语义。
+        /// </summary>
+        private static string[] SplitLines(string text) => LineEndingHelper.SplitLines(text);
+
+        /// <summary>
+        /// 比较两个 hunk 文本是否等价，忽略换行符风格差异。
+        /// 用于标记回填：OldText/NewText 的分隔符随文件风格而定，
+        /// 若期间文件行尾被改写，纯 Ordinal 比较会导致已保留/已撤销标记丢失。
+        /// </summary>
+        private static bool HunkTextEquals(string a, string b)
         {
-            if (string.IsNullOrEmpty(text)) return Array.Empty<string>();
-            // 保留每个"逻辑行"（含末尾空行对）
-            var lines = text.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
-            // 移除末尾的空字符串元素（Split 产生）
-            return lines;
+            if (string.Equals(a, b, StringComparison.Ordinal)) return true;
+
+            string[] la = SplitLines(a);
+            string[] lb = SplitLines(b);
+            if (la.Length != lb.Length) return false;
+
+            for (int i = 0; i < la.Length; i++)
+            {
+                if (!string.Equals(la[i], lb[i], StringComparison.Ordinal)) return false;
+            }
+            return true;
         }
 
         /// <summary>

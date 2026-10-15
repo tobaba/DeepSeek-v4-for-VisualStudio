@@ -20,6 +20,13 @@ namespace DeepSeek_v4_for_VisualStudio.Models
         /// <summary>块在当前文件中的行数。纯删除行为 0。</summary>
         public int NewLineCount { get; set; }
 
+        /// <summary>
+        /// 纯删除块在当前文件中的插入锚点行号（0-based）——撤销时把 Baseline 原文插回这里。
+        /// 纯删除时 <see cref="NewStartLine"/> 为 -1（当前文件已无对应行），故单独记录锚点，
+        /// 避免回滚时因 -1 被当成 0 而错插到文件开头。非纯删除块与 NewStartLine 同值。
+        /// </summary>
+        public int NewAnchorLine { get; set; } = -1;
+
         /// <summary>该块在 Baseline 中的原始文本（撤销时恢复用）。</summary>
         public string OldText { get; set; } = string.Empty;
 

@@ -135,7 +135,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services.BuiltInTools
                     + normalizedNew
                     + normalizedContent.Substring(index + normalizedOld.Length);
 
-                newContent = newContent.Replace("\n", "\r\n");
+                // 保留文件原本的换行风格（此前无条件转 CRLF，会把 LF 文件整体改写）
+                newContent = LineEndingHelper.Conform(newContent, LineEndingHelper.Detect(content));
 
                 // ── Workspace 模式：写入 Workspace，不备份不落盘 ──
                 if (Workspace != null)
@@ -209,8 +210,10 @@ namespace DeepSeek_v4_for_VisualStudio.Services.BuiltInTools
         /// </summary>
         internal async Task RestoreFileContentAsync(string filePath, string originalContent)
         {
-            string normalized = (originalContent ?? string.Empty)
-                .Replace("\r\n", "\n").Replace("\r", "\n").Replace("\n", "\r\n");
+            // 回滚到原文：沿用原文自身的换行风格（此前无条件转 CRLF）
+            string normalized = LineEndingHelper.Conform(
+                originalContent,
+                LineEndingHelper.Detect(originalContent));
 
             if (Workspace != null)
             {

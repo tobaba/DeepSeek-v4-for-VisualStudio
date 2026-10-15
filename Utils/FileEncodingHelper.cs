@@ -74,7 +74,11 @@ namespace DeepSeek_v4_for_VisualStudio.Utils
         private const int MaxProjectRootSearchDepth = 12;
 
         /// <summary>
-        /// 按「已存在文件保持原编码 → 新建文件采用项目惯例 → UTF-8 无 BOM 兜底」策略写入文本文件。
+        /// 按「已存在文件保持原编码 → 新建文件采用项目惯例 → UTF-8 无 BOM 兜底」策略写入文本文件，
+        /// 并保持目标文件原本的换行风格（新建文件用系统默认）。
+        ///
+        /// 换行与编码采用同一策略：读什么编码就写什么编码，文件原本什么换行就写什么换行。
+        /// 这样 AI 编辑 LF 文件后不会产生「整个文件都改了」的 diff。
         /// </summary>
         /// <param name="filePath">目标文件路径。</param>
         /// <param name="content">要写入的文本内容。</param>
@@ -82,7 +86,8 @@ namespace DeepSeek_v4_for_VisualStudio.Utils
         /// <exception cref="IOException">写入失败（如文件被独占锁定）时由底层 IO 抛出。</exception>
         public static void WriteAllText(string filePath, string content, string? workspaceRoot)
         {
-            File.WriteAllText(filePath, content, ResolveWriteEncoding(filePath, workspaceRoot));
+            string conformed = LineEndingHelper.ConformToFile(content, filePath);
+            File.WriteAllText(filePath, conformed, ResolveWriteEncoding(filePath, workspaceRoot));
         }
 
         #region 读取

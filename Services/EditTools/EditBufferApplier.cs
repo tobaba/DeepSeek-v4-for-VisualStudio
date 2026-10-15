@@ -127,6 +127,14 @@ namespace DeepSeek_v4_for_VisualStudio.Services.EditTools
                     || textDoc == null)
                     return false;
 
+                // ── 换行风格收口 ──
+                // 已打开的文档以 buffer 自身为准（buffer 是权威内容），使写入内容沿用文档
+                // 原本的行尾，避免 AI 编辑把 LF 文档写成 CRLF。
+                // 这里直接采样 buffer 各行的行尾，避免在 UI 线程上读盘。
+                fullContent = LineEndingHelper.Conform(
+                    fullContent,
+                    DetectBufferLineEnding(textBuffer.CurrentSnapshot));
+
                 // 不做写入前的二次 Save。调用方已通过 TryGetOpenDocumentContent
                 // 保留 dirty buffer 作为撤销 Baseline；这里只写最终内容并保存一次。
                 ITextUndoTransaction? transaction = null;
@@ -188,6 +196,35 @@ namespace DeepSeek_v4_for_VisualStudio.Services.EditTools
             {
                 Logger.Warn($"[BufferWriter] 读取已打开文档失败: {Path.GetFileName(filePath)} — {ex.Message}");
                 return null;
+            }
+        }
+
+        /// <summary>
+        /// 采样 buffer 各行的行尾，返回出现最多的风格。
+        /// 直接读每行的行尾（不物化全文），避免在 UI 线程上做大字符串分配；
+        /// buffer 无换行时回退 <see cref="LineEndingHelper.Default"/>（系统环境）。
+        /// </summary>
+        private static string DetectBufferLineEnding(ITextSnapshot snapshot)
+        {
+            try
+            {
+                // 只采样前若干行：行尾风格在文件内通常一致，无需遍历全文
+                var breaks = new List<string>();
+                int sample = Math.Min(snapshot.LineCount, 200);
+                for (int i = 0; i < sample; i++)
+                {
+                    string lineBreak = snapshot.GetLineFromLineNumber(i).GetLineBreakText();
+                    if (lineBreak.Length > 0)
+                        breaks.Add(lineBreak);
+                }
+
+                return LineEndingHelper.TryDetect(string.Concat(breaks), out string ending)
+                    ? ending
+                    : LineEndingHelper.Default;
+            }
+            catch
+            {
+                return LineEndingHelper.Default;
             }
         }
 

@@ -523,17 +523,18 @@ namespace DeepSeek_v4_for_VisualStudio.Services.EditTools
         /// </summary>
         public static string NormalizeLineEndings(string text)
         {
-            if (string.IsNullOrEmpty(text)) return text;
-            return text.Replace("\r\n", "\n").Replace("\r", "\n");
+            return LineEndingHelper.Normalize(text);
         }
 
         /// <summary>
         /// 将文本中的所有行尾标准化为 Windows CRLF（\r\n）。
+        ///
+        /// 注意：这是「无条件转 CRLF」，仅适用于确实需要 CRLF 口径的场合（如两侧比较的归一化）。
+        /// 写盘前应改用 <see cref="LineEndingHelper.ConformToFile"/>，以保留目标文件原本的换行风格。
         /// </summary>
         public static string NormalizeToCrLf(string text)
         {
-            if (string.IsNullOrEmpty(text)) return text;
-            return NormalizeLineEndings(text).Replace("\n", "\r\n");
+            return LineEndingHelper.Conform(text, LineEndingHelper.CrLf);
         }
 
         /// <summary>
