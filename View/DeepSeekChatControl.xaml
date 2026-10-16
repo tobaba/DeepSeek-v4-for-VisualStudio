@@ -932,7 +932,8 @@
                                             Padding="2,0"
                                             Margin="4,0,0,0"
                                             Click="RemoveAttachedFile_Click"
-                                            Tag="{Binding FileName}" />
+                                            Tag="{Binding FilePath}"
+                                            ToolTip="{Binding FilePath}" />
                                 </StackPanel>
                             </Border>
                         </DataTemplate>

@@ -393,20 +393,55 @@ namespace DeepSeek_v4_for_VisualStudio.View
         }
 
         /// <summary>
-        /// 移除单个已上传文件。
+        /// 移除单个已附加的文件。
+        /// <para>
+        /// 按**完整路径**而非文件名移除：不同目录下可能存在同名文件
+        /// （如两个项目的 `Program.cs`），按文件名查找会删错条目。
+        /// 绑定见 XAML 中移除按钮的 <c>Tag="{Binding FilePath}"</c>。
+        /// </para>
         /// </summary>
         private void RemoveAttachedFile_Click(object sender, RoutedEventArgs e)
         {
-            if (sender is Button btn && btn.Tag is string fileName)
+            if (sender is not Button btn || btn.Tag is not string filePath || string.IsNullOrEmpty(filePath))
+                return;
+
+            // 路径比较与 AttachmentCollector 保持一致：归一化 + 忽略大小写
+            int index = _attachedFilePaths.FindIndex(
+                p => PathsEqual(p, filePath));
+
+            if (index >= 0)
             {
-                // 根据文件名找到对应路径并移除
-                var pathToRemove = _attachedFilePaths.FirstOrDefault(
-                    p => string.Equals(System.IO.Path.GetFileName(p), fileName, StringComparison.OrdinalIgnoreCase));
-                if (pathToRemove != null)
-                {
-                    _attachedFilePaths.Remove(pathToRemove);
-                    RefreshAttachedFilesUI();
-                }
+                _attachedFilePaths.RemoveAt(index);
+                RefreshAttachedFilesUI();
+                Logger.Info($"[Attachment] 已移除附件: {filePath}");
+            }
+            else
+            {
+                // 列表已被其他操作更新（如发送后清空）时属正常路径，记录调试信息即可
+                Logger.Debug($"[Attachment] 未找到待移除的附件（列表可能已刷新）: {filePath}");
+            }
+        }
+
+        /// <summary>
+        /// 判断两个附件路径是否指向同一文件。
+        /// 归一化为全路径后按 OrdinalIgnoreCase 比较，与
+        /// <see cref="AttachmentCollector"/> 的判重口径一致；
+        /// 归一化失败时退回原始字符串比较，避免整次操作失败。
+        /// <para>可见性放宽到 internal 以便单元测试覆盖（见 AttachedFilePathComparisonTests）。</para>
+        /// </summary>
+        internal static bool PathsEqual(string? a, string? b)
+        {
+            if (a == null || b == null) return false;
+            if (string.Equals(a, b, StringComparison.OrdinalIgnoreCase)) return true;
+
+            try
+            {
+                return string.Equals(
+                    Path.GetFullPath(a), Path.GetFullPath(b), StringComparison.OrdinalIgnoreCase);
+            }
+            catch (Exception)
+            {
+                return false;
             }
         }
 
