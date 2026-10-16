@@ -406,7 +406,39 @@
                         AllowDrop="True"
                         PreviewDragEnter="ChatWebViewHost_PreviewDragEnter"
                         PreviewDragOver="ChatWebViewHost_PreviewDragOver"
+                        PreviewDragLeave="ChatWebViewHost_PreviewDragLeave"
                         PreviewDrop="ChatWebViewHost_PreviewDrop" />
+
+        <!-- ═══ 拖入文件时的视觉反馈 (issue #101) ═══ -->
+        <!-- 视觉托管的 WebView2 参与 WPF z-order，故本覆盖层可正常显示在聊天内容之上。
+             IsHitTestVisible=False 是关键：否则拖拽时本层会成为命中的元素，
+             而它自身未声明 AllowDrop，会导致 ChatWebViewHost 收不到 Drop 事件。
+             默认 Collapsed，由 DragEnter/DragLeave/Drop 驱动显隐（见 Events.cs）。 -->
+        <Border Grid.Row="1"
+                x:Name="ChatDropOverlay"
+                Visibility="Collapsed"
+                IsHitTestVisible="False"
+                Focusable="False"
+                Margin="2"
+                CornerRadius="4"
+                Background="#D9102A44"
+                BorderBrush="#4FC1FF"
+                BorderThickness="2">
+            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                <TextBlock x:Name="ChatDropOverlayTitle"
+                           FontSize="15"
+                           FontWeight="SemiBold"
+                           Foreground="#E6F2FF"
+                           HorizontalAlignment="Center"
+                           TextAlignment="Center" />
+                <TextBlock x:Name="ChatDropOverlayHint"
+                           FontSize="11"
+                           Margin="0,6,0,0"
+                           Foreground="#9FC7E8"
+                           HorizontalAlignment="Center"
+                           TextAlignment="Center" />
+            </StackPanel>
+        </Border>
 
         <!-- ═══ Diff 预览全局控制栏 ═══ -->
         <Border Grid.Row="2"

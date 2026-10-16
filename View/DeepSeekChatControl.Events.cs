@@ -236,7 +236,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
         }
 
         /// <summary>
-        /// 拖放文件到聊天显示区 —— 拖入阶段：仅在确有文件拖入时声明接受。
+        /// 拖放文件到聊天显示区 —— 拖入阶段：仅在确有文件拖入时声明接受并显示提示层。
         /// <para>
         /// 背景：聊天区使用视觉托管的 WebView2CompositionControl，
         /// Chromium 的 HTML5 拖放事件（dragenter/dragover/drop）在其下不会触发
@@ -247,9 +247,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
         /// </summary>
         private void ChatWebViewHost_PreviewDragEnter(object sender, DragEventArgs e)
         {
-            e.Effects = e.Data.GetDataPresent(DataFormats.FileDrop)
-                ? DragDropEffects.Copy
-                : DragDropEffects.None;
+            bool hasFiles = e.Data.GetDataPresent(DataFormats.FileDrop);
+            e.Effects = hasFiles ? DragDropEffects.Copy : DragDropEffects.None;
+            SetDropOverlayVisible(hasFiles);
             e.Handled = true;
         }
 
@@ -258,7 +258,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
         /// </summary>
         /// <remarks>
         /// 此处理器在单次拖拽中会触发数十次（随鼠标移动连续触发），
-        /// 因此禁止在其中记录日志或重建 UI，避免刷屏与性能问题。
+        /// 因此禁止记录日志或重建 UI —— 只做廉价的赋值与 Visibility 判断。
         /// </remarks>
         private void ChatWebViewHost_PreviewDragOver(object sender, DragEventArgs e)
         {
@@ -269,11 +269,21 @@ namespace DeepSeek_v4_for_VisualStudio.View
         }
 
         /// <summary>
+        /// 拖放文件到聊天显示区 —— 离开阶段：隐藏提示层。
+        /// </summary>
+        private void ChatWebViewHost_PreviewDragLeave(object sender, DragEventArgs e)
+        {
+            SetDropOverlayVisible(false);
+            e.Handled = true;
+        }
+
+        /// <summary>
         /// 拖放文件到聊天显示区 —— 落下阶段：把文件加入附件列表并统一提示结果。
         /// </summary>
         private void ChatWebViewHost_PreviewDrop(object sender, DragEventArgs e)
         {
             e.Handled = true;
+            SetDropOverlayVisible(false);
             try
             {
                 if (!e.Data.GetDataPresent(DataFormats.FileDrop)
@@ -299,6 +309,21 @@ namespace DeepSeek_v4_for_VisualStudio.View
             {
                 Logger.Error($"[DropFiles] 处理拖入文件失败: {ex.Message}", ex);
             }
+        }
+
+        /// <summary>
+        /// 显示/隐藏拖入提示层。文案仅在首次显示时填充，避免在 DragEnter 中重复取本地化字符串。
+        /// </summary>
+        private void SetDropOverlayVisible(bool visible)
+        {
+            if (visible && ChatDropOverlayTitle.Text.Length == 0)
+            {
+                var L = LocalizationService.Instance;
+                ChatDropOverlayTitle.Text = L["status.dropOverlayTitle"];
+                ChatDropOverlayHint.Text = L["status.dropOverlayHint"];
+            }
+
+            ChatDropOverlay.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
         }
 
         /// <summary>

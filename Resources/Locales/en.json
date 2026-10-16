@@ -738,6 +738,8 @@
     "status.dropFilesSkippedSuffix": " (skipped {0})",
     "status.dropDirectoryUnsupported": "Dropping folders is not supported yet: {0}",
     "status.dropFileNotFound": "File not found: {0}",
+    "status.dropOverlayTitle": "Release to add as context",
+    "status.dropOverlayHint": "Code, text, Word, Excel, PDF and images are supported",
     "status.agentSwitched": "Switched to {0} Agent...",
  "status.agentError": "Error: Agent error: {0}",
     "status.agentStepProgress": "Agent: step {0}/{1}",
