@@ -504,7 +504,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
                 // ── 2. 宿主与控件一并失效，并请求一次布局重算 ──
                 // 宿主 ContentControl 有自己的裁剪区域；只让控件失效时，
-                // 宿主的陈旧内容有时会继续遮挡（issue #31 同源的合成问题）。
+                // 宿主的陈旧内容有时会继续遮挡（与 issue #31 同源的 WPF 合成层 z-order 问题）。
                 ChatWebViewHost.InvalidateVisual();
                 webView.InvalidateMeasure();
                 webView.InvalidateArrange();

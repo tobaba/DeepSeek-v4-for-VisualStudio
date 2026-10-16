@@ -214,7 +214,7 @@
         </Style>
     </UserControl.Resources>
 
-    <Grid Margin="0" ClipToBounds="True">
+    <Grid Margin="0">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
@@ -372,13 +372,17 @@
         </Popup>
 
         <!-- ═══ WebView2 聊天显示区 (Chromium) ═══ -->
-        <!-- WebView2CompositionControl (visual/composition hosting, no child HWND) is created
-             programmatically in InitializeChatWebView() to avoid XamlParseException caused
-             by assembly version conflicts with ReSharper. See GitHub issue #18. -->
-        <!-- 视觉托管控件把渲染合成进 WPF 视觉树、参与正常 z-order：
-             修复 GitHub issue #31（窗口式 WebView2 的子 HWND 空域问题——
-             聊天内容始终覆盖 VS 自动隐藏弹窗等其他 VS 面板）。
-             ClipToBounds 保留，用于正确的区域裁剪。
+        <!-- 承载视觉托管（Composition）的 WebView2CompositionControl，由
+             InitializeChatWebView() 程序化创建：
+             - 程序化创建：XAML 中的 wv2 命名空间声明会在 BAML 加载时强制 CLR 解析该类型，
+               与 ReSharper 等第三方扩展预加载的其他版本冲突会导致 XamlParseException
+               (GitHub issue #18)。
+             - 视觉托管（而非窗口式）：窗口式 WebView2 经 HwndHost 承载 Chromium 子 HWND，
+               受 Win32「空域(airspace)」限制，子 HWND 恒定绘制在同一顶层窗口内所有 WPF 内容
+               之上，不受 WPF z-order 约束。于是聊天面板 pinned、或 VS 自动隐藏弹窗
+               （如「Git 更改」）滑出时，聊天内容会覆盖其他 VS 面板 (GitHub issue #31)。
+               视觉托管控件不创建子 HWND，画面直接合成进 WPF 视觉树，参与 VS Shell 的
+               正常 z-order，其他面板可正确覆盖聊天窗口。
 
              MinWidth/MinHeight=1 是本项目的关键规避措施，不要删除：
              WebView2CompositionControl 在 SizeChanged 中调用 GraphicsItemD3DImage.UpdateSize，
@@ -392,8 +396,7 @@
                         x:Name="ChatWebViewHost"
                         Margin="0"
                         MinWidth="1"
-                        MinHeight="1"
-                        ClipToBounds="True" />
+                        MinHeight="1" />
 
         <!-- ═══ Diff 预览全局控制栏 ═══ -->
         <Border Grid.Row="2"
