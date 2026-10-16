@@ -1,4 +1,4 @@
-﻿using DeepSeek_v4_for_VisualStudio.Models;
+using DeepSeek_v4_for_VisualStudio.Models;
 using DeepSeek_v4_for_VisualStudio.Services;
 using DeepSeek_v4_for_VisualStudio.Services.Agents;
 using DeepSeek_v4_for_VisualStudio.Settings;
@@ -1044,7 +1044,11 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 _activeSession = _sessionsContainer.Sessions
                     .FirstOrDefault(s => s.Id == _sessionsContainer.ActiveSessionId);
             }
-            _activeSession ??= _sessionsContainer.Sessions.FirstOrDefault();
+
+            // ActiveSessionId 缺失或指向已删除的会话时，回退到「最近活跃」的会话。
+            // 不能取列表首元素：Sessions 按创建顺序追加（最旧在前），
+            // 而历史浮层按 LastActiveAt 降序展示，取首元素会恢复到最旧的会话。
+            _activeSession ??= SelectFallbackSession(_sessionsContainer.Sessions);
 
             // 如果没有会话，创建默认会话
             if (_activeSession == null)

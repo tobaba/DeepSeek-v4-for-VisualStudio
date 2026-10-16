@@ -830,7 +830,7 @@ namespace DeepSeek_v4_for_VisualStudio.Models
 
     /// <summary>
     /// 表示一次对话会话，包含多条消息和元数据。
-    /// 会话标题默认为"新对话"，在用户发送第一条消息时自动更新。
+    /// 标题初始为空，由第一条消息自动生成。
     /// </summary>
     [DataContract]
     public class ChatSession
@@ -838,8 +838,22 @@ namespace DeepSeek_v4_for_VisualStudio.Models
         [DataMember]
         public string Id { get; set; } = Guid.NewGuid().ToString("N");
 
+        /// <summary>
+        /// 会话标题。初始为空字符串，表示尚未生成标题；
+        /// 展示时由调用方回退为本地化的「新对话」文案，从而与语言切换解耦。
+        /// <para>
+        /// 历史缺陷：该属性曾初始化为**当前语言的**「新对话」文案，并被后续逻辑
+        /// 拿来做「标题是否尚未生成」的判等。用户切换语言后判等必然失败，
+        /// 导致首条消息后不再自动生成标题、空会话也不再被清理。
+        /// 修复方式即「标题不存本地化文案」，因此不需要额外的标志位来表达「未命名」。
+        /// </para>
+        /// </summary>
         [DataMember]
-        public string Title { get; set; } = "新对话";
+        public string Title { get; set; } = string.Empty;
+
+        /// <summary>标题是否尚未生成（空或仅空白）。与界面语言无关。</summary>
+        [JsonIgnore]
+        public bool HasEmptyTitle => string.IsNullOrWhiteSpace(Title);
 
         /// <summary>
         /// API 级别的完整对话历史（含 tool 消息、reasoning_content 等）。

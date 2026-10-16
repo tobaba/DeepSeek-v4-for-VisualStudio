@@ -15,6 +15,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
     {
         private readonly Action? _onAccept;
         private readonly Action? _onUndo;
+        private readonly string? _titleSuffix;
         private bool _isClosing;
 
         public DiffViewerWindow(
@@ -28,12 +29,37 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
             _onAccept = onAccept;
             _onUndo = onUndo;
+            _titleSuffix = title;
 
-            if (!string.IsNullOrEmpty(title))
-                Title = $"{LocalizationService.Instance["diff.windowTitle"]} — {title}";
+            // 标题始终本地化：此前仅在传入 title 时设置，
+            // 否则会保留 XAML 中硬编码的默认标题，切换语言也不会更新。
+            ApplyLocalizedTitle();
+            LocalizationService.Instance.LanguageChanged += OnLanguageChanged;
 
             DiffHost.OnAccept = () => { try { _onAccept?.Invoke(); } catch { } CloseWindow(); };
             DiffHost.OnUndo = () => { try { _onUndo?.Invoke(); } catch { } CloseWindow(); };
+        }
+
+        /// <summary>按当前语言重建窗口标题（保留可选的会话标题后缀）。</summary>
+        private void ApplyLocalizedTitle()
+        {
+            string baseTitle = LocalizationService.Instance["diff.windowTitle"];
+            Title = string.IsNullOrEmpty(_titleSuffix)
+                ? baseTitle
+                : $"{baseTitle} — {_titleSuffix}";
+        }
+
+        /// <summary>语言变更：刷新窗口标题。契约要求不阻塞。</summary>
+        private void OnLanguageChanged(object? sender, EventArgs e)
+        {
+            try
+            {
+                ApplyLocalizedTitle();
+            }
+            catch
+            {
+                // 窗口已释放等收尾路径，忽略
+            }
         }
 
         /// <summary>注入预创建的只读 DiffViewerHandle。</summary>
@@ -79,6 +105,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
         {
             if (_isClosing) return;
             _isClosing = true;
+            // 退订进程级单例事件，避免已释放窗口被长期引用
+            LocalizationService.Instance.LanguageChanged -= OnLanguageChanged;
         }
 
         private void CloseWindow()

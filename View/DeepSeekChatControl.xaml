@@ -214,7 +214,7 @@
         </Style>
     </UserControl.Resources>
 
-    <Grid Margin="0" ClipToBounds="True">
+    <Grid Margin="0">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
@@ -372,13 +372,17 @@
         </Popup>
 
         <!-- ═══ WebView2 聊天显示区 (Chromium) ═══ -->
-        <!-- WebView2CompositionControl (visual/composition hosting, no child HWND) is created
-             programmatically in InitializeChatWebView() to avoid XamlParseException caused
-             by assembly version conflicts with ReSharper. See GitHub issue #18. -->
-        <!-- 视觉托管控件把渲染合成进 WPF 视觉树、参与正常 z-order：
-             修复 GitHub issue #31（窗口式 WebView2 的子 HWND 空域问题——
-             聊天内容始终覆盖 VS 自动隐藏弹窗等其他 VS 面板）。
-             ClipToBounds 保留，用于正确的区域裁剪。
+        <!-- 承载视觉托管（Composition）的 WebView2CompositionControl，由
+             InitializeChatWebView() 程序化创建：
+             - 程序化创建：XAML 中的 wv2 命名空间声明会在 BAML 加载时强制 CLR 解析该类型，
+               与 ReSharper 等第三方扩展预加载的其他版本冲突会导致 XamlParseException
+               (GitHub issue #18)。
+             - 视觉托管（而非窗口式）：窗口式 WebView2 经 HwndHost 承载 Chromium 子 HWND，
+               受 Win32「空域(airspace)」限制，子 HWND 恒定绘制在同一顶层窗口内所有 WPF 内容
+               之上，不受 WPF z-order 约束。于是聊天面板 pinned、或 VS 自动隐藏弹窗
+               （如「Git 更改」）滑出时，聊天内容会覆盖其他 VS 面板 (GitHub issue #31)。
+               视觉托管控件不创建子 HWND，画面直接合成进 WPF 视觉树，参与 VS Shell 的
+               正常 z-order，其他面板可正确覆盖聊天窗口。
 
              MinWidth/MinHeight=1 是本项目的关键规避措施，不要删除：
              WebView2CompositionControl 在 SizeChanged 中调用 GraphicsItemD3DImage.UpdateSize，
@@ -387,13 +391,54 @@
              VS 会把本行高度压到 0，正好触发——且异常是在 WPF 渲染回调
              (MediaContext.RenderMessageHandler) 中抛出的，不在任何 try/catch 范围内，
              因此表现为「未经处理的异常」崩溃，无法通过托管代码捕获。
-             给宿主保留 1 像素下限可避免把 0 传给库（上游 issue #5485）。 -->
+             给宿主保留 1 像素下限可避免把 0 传给库（上游 issue #5485）。
+
+             AllowDrop + PreviewDrag* 用于接管「拖拽文件到聊天区即为添加上下文」(issue #101)：
+             因上述合成控件下 Chromium 的 HTML5 拖放事件不会触发（上游 issue #5676），
+             拖放必须在 WPF 层接收；参照 SVsMainWindowDropTarget 文档，自行注册拖放的窗口
+             不会继承 VS 主窗口「拖入即用编辑器打开文件」的默认行为。
+             处理器见 DeepSeekChatControl.Events.cs。 -->
         <ContentControl Grid.Row="1"
                         x:Name="ChatWebViewHost"
                         Margin="0"
                         MinWidth="1"
                         MinHeight="1"
-                        ClipToBounds="True" />
+                        AllowDrop="True"
+                        PreviewDragEnter="ChatWebViewHost_PreviewDragEnter"
+                        PreviewDragOver="ChatWebViewHost_PreviewDragOver"
+                        PreviewDragLeave="ChatWebViewHost_PreviewDragLeave"
+                        PreviewDrop="ChatWebViewHost_PreviewDrop" />
+
+        <!-- ═══ 拖入文件时的视觉反馈 (issue #101) ═══ -->
+        <!-- 视觉托管的 WebView2 参与 WPF z-order，故本覆盖层可正常显示在聊天内容之上。
+             IsHitTestVisible=False 是关键：否则拖拽时本层会成为命中的元素，
+             而它自身未声明 AllowDrop，会导致 ChatWebViewHost 收不到 Drop 事件。
+             默认 Collapsed，由 DragEnter/DragLeave/Drop 驱动显隐（见 Events.cs）。 -->
+        <Border Grid.Row="1"
+                x:Name="ChatDropOverlay"
+                Visibility="Collapsed"
+                IsHitTestVisible="False"
+                Focusable="False"
+                Margin="2"
+                CornerRadius="4"
+                Background="#D9102A44"
+                BorderBrush="#4FC1FF"
+                BorderThickness="2">
+            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                <TextBlock x:Name="ChatDropOverlayTitle"
+                           FontSize="15"
+                           FontWeight="SemiBold"
+                           Foreground="#E6F2FF"
+                           HorizontalAlignment="Center"
+                           TextAlignment="Center" />
+                <TextBlock x:Name="ChatDropOverlayHint"
+                           FontSize="11"
+                           Margin="0,6,0,0"
+                           Foreground="#9FC7E8"
+                           HorizontalAlignment="Center"
+                           TextAlignment="Center" />
+            </StackPanel>
+        </Border>
 
         <!-- ═══ Diff 预览全局控制栏 ═══ -->
         <Border Grid.Row="2"
@@ -887,7 +932,8 @@
                                             Padding="2,0"
                                             Margin="4,0,0,0"
                                             Click="RemoveAttachedFile_Click"
-                                            Tag="{Binding FileName}" />
+                                            Tag="{Binding FilePath}"
+                                            ToolTip="{Binding FilePath}" />
                                 </StackPanel>
                             </Border>
                         </DataTemplate>

@@ -40,7 +40,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
             return new ChatSession
             {
                 Id = Guid.NewGuid().ToString("N"),
-                Title = LocalizationService.Instance["session.new"],
+                // 标题留空：展示层回退为本地化的「新对话」文案，
+                // 从而与语言切换解耦（不再把语言写进会话数据）。
+                Title = string.Empty,
                 CreatedAt = DateTime.Now,
                 LastActiveAt = DateTime.Now,
             };
@@ -139,7 +141,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
         private void AutoTitleSession()
         {
             if (_activeSession == null) return;
-            if (_activeSession.Title != LocalizationService.Instance["session.new"]) return;
+            // 判据为「标题尚未生成」而非「标题等于当前语言的『新对话』」：
+            // 后者在语言切换后会失效（旧缺陷：中文下建的会话切到英文后不再自动生成标题）。
+            if (!_activeSession.HasEmptyTitle) return;
 
             var firstUserMsg = _messages.FirstOrDefault(m => m.Role == "user");
             if (firstUserMsg == null || string.IsNullOrWhiteSpace(firstUserMsg.Content))
@@ -163,7 +167,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
             {
                 if (_activeAgent == null) return;
                 if (_activeSession == null) return;
-                if (_activeSession.Title != LocalizationService.Instance["session.new"]) return;
+                if (!_activeSession.HasEmptyTitle) return;
 
                 string userSnippet = firstUserMessage;
                 string assistantSnippet = firstAssistantReply;
@@ -207,7 +211,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     return;
                 }
 
-                if (_activeSession.Title != LocalizationService.Instance["session.new"])
+                // 期间标题已被生成（或用户改写）→ 不覆盖
+                if (!_activeSession.HasEmptyTitle)
                 {
                     Logger.Info($"[AI标题] 标题已被更新为 '{_activeSession.Title}'，跳过覆盖");
                     return;
@@ -238,7 +243,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
         private void FallbackAutoTitle(string firstUserMessage)
         {
             if (_activeSession == null) return;
-            if (_activeSession.Title != LocalizationService.Instance["session.new"]) return;
+            if (!_activeSession.HasEmptyTitle) return;
 
             string title = firstUserMessage.Trim();
             int newlineIdx = title.IndexOf('\n');
@@ -474,14 +479,32 @@ namespace DeepSeek_v4_for_VisualStudio.View
             public string DeleteVisibility => IsCurrent ? "Collapsed" : "Visible";
         }
 
+        /// <summary>
+        /// 会话列表的相对时间文案。必须走本地化 —— 此前硬编码中文，
+        /// 导致英文界面下仍显示「N 天前」。
+        /// </summary>
         private static string FormatRelativeTime(DateTime t)
         {
+            var L = LocalizationService.Instance;
             var span = DateTime.Now - t;
-            if (span.TotalMinutes < 1) return "刚刚";
-            if (span.TotalMinutes < 60) return $"{(int)span.TotalMinutes} 分钟前";
-            if (span.TotalHours < 24) return $"{(int)span.TotalHours} 小时前";
-            if (span.TotalDays < 30) return $"{(int)span.TotalDays} 天前";
+            if (span.TotalMinutes < 1) return L["session.relative.justNow"];
+            if (span.TotalMinutes < 60) return L.Format("session.relative.minutesAgo", (int)span.TotalMinutes);
+            if (span.TotalHours < 24) return L.Format("session.relative.hoursAgo", (int)span.TotalHours);
+            if (span.TotalDays < 30) return L.Format("session.relative.daysAgo", (int)span.TotalDays);
+            // 超过 30 天直接显示日期：yyyy-MM-dd 与语言无关
             return t.ToString("yyyy-MM-dd");
+        }
+
+        /// <summary>
+        /// 会话标题的展示文案：标题为空（尚未生成）时回退为本地化的「新对话」。
+        /// 标题本身不存储本地化文案，因此在语言切换后此处会自然显示当前语言。
+        /// </summary>
+        private static string GetSessionDisplayTitle(ChatSession? session)
+        {
+            if (session == null) return string.Empty;
+            return session.HasEmptyTitle
+                ? LocalizationService.Instance["session.new"]
+                : session.Title;
         }
 
         /// <summary>刷新历史浮层列表与当前会话标题。</summary>
@@ -490,7 +513,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
             try
             {
                 if (CurrentSessionTitle != null)
-                    CurrentSessionTitle.Text = _activeSession?.Title ?? string.Empty;
+                    CurrentSessionTitle.Text = GetSessionDisplayTitle(_activeSession);
 
                 if (HistoryListBox == null || _sessionsContainer == null) return;
 
@@ -500,7 +523,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     .Select(s => new HistoryItemViewModel
                     {
                         Id = s.Id,
-                        Title = string.IsNullOrWhiteSpace(s.Title) ? "(未命名对话)" : s.Title,
+                        Title = GetSessionDisplayTitle(s),
                         LastActiveText = FormatRelativeTime(s.LastActiveAt),
                         IsCurrent = _activeSession != null && s.Id == _activeSession.Id,
                     })
@@ -677,6 +700,27 @@ namespace DeepSeek_v4_for_VisualStudio.View
         }
 
         /// <summary>
+        /// 在删除当前会话后挑选接替的会话：取「最近活跃」的一个。
+        /// <para>
+        /// 必须与历史浮层的展示顺序一致（见 <see cref="RefreshHistoryUI"/>：
+        /// 按 <c>LastActiveAt</c> 降序）。<c>Sessions</c> 本身按创建顺序追加（最旧在前），
+        /// 直接取首元素会跳到最旧的会话，与用户看到的顺序相反。
+        /// </para>
+        /// <para><c>CreatedAt</c> 作为次序稳定的兜底，避免活跃时间相同时结果不定。</para>
+        /// <para>可见性放宽到 internal 以便单元测试覆盖。</para>
+        /// </summary>
+        internal static ChatSession? SelectFallbackSession(IEnumerable<ChatSession>? sessions)
+        {
+            if (sessions == null) return null;
+
+            return sessions
+                .Where(s => s != null)
+                .OrderByDescending(s => s.LastActiveAt)
+                .ThenByDescending(s => s.CreatedAt)
+                .FirstOrDefault();
+        }
+
+        /// <summary>
         /// 删除当前会话。
         /// </summary>
         private void DeleteCurrentSession()
@@ -709,8 +753,11 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 _sessionsContainer.Sessions.Remove(_activeSession);
                 TryDeleteSessionMemory(deletedSessionId);
 
-                // 切换到第一个会话
-                _activeSession = _sessionsContainer.Sessions.FirstOrDefault();
+                // 切换到「最近活跃」的会话，而非列表中的第一个。
+                // _sessionsContainer.Sessions 是按创建顺序追加的（最旧在前），
+                // 而历史浮层按 LastActiveAt 降序展示 —— 若此处取 FirstOrDefault()，
+                // 删除当前会话后会跳到**最旧**的会话，与用户在列表中看到的顺序相反。
+                _activeSession = SelectFallbackSession(_sessionsContainer.Sessions);
                 _sessionsContainer.ActiveSessionId = _activeSession?.Id;
 
                 ResetActiveAgentToAsk();
@@ -842,7 +889,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 {
                     _activeSession.ApiHistory.Clear();
                     _activeSession.TreeDataJson = null;
-                    _activeSession.Title = LocalizationService.Instance["session.new"];
+                    // 重置为空标题，展示层回退为本地化文案
+                    _activeSession.Title = string.Empty;
                 }
 
                 var welcomeMsg = new ChatMessage

@@ -1,4 +1,4 @@
-﻿using DeepSeek_v4_for_VisualStudio.Models;
+using DeepSeek_v4_for_VisualStudio.Models;
 using DeepSeek_v4_for_VisualStudio.Services;
 using DeepSeek_v4_for_VisualStudio.Services.EditTools;
 using DeepSeek_v4_for_VisualStudio.Utils;
@@ -83,9 +83,10 @@ namespace DeepSeek_v4_for_VisualStudio.Services.BuiltInTools
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                     Directory.CreateDirectory(dir);
 
-                string normalizedContent = (content ?? string.Empty)
-                    .Replace("\r\n", "\n").Replace("\r", "\n")
-                    .Replace("\n", "\r\n");
+                // 覆盖已有文件时沿用其原本的换行风格；新建文件探测不到 → 系统默认（Environment.NewLine）
+                string normalizedContent = LineEndingHelper.Conform(
+                    content ?? string.Empty,
+                    LineEndingHelper.ResolveForFile(filePath));
 
                 if (!string.IsNullOrEmpty(normalizedContent)
                     && !Utils.CodeContentValidator.IsProbablySourceCode(filePath, normalizedContent))

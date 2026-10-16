@@ -98,6 +98,29 @@ namespace DeepSeek_v4_for_VisualStudio.View
             }
 
             Unloaded += (_, __) => DetachZoomSource();
+
+            // 语言变更后刷新本控件的本地化文案：工具栏标签、diff 统计与逐块按钮。
+            // 逐块按钮在 LayoutHunkButtons 中重建（会 RemoveAllAdornments），
+            // 因此重新布局即可让按钮文案跟随语言；面板打开期间也能即时更新。
+            LocalizationService.Instance.LanguageChanged += OnLanguageChanged;
+            Unloaded += (_, __) => LocalizationService.Instance.LanguageChanged -= OnLanguageChanged;
+        }
+
+        /// <summary>
+        /// 语言变更：重新本地化统计文本与逐块按钮。
+        /// 契约要求不阻塞；此处仅做轻量赋值与一次布局重算。
+        /// </summary>
+        private void OnLanguageChanged(object? sender, EventArgs e)
+        {
+            try
+            {
+                UpdateStats();
+                QueueLayoutHunkButtons();
+            }
+            catch (Exception ex)
+            {
+                Logger.Debug($"[DiffHost] 语言变更刷新失败: {ex.Message}");
+            }
         }
 
         private static bool TryLoadEmbeddedBaml(Assembly assembly, InlineDiffHostControl control)
@@ -511,7 +534,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     }
                 }
 
-                StatsLabel.Text = $"+{addedCount} 行新增  -{removedCount} 行删除";
+                StatsLabel.Text = LocalizationService.Instance.Format(
+                    "status.diffStats", addedCount, removedCount);
             }
             catch
             {
