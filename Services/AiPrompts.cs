@@ -246,6 +246,12 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// <summary>项目外路径拒绝警告。{0}=targetPath, {1}=workspaceRoot</summary>
         public static string OutOfWorkspaceWarning => L["system.aiPrompt.outOfWorkspaceWarning"];
 
+        /// <summary>
+        /// 会话标题生成 — 提示词模板（{0}=用户消息，{1}=助手回复）。
+        /// 标签文案随语言包翻译；分段换行由 <see cref="EnsureBreakAfterPlaceholders"/> 保证。
+        /// </summary>
+        public static string SessionTitlePromptTemplate => L["session.generateTitlePrompt"];
+
         #endregion
 
         #region Plan Agent Prompts
@@ -416,6 +422,47 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         {
             // 使用 Replace 代替 string.Format 以避免模板中的 JSON 大括号被误解析为格式项
             return AgentRoutingUserPrompt.Replace("{0}", userMessage);
+        }
+
+        /// <summary>
+        /// 构建会话标题生成提示词（用户消息部分）。
+        /// <para>
+        /// 历史缺陷：模板把「引导语 / 用户：/ 助手：/ 标题：」四段之间的换行全部写成
+        /// JSON 转义（<c>\n\n</c>）。资源文件一旦缺了这个转义，渲染结果就退化成一段：
+        /// <c>用户：&lt;问题&gt;助手：&lt;回复&gt;</c>——两个标签与各自内容互相粘连，
+        /// 模型无法分辨「问题何时结束、回复何时开始」，直接损害标题质量。
+        /// </para>
+        /// <para>
+        /// 修复方式：文案（含标签）仍留在语言包里以便翻译，但**分隔换行由本方法保证**——
+        /// 每个占位符之后如果没有换行，就补一个空行。已有换行时保持原样（幂等），
+        /// 因此资源文件无论怎么写都不会再退化成粘连。
+        /// </para>
+        /// </summary>
+        /// <param name="userMessage">第一条用户消息（截断由调用方决定）。</param>
+        /// <param name="assistantReply">第一条助手回复；为空时省略该段，避免出现空的助手标签。</param>
+        /// <returns>可直接作为 user 消息发送的标题生成提示词。</returns>
+        public static string BuildSessionTitlePrompt(string userMessage, string assistantReply)
+        {
+            string template = EnsureBreakAfterPlaceholders(SessionTitlePromptTemplate);
+            return string.Format(template, userMessage ?? string.Empty, assistantReply ?? string.Empty);
+        }
+
+        /// <summary>
+        /// 在 <c>{0}</c>/<c>{1}</c> 占位符之后补齐换行分隔（幂等）。
+        /// <para>
+        /// 占位符代表「上一条消息的正文」，其后必须换行才能与下一个标签分开；
+        /// 已经是换行（含空行、含 \r\n）的模板不做任何改动。
+        /// </para>
+        /// </summary>
+        internal static string EnsureBreakAfterPlaceholders(string template)
+        {
+            if (string.IsNullOrEmpty(template)) return string.Empty;
+
+            // \{([01])\} 后面若没有换行（允许存在空格/制表符），补一个空行
+            return System.Text.RegularExpressions.Regex.Replace(
+                template,
+                @"\{([01])\}(?![ \t]*(?:\r?\n|$))",
+                "{$1}\n\n");
         }
 
         #endregion
