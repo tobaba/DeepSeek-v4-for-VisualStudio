@@ -312,11 +312,13 @@ namespace DeepSeek_v4_for_VisualStudio.View
         }
 
         /// <summary>
-        /// 显示/隐藏拖入提示层。文案仅在首次显示时填充，避免在 DragEnter 中重复取本地化字符串。
+        /// 显示/隐藏拖入提示层。
+        /// 文案每次显示时重新取当前语言，保证语言切换后立即生效
+        /// （不可缓存到首次显示，否则切换语言后提示会停留在旧语言）。
         /// </summary>
         private void SetDropOverlayVisible(bool visible)
         {
-            if (visible && ChatDropOverlayTitle.Text.Length == 0)
+            if (visible)
             {
                 var L = LocalizationService.Instance;
                 ChatDropOverlayTitle.Text = L["status.dropOverlayTitle"];
