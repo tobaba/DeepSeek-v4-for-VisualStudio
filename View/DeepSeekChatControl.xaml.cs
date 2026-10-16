@@ -642,6 +642,10 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     RefreshModelFromSettings();
                     RefreshAppendQueuePanel();
                     RefreshBalanceDisplay();
+                    // 历史浮层的标题与相对时间均为本地化文案（如「N 天前」）。
+                    // 该列表仅在会话增删/切换时重建，必须在此显式刷新，
+                    // 否则浮层打开状态下切换语言会停留在旧语言。
+                    RefreshHistoryUI();
                 }));
             }
             catch (Exception ex)

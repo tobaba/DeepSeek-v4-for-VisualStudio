@@ -86,7 +86,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                             container.Sessions.Add(new ChatSession
                             {
                                 Id = Guid.NewGuid().ToString("N"),
-                                Title = LocalizationService.Instance["session.new"],
+                                // 标题留空，展示层回退为本地化文案；避免把语言写进持久化数据
+                                Title = string.Empty,
                                 CreatedAt = DateTime.Now,
                                 LastActiveAt = DateTime.Now,
                             });
@@ -103,6 +104,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                     }
 
                     NormalizeReasoningHistory(container);
+                    MigrateLegacyDefaultTitles(container);
                     Logger.Info($"已加载 {container.Sessions.Count} 个会话 ← {Path.GetFileName(filePath)}");
                     return container;
                 }
@@ -160,10 +162,175 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         }
 
         /// <summary>
-        /// 判断会话是否为从未使用过的空会话（无 TreeData、无 ApiHistory、标题为"新对话"）。
-        /// 用于 _unsaved.json 冗余清理。
+        /// 迁移历史数据：旧版本把本地化的「新对话」文案直接写进 <see cref="ChatSession.Title"/>，
+        /// 导致标题与语言强绑定。此处把任何语言的该文案还原为空标题。
+        /// <para>
+        /// 为什么必须迁移：旧数据在中文下存为「新对话」、英文下存为「New Conversation」，
+        /// 而判定逻辑比较的是当前语言 —— 若不还原，切成另一语言后
+        /// AI 标题生成会被误判为「标题已被用户改写」而跳过，空会话也不再被清理。
+        /// </para>
+        /// <para>可见性放宽到 internal 以便单元测试直接覆盖迁移规则（避免写真实用户数据目录）。</para>
         /// </summary>
-        private static bool IsUnusedEmptySession(ChatSession session)
+        internal static void MigrateLegacyDefaultTitles(SessionsContainer container)
+        {
+            if (container?.Sessions == null) return;
+
+            var legacyDefaults = GetLegacyDefaultTitleValues();
+            if (legacyDefaults.Count == 0) return;
+
+            int migrated = 0;
+            foreach (var session in container.Sessions)
+            {
+                if (session == null || string.IsNullOrWhiteSpace(session.Title)) continue;
+
+                // 仅当标题恰为某语言的「新对话」时才还原，用户自定义标题不受影响
+                if (!legacyDefaults.Contains(session.Title.Trim())) continue;
+
+                session.Title = string.Empty;
+                migrated++;
+            }
+
+            if (migrated > 0)
+                Logger.Info($"[清理] 已将 {migrated} 个旧版默认标题迁移为空标题（与语言解耦）");
+        }
+
+        /// <summary>缓存的所有语言「新对话」文案，用于识别旧版写入的默认标题。</summary>
+        private static HashSet<string>? _legacyDefaultTitles;
+
+        /// <summary>
+        /// 读取指定语言的 locale JSON 原始文本。
+        /// <para>
+        /// 依次尝试多个根目录，不能只依赖 <c>Assembly.Location</c>：
+        /// 测试宿主与部分插件加载场景会把程序集影子复制到临时目录，
+        /// 此时程序集同级并不存在 Resources\Locales，会导致读取静默失败。
+        /// </para>
+        /// </summary>
+        private static string? LoadLocaleJson(string languageCode)
+        {
+            foreach (var root in EnumerateCandidateRoots())
+            {
+                try
+                {
+                    var candidate = Path.Combine(root, "Resources", "Locales", languageCode + ".json");
+                    if (File.Exists(candidate))
+                        return File.ReadAllText(candidate, Encoding.UTF8);
+                }
+                catch (Exception)
+                {
+                    // 路径过长/无权限等，继续尝试下一个根目录
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>按优先级枚举可能包含 Resources\Locales 的根目录。</summary>
+        private static IEnumerable<string> EnumerateCandidateRoots()
+        {
+            string? asmDir = null;
+            try { asmDir = Path.GetDirectoryName(typeof(ChatPersistenceService).Assembly.Location); }
+            catch (Exception) { }
+
+            if (!string.IsNullOrEmpty(asmDir))
+            {
+                yield return asmDir;
+
+                // 从程序集目录逐级向上找（覆盖 bin\Debug\net472 → 扩展根目录等布局）
+                var dir = new DirectoryInfo(asmDir);
+                for (int i = 0; i < 6 && dir?.Parent != null; i++)
+                {
+                    dir = dir.Parent;
+                    yield return dir.FullName;
+                }
+            }
+
+            // 当前工作目录（VS 宿主下通常就是扩展部署目录）
+            string? cwd = null;
+            try { cwd = Directory.GetCurrentDirectory(); }
+            catch (Exception) { }
+            if (!string.IsNullOrEmpty(cwd)) yield return cwd;
+
+            // 扩展安装目录：VS 会把扩展部署到固定位置，作为最后兜底
+            // 注：结果先收集到局部变量再 yield，因为 yield return 不能出现在带 catch 的 try 内
+            foreach (var dir in FindInstalledExtensionDirs())
+            {
+                yield return dir;
+            }
+        }
+
+        /// <summary>
+        /// 在 VS 扩展安装目录下查找本扩展的部署位置。
+        /// 枚举失败时返回空集合（不影响其他候选根目录）。
+        /// </summary>
+        private static IReadOnlyList<string> FindInstalledExtensionDirs()
+        {
+            var results = new List<string>();
+
+            try
+            {
+                var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                if (string.IsNullOrEmpty(localAppData)) return results;
+
+                var extensionsRoot = Path.Combine(localAppData, "Microsoft", "VisualStudio");
+                if (!Directory.Exists(extensionsRoot)) return results;
+
+                foreach (var dll in Directory.EnumerateFiles(
+                    extensionsRoot, "DeepSeek_v4_for_VisualStudio.dll", SearchOption.AllDirectories))
+                {
+                    var d = Path.GetDirectoryName(dll);
+                    if (!string.IsNullOrEmpty(d)) results.Add(d);
+                }
+            }
+            catch (Exception)
+            {
+                // 枚举失败不影响其他候选路径
+            }
+
+            return results;
+        }
+
+        /// <summary>
+        /// 读取全部受支持语言中 <c>session.new</c> 的取值。
+        /// 直接解析语言 JSON（而非走 LocalizationService），因为后者只持有当前语言的文案，
+        /// 无法识别「在另一种语言下创建」的历史标题。
+        /// </summary>
+        private static HashSet<string> GetLegacyDefaultTitleValues()
+        {
+            if (_legacyDefaultTitles != null) return _legacyDefaultTitles;
+
+            var values = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var lang in LocalizationService.SupportedLanguages)
+            {
+                try
+                {
+                    string? json = LoadLocaleJson(lang.Code);
+                    if (string.IsNullOrWhiteSpace(json)) continue;
+
+                    using var doc = JsonDocument.Parse(json);
+                    if (doc.RootElement.TryGetProperty("session.new", out var el)
+                        && el.ValueKind == JsonValueKind.String)
+                    {
+                        string? v = el.GetString();
+                        if (!string.IsNullOrWhiteSpace(v)) values.Add(v.Trim());
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Debug($"[清理] 读取 {lang.Code} 的 session.new 失败: {ex.Message}");
+                }
+            }
+
+            _legacyDefaultTitles = values;
+            return values;
+        }
+
+        /// <summary>
+        /// 判断会话是否为「从未使用过的空会话」，用于清理冗余条目。
+        /// 判据只看「标题是否为空」这一与语言无关的事实（可见性放宽到 internal
+        /// 以便单元测试覆盖该契约）。
+        /// </summary>
+        internal static bool IsUnusedEmptySession(ChatSession session)
         {
             if (session == null) return true;
 
@@ -173,10 +340,13 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             // 有 API 历史记录 → 使用过
             if (session.ApiHistory.Count > 0) return false;
 
-            // 标题被修改过 → 使用过
-            if (!string.IsNullOrEmpty(session.Title) && session.Title != LocalizationService.Instance["session.new"]) return false;
+            // 已有标题（AI 生成或回退标题）→ 使用过。
+            // 注意：这里**不能**拿标题与当前语言的「新对话」文案比较 ——
+            // 标题不存本地化文案，转换后比较会因语言切换而失效
+            // （旧缺陷：英文下建的空会话在中文界面不再被清理）。
+            if (!session.HasEmptyTitle) return false;
 
-            // 无 TreeData、无 ApiHistory、标题为默认 → 未使用
+            // 无 TreeData、无 ApiHistory、标题为空 → 未使用
             return true;
         }
 

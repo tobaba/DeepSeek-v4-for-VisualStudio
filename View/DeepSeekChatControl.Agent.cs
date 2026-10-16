@@ -1387,7 +1387,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
                         {
                             Logger.Warn($"[AI标题] Agent 工作流标题生成异常: {ex.Message}");
                             // 最终兜底：直接使用用户消息作为标题
-                            if (_activeSession != null && _activeSession.Title == LocalizationService.Instance["session.new"])
+                            if (_activeSession != null && _activeSession.HasEmptyTitle)
                             {
                                 FallbackAutoTitle(capturedFirstUserMsg);
                             }
