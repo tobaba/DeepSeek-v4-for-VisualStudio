@@ -700,6 +700,27 @@ namespace DeepSeek_v4_for_VisualStudio.View
         }
 
         /// <summary>
+        /// 在删除当前会话后挑选接替的会话：取「最近活跃」的一个。
+        /// <para>
+        /// 必须与历史浮层的展示顺序一致（见 <see cref="RefreshHistoryUI"/>：
+        /// 按 <c>LastActiveAt</c> 降序）。<c>Sessions</c> 本身按创建顺序追加（最旧在前），
+        /// 直接取首元素会跳到最旧的会话，与用户看到的顺序相反。
+        /// </para>
+        /// <para><c>CreatedAt</c> 作为次序稳定的兜底，避免活跃时间相同时结果不定。</para>
+        /// <para>可见性放宽到 internal 以便单元测试覆盖。</para>
+        /// </summary>
+        internal static ChatSession? SelectFallbackSession(IEnumerable<ChatSession>? sessions)
+        {
+            if (sessions == null) return null;
+
+            return sessions
+                .Where(s => s != null)
+                .OrderByDescending(s => s.LastActiveAt)
+                .ThenByDescending(s => s.CreatedAt)
+                .FirstOrDefault();
+        }
+
+        /// <summary>
         /// 删除当前会话。
         /// </summary>
         private void DeleteCurrentSession()
@@ -732,8 +753,11 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 _sessionsContainer.Sessions.Remove(_activeSession);
                 TryDeleteSessionMemory(deletedSessionId);
 
-                // 切换到第一个会话
-                _activeSession = _sessionsContainer.Sessions.FirstOrDefault();
+                // 切换到「最近活跃」的会话，而非列表中的第一个。
+                // _sessionsContainer.Sessions 是按创建顺序追加的（最旧在前），
+                // 而历史浮层按 LastActiveAt 降序展示 —— 若此处取 FirstOrDefault()，
+                // 删除当前会话后会跳到**最旧**的会话，与用户在列表中看到的顺序相反。
+                _activeSession = SelectFallbackSession(_sessionsContainer.Sessions);
                 _sessionsContainer.ActiveSessionId = _activeSession?.Id;
 
                 ResetActiveAgentToAsk();
