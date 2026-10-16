@@ -236,6 +236,111 @@ namespace DeepSeek_v4_for_VisualStudio.View
         }
 
         /// <summary>
+        /// 拖放文件到聊天显示区 —— 拖入阶段：仅在确有文件拖入时声明接受。
+        /// <para>
+        /// 背景：聊天区使用视觉托管的 WebView2CompositionControl，
+        /// Chromium 的 HTML5 拖放事件（dragenter/dragover/drop）在其下不会触发
+        /// （上游 WebView2Feedback #5676），故拖放必须在 WPF 层接管。
+        /// 参照 <c>SVsMainWindowDropTarget</c> 文档，自行注册拖放的窗口
+        /// 不会继承 VS 主窗口「拖入即打开文件」的默认行为。
+        /// </para>
+        /// </summary>
+        private void ChatWebViewHost_PreviewDragEnter(object sender, DragEventArgs e)
+        {
+            e.Effects = e.Data.GetDataPresent(DataFormats.FileDrop)
+                ? DragDropEffects.Copy
+                : DragDropEffects.None;
+            e.Handled = true;
+        }
+
+        /// <summary>
+        /// 拖放文件到聊天显示区 —— 悬停阶段：必须声明接受，否则 Drop 不会触发。
+        /// </summary>
+        /// <remarks>
+        /// 此处理器在单次拖拽中会触发数十次（随鼠标移动连续触发），
+        /// 因此禁止在其中记录日志或重建 UI，避免刷屏与性能问题。
+        /// </remarks>
+        private void ChatWebViewHost_PreviewDragOver(object sender, DragEventArgs e)
+        {
+            e.Effects = e.Data.GetDataPresent(DataFormats.FileDrop)
+                ? DragDropEffects.Copy
+                : DragDropEffects.None;
+            e.Handled = true;
+        }
+
+        /// <summary>
+        /// 拖放文件到聊天显示区 —— 落下阶段：把文件加入附件列表并统一提示结果。
+        /// </summary>
+        private void ChatWebViewHost_PreviewDrop(object sender, DragEventArgs e)
+        {
+            e.Handled = true;
+            try
+            {
+                if (!e.Data.GetDataPresent(DataFormats.FileDrop)
+                    || e.Data.GetData(DataFormats.FileDrop) is not string[] paths
+                    || paths.Length == 0)
+                {
+                    return;
+                }
+
+                var result = AttachmentCollector.Collect(paths, _attachedFilePaths);
+                if (result.AddedCount > 0)
+                {
+                    _attachedFilePaths.AddRange(result.Added);
+                    RefreshAttachedFilesUI();
+                }
+
+                StatusLabel.Text = BuildAttachmentStatusText(result);
+                Logger.Info($"[DropFiles] 拖入 {paths.Length} 项: 新增={result.AddedCount}, "
+                    + $"重复={result.AlreadyAttached.Count}, 不支持={result.Unsupported.Count}, "
+                    + $"目录={result.Directories.Count}, 不存在={result.NotFound.Count}");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[DropFiles] 处理拖入文件失败: {ex.Message}", ex);
+            }
+        }
+
+        /// <summary>
+        /// 根据附件分类结果生成状态栏提示。优先报告实际新增，
+        /// 无新增时按「目录 → 格式 → 不存在 → 重复」的优先级说明原因。
+        /// 供拖放与文件对话框等各添加入口共用，保证提示口径一致。
+        /// </summary>
+        private static string BuildAttachmentStatusText(AttachmentCollectResult result)
+        {
+            var L = LocalizationService.Instance;
+
+            if (result.AddedCount > 0)
+            {
+                string text = L.Format("status.filesAddedToContext", result.AddedCount);
+                int skipped = result.Directories.Count + result.Unsupported.Count;
+                return skipped > 0
+                    ? text + L.Format("status.dropFilesSkippedSuffix", skipped)
+                    : text;
+            }
+
+            if (result.Directories.Count > 0)
+            {
+                return L.Format("status.dropDirectoryUnsupported",
+                    System.IO.Path.GetFileName(result.Directories[0]));
+            }
+
+            if (result.Unsupported.Count > 0)
+            {
+                return L.Format("status.fileFormatUnsupported",
+                    System.IO.Path.GetExtension(result.Unsupported[0]));
+            }
+
+            if (result.NotFound.Count > 0)
+            {
+                return L.Format("status.dropFileNotFound",
+                    System.IO.Path.GetFileName(result.NotFound[0]));
+            }
+
+            return L["status.noFilesAdded"];
+        }
+
+        /// <summary>
         /// 文件上传按钮点击：打开文件选择对话框，将选中文件添加到附件列表。
         /// </summary>
         private void UploadButton_Click(object sender, RoutedEventArgs e)
@@ -249,21 +354,14 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
             if (dlg.ShowDialog() == true)
             {
-                foreach (string filePath in dlg.FileNames)
+                var result = AttachmentCollector.Collect(dlg.FileNames, _attachedFilePaths);
+                if (result.AddedCount > 0)
                 {
-                    if (!_attachedFilePaths.Contains(filePath, StringComparer.OrdinalIgnoreCase))
-                    {
-                        if (FileParserService.IsSupportedFormat(filePath))
-                        {
-                            _attachedFilePaths.Add(filePath);
-                        }
-                        else
-                        {
-                    StatusLabel.Text = string.Format(LocalizationService.Instance["status.fileFormatUnsupported"], System.IO.Path.GetExtension(filePath));
-                        }
-                    }
+                    _attachedFilePaths.AddRange(result.Added);
+                    RefreshAttachedFilesUI();
                 }
-                RefreshAttachedFilesUI();
+
+                StatusLabel.Text = BuildAttachmentStatusText(result);
             }
         }
 
@@ -456,27 +554,16 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
             if (dlg.ShowDialog() == true)
             {
-                int addedCount = 0;
-                foreach (string filePath in dlg.FileNames)
+                var result = AttachmentCollector.Collect(dlg.FileNames, _attachedFilePaths);
+                if (result.AddedCount > 0)
                 {
-                    if (!_attachedFilePaths.Contains(filePath, StringComparer.OrdinalIgnoreCase))
-                    {
-                        if (FileParserService.IsSupportedFormat(filePath))
-                        {
-                            _attachedFilePaths.Add(filePath);
-                            addedCount++;
-                        }
-                        else
-                        {
-                            Logger.Info($"[AddContext] 不支持的文件格式，跳过: {filePath}");
-                        }
-                    }
+                    _attachedFilePaths.AddRange(result.Added);
+                    RefreshAttachedFilesUI();
                 }
-                RefreshAttachedFilesUI();
-                StatusLabel.Text = addedCount > 0
-                    ? LocalizationService.Instance.Format("status.filesAddedToContext", addedCount)
-                    : LocalizationService.Instance["status.noFilesAdded"];
-                Logger.Info($"[AddContext] 项目文件已添加: {addedCount} 个");
+
+                StatusLabel.Text = BuildAttachmentStatusText(result);
+                Logger.Info($"[AddContext] 项目文件已添加: {result.AddedCount} 个, "
+                    + $"重复 {result.AlreadyAttached.Count} 个, 不支持 {result.Unsupported.Count} 个");
             }
         }
 

@@ -391,12 +391,22 @@
              VS 会把本行高度压到 0，正好触发——且异常是在 WPF 渲染回调
              (MediaContext.RenderMessageHandler) 中抛出的，不在任何 try/catch 范围内，
              因此表现为「未经处理的异常」崩溃，无法通过托管代码捕获。
-             给宿主保留 1 像素下限可避免把 0 传给库（上游 issue #5485）。 -->
+             给宿主保留 1 像素下限可避免把 0 传给库（上游 issue #5485）。
+
+             AllowDrop + PreviewDrag* 用于接管「拖拽文件到聊天区即为添加上下文」(issue #101)：
+             因上述合成控件下 Chromium 的 HTML5 拖放事件不会触发（上游 issue #5676），
+             拖放必须在 WPF 层接收；参照 SVsMainWindowDropTarget 文档，自行注册拖放的窗口
+             不会继承 VS 主窗口「拖入即用编辑器打开文件」的默认行为。
+             处理器见 DeepSeekChatControl.Events.cs。 -->
         <ContentControl Grid.Row="1"
                         x:Name="ChatWebViewHost"
                         Margin="0"
                         MinWidth="1"
-                        MinHeight="1" />
+                        MinHeight="1"
+                        AllowDrop="True"
+                        PreviewDragEnter="ChatWebViewHost_PreviewDragEnter"
+                        PreviewDragOver="ChatWebViewHost_PreviewDragOver"
+                        PreviewDrop="ChatWebViewHost_PreviewDrop" />
 
         <!-- ═══ Diff 预览全局控制栏 ═══ -->
         <Border Grid.Row="2"
