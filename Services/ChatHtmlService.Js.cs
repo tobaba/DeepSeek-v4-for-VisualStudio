@@ -116,7 +116,13 @@ namespace DeepSeek_v4_for_VisualStudio.Services
 
         private static string BuildDecorateCodeBlocksJsFunction()
         {
-            return @"
+            // 代码块复制按钮文案：改为本地化字面量注入，不再硬编码英文
+            // （本片段在页面加载时执行，其内的函数在后续交互中才被调用）
+            string labels =
+                "var CB_COPY=" + EscapeJsString(L["chat.html.copyCodeBlock"]) + ";" +
+                "var CB_COPIED=" + EscapeJsString(L["chat.html.copied"]) + ";";
+
+            return labels + @"
 window.decorateCodeBlocks=function(container){
     if(!container)return;
     var pres=container.querySelectorAll('pre:not(.mermaid-block)');
@@ -142,7 +148,8 @@ window.decorateCodeBlocks=function(container){
         // Copy button
         var copyBtn=document.createElement('button');
         copyBtn.className='copy-btn';
-        copyBtn.textContent='\uE8C8 Copy';copyBtn.style.fontFamily=""'Segoe Fluent Icons','Segoe MDL2 Assets'"";
+        // 文案取自注入的本地化字典（__codeBlockLabels），不再硬编码英文
+        copyBtn.textContent=CB_COPY;copyBtn.style.fontFamily=""'Segoe Fluent Icons','Segoe MDL2 Assets'"";
         copyBtn.onclick=function(){
             var target=pre.querySelector('code')||pre;
             var text=target.innerText,ok=false;
@@ -155,8 +162,8 @@ window.decorateCodeBlocks=function(container){
                 try{document.execCommand('copy');ok=true;}catch(e){}
                 document.body.removeChild(ta);
             }
-            if(ok){copyBtn.textContent='Copied';copyBtn.style.background='#1a3a1a';copyBtn.style.color='#6cd96c';}
-            setTimeout(function(){copyBtn.textContent='\uE8C8 Copy';copyBtn.style.fontFamily=""'Segoe Fluent Icons','Segoe MDL2 Assets'"";copyBtn.style.background='';copyBtn.style.color='';},2000);
+            if(ok){copyBtn.textContent=CB_COPIED;copyBtn.style.background='#1a3a1a';copyBtn.style.color='#6cd96c';}
+            setTimeout(function(){copyBtn.textContent=CB_COPY;copyBtn.style.fontFamily=""'Segoe Fluent Icons','Segoe MDL2 Assets'"";copyBtn.style.background='';copyBtn.style.color='';},2000);
         };
         pre.appendChild(copyBtn);
     });
@@ -427,7 +434,21 @@ window.__appendMessageHtml=function(html){
         /// </summary>
         private static string BuildRetryEditJsFunctions()
         {
-            return @"
+            // Markdown 渲染失败提示为本地化文案（此前硬编码中文，
+            // 导致英文界面下仍显示中文），以 JS 常量注入供下方降级分支使用。
+            // 同时注入消息操作按钮的兜底文案：正常路径由每条消息的 JSON 提供，
+            // 这里仅覆盖字段缺失的兜底分支（此前为英文硬编码）。
+            string markdownFailText =
+                "var __markdownFailText=" + EscapeJsString(L["chat.html.markdownRenderFailed"]) + ";" +
+                "var __actLabels={" +
+                    "retry:" + EscapeJsString(L["chat.html.retryButton"]) + "," +
+                    "retryTitle:" + EscapeJsString(L["chat.html.retryButtonTitle"]) + "," +
+                    "copy:" + EscapeJsString(L["chat.html.copyButton"]) + "," +
+                    "copyTitle:" + EscapeJsString(L["chat.html.copyButtonTitle"]) + "," +
+                    "copied:" + EscapeJsString(L["chat.html.copySuccessButton"]) +
+                "};";
+
+            return markdownFailText + @"
 window.__sendToHost=function(msg){
     try{window.chrome.webview.postMessage(JSON.stringify(msg));}
     catch(e1){try{window.external.notify(JSON.stringify(msg));}catch(e2){}}
@@ -570,8 +591,8 @@ window.__copyMessage=function(msgIndex){
 window._showCopyFeedback=function(msgIndex){
     var btn=document.getElementById('copy-btn-'+msgIndex);
     if(!btn)return;
-    var copyLabel=btn.getAttribute('data-copy-label')||'Copy';
-    var copiedLabel=btn.getAttribute('data-copied-label')||'Copied';
+    var copyLabel=btn.getAttribute('data-copy-label')||(__actLabels&&__actLabels.copy)||'';
+    var copiedLabel=btn.getAttribute('data-copied-label')||(__actLabels&&__actLabels.copied)||'';
     btn.classList.add('copied');
     btn.textContent=copiedLabel;
     btn.style.fontFamily='';
@@ -749,7 +770,7 @@ window._showCopyFeedback=function(msgIndex){
                             // ── innerHTML 渲染失败时的降级：显示带样式的错误提示 ──
                             console.error('[DeepSeek] streamEnd render error:', renderErr);
                             if (containerEl) {
-                                containerEl.innerHTML = '<div style=\'padding:12px;border-left:3px solid #e07878;background:#2a1a1a;color:#e07878;font-size:12px\'>Markdown 渲染失败，请刷新页面重试。原始内容已保留在下方。</div>' +
+                                containerEl.innerHTML = '<div style=\'padding:12px;border-left:3px solid #e07878;background:#2a1a1a;color:#e07878;font-size:12px\'>' + (window.__markdownFailText||'') + '</div>' +
                                     '<pre style=\'max-height:300px;overflow-y:auto;font-size:11px;margin-top:8px\'>' +
                                     (msg.rawContent||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') +
                                     '</pre>';
@@ -763,8 +784,8 @@ window._showCopyFeedback=function(msgIndex){
                             var retryBtn=document.createElement('button');
                             retryBtn.id='retry-btn-'+msg.i;
                             retryBtn.className='msg-action-btn retry-btn';
-                            retryBtn.textContent=msg.retryLabel||'Retry';
-                            retryBtn.title=msg.retryTitle||'Regenerate response';
+                            retryBtn.textContent=msg.retryLabel||__actLabels.retry;
+                            retryBtn.title=msg.retryTitle||__actLabels.retryTitle;
                             retryBtn.onclick=function(){window.__retryMessage(msg.i);};
                             var row=document.querySelector('#msg-'+msg.i+' .msg-actions-row');
                             if(!row){row=document.createElement('div');row.className='msg-actions-row';
@@ -776,10 +797,10 @@ window._showCopyFeedback=function(msgIndex){
                             var copyBtn=document.createElement('button');
                             copyBtn.id='copy-btn-'+msg.i;
                             copyBtn.className='msg-action-btn copy-msg-btn';
-                            copyBtn.textContent=msg.copyBtn||'Copy';
-                            copyBtn.title=msg.copyLabel||'Copy this response';
-                            copyBtn.setAttribute('data-copy-label',msg.copyBtn||'Copy');
-                            copyBtn.setAttribute('data-copied-label',msg.copyFeedback||'Copied');
+                            copyBtn.textContent=msg.copyBtn||__actLabels.copy;
+                            copyBtn.title=msg.copyLabel||__actLabels.copyTitle;
+                            copyBtn.setAttribute('data-copy-label',msg.copyBtn||__actLabels.copy);
+                            copyBtn.setAttribute('data-copied-label',msg.copyFeedback||__actLabels.copied);
                             copyBtn.onclick=function(){window.__copyMessage(msg.i);};
                             var row2=document.querySelector('#msg-'+msg.i+' .msg-actions-row');
                             if(row2)row2.appendChild(copyBtn);

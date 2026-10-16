@@ -574,6 +574,42 @@ namespace DeepSeek_v4_for_VisualStudio.View
             }
         }
 
+        /// <summary>
+        /// 语言变更后重新加载 WebView2 内容。
+        /// <para>
+        /// 必要性：聊天页的 HTML/JS 由 C# 一次性生成并注入 DOM，属于已固化的产物。
+        /// 其中的按钮标签（重试/复制/加载更早消息）、联网搜索卡片、审批卡、任务面板等
+        /// 文案不会随语言切换自动更新，必须整页重建。
+        /// </para>
+        /// <para>与 <see cref="ReloadWebViewForTheme"/> 同为整页重建，流程一致。</para>
+        /// </summary>
+        private void ReloadWebViewForLanguage()
+        {
+            try
+            {
+                if (ChatWebView?.CoreWebView2 == null) return;
+                if (_messages.Count == 0) return;
+
+                _pageReady = false;
+
+                // NavigateToString 会清空 DOM；残留的旧面板 ID 会阻止面板重新创建
+                lock (_lock) { _createdPlanIds.Clear(); }
+
+                RebuildMessagesHtml();
+
+                string newHtml = ChatHtmlService.BuildInitialPageFromMessagesHtml(_messagesHtml.ToString());
+                ChatWebView.CoreWebView2.NavigateToString(newHtml);
+                Logger.Info($"[I18n] WebView2 已按语言重建页面: {LocalizationService.Instance.CurrentLanguage}");
+
+                // 页面刷新后重建持久化任务面板与 Handoff 按钮
+                _ = RebuildPanelsWhenPageReadyAsync();
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"[I18n] 按语言重建 WebView2 页面失败: {ex.Message}");
+            }
+        }
+
         #endregion
     }
 }

@@ -646,6 +646,11 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     // 该列表仅在会话增删/切换时重建，必须在此显式刷新，
                     // 否则浮层打开状态下切换语言会停留在旧语言。
                     RefreshHistoryUI();
+                    // Agent 徽章的 ToolTip 也是本地化文案，且只在切换 Agent 时更新
+                    UpdateAgentModeBadge();
+                    // 聊天页（WebView2）内的按钮/卡片文案是注入 DOM 的固化产物，
+                    // 必须整页重建才能跟随语言。
+                    ReloadWebViewForLanguage();
                 }));
             }
             catch (Exception ex)
@@ -2227,12 +2232,15 @@ namespace DeepSeek_v4_for_VisualStudio.View
                         break;
                 }
 
+                // 徽章缩写（PLAN/EDIT/BUILD/EXPLORE）是与 Agent 类型一一对应的标识，不随语言变化；
+                // 但 ToolTip 是面向用户的说明文案，必须本地化（且本方法已加入语言刷新链）。
+                var L = LocalizationService.Instance;
                 AgentModeBadge.ToolTip = agentType switch
                 {
-                    Models.AgentType.Plan => "规划模式 — AI 分析代码库并制定实现计划",
-                    Models.AgentType.Edit => "编辑模式 — AI 正在修改项目代码",
-                    Models.AgentType.Build => "构建模式 — AI 正在诊断和修复编译错误",
-                    Models.AgentType.Explore => "探索模式 — AI 正在检索项目代码",
+                    Models.AgentType.Plan => L["agent.badge.planTip"],
+                    Models.AgentType.Edit => L["agent.badge.editTip"],
+                    Models.AgentType.Build => L["agent.badge.buildTip"],
+                    Models.AgentType.Explore => L["agent.badge.exploreTip"],
                     _ => null,
                 };
             }

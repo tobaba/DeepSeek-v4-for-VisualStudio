@@ -63,6 +63,12 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
         /// <summary>
         /// 应用当前语言的本地化字符串到对话框所有 UI 元素。
+        /// <para>
+        /// ItemsControl 的 DataTemplate 内元素无法通过 x:Name 访问，
+        /// 因此模板内的标签改为绑定到本窗口的以下属性（见 XAML 中的 RelativeSource 绑定）。
+        /// 这些属性每次读取都取当前语言，属性变更由 <see cref="ApplyLocalization"/>
+        /// 触发的绑定刷新驱动。
+        /// </para>
         /// </summary>
         private void ApplyLocalization()
         {
@@ -87,9 +93,53 @@ namespace DeepSeek_v4_for_VisualStudio.View
             // 服务器列表
             ServersLabel.Text = LocalizationService.Instance["mcp.configuredServers"];
 
-            // 字段标签 (在 DataTemplate 中，无法通过 x:Name 访问，使用固定英文标签)
-            // "Command:", "Args:", "Environment:" 在 XAML 中已设为英文默认值
+            // ── 模板内标签：通知绑定重新求值 ──
+            NotifyTemplateLabels();
         }
+
+        /// <summary>
+        /// 通知 DataTemplate 内绑定的标签属性重新求值。
+        /// 属性值本身每次都从 LocalizationService 读取，故只需触发变更通知。
+        /// </summary>
+        private void NotifyTemplateLabels()
+        {
+            foreach (var name in TemplateLabelPropertyNames)
+            {
+                OnPropertyChanged(name);
+            }
+        }
+
+        private static readonly string[] TemplateLabelPropertyNames =
+        {
+            nameof(LblEnable), nameof(LblServerName), nameof(LblTest),
+            nameof(LblTestTip), nameof(LblDelete), nameof(LblDeleteTip),
+            nameof(LblCommand), nameof(LblArgs), nameof(LblUrl), nameof(LblUrlTip),
+            nameof(LblEnvironment), nameof(LblEnvFormatTip), nameof(LblTransport),
+            nameof(LblPasteJsonTip),
+        };
+
+        /// <summary>实现属性变更通知，供模板内绑定刷新（本窗口仅用于本地化标签）。</summary>
+        public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
+
+        private void OnPropertyChanged(string propertyName)
+            => PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(propertyName));
+
+        // ── DataTemplate 内标签的本地化属性（每次读取都取当前语言）──
+        // 优先复用既有的 mcp.* 键，避免重复维护同义文案
+        public string LblEnable => LocalizationService.Instance["mcp.enableServerTip"];
+        public string LblServerName => LocalizationService.Instance["mcp.serverName"];
+        public string LblTest => LocalizationService.Instance["mcp.testConnection"];
+        public string LblTestTip => LocalizationService.Instance["mcp.testTip"];
+        public string LblDelete => LocalizationService.Instance["general.delete"];
+        public string LblDeleteTip => LocalizationService.Instance["mcp.deleteTip"];
+        public string LblCommand => LocalizationService.Instance["mcp.command"];
+        public string LblArgs => LocalizationService.Instance["mcp.arguments"];
+        public string LblUrl => LocalizationService.Instance["mcp.field.url"];
+        public string LblUrlTip => LocalizationService.Instance["mcp.urlTip"];
+        public string LblEnvironment => LocalizationService.Instance["mcp.environmentVariables"];
+        public string LblEnvFormatTip => LocalizationService.Instance["mcp.envFormatTip"];
+        public string LblTransport => LocalizationService.Instance["mcp.transport"];
+        public string LblPasteJsonTip => LocalizationService.Instance["mcp.pasteJsonTip"];
 
         /// <summary>
         /// 克隆配置并确保环境变量在 UI 的 Environment 文本框中可见。

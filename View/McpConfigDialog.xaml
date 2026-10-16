@@ -146,7 +146,7 @@
                          AcceptsReturn="True" MinHeight="80" MaxHeight="150"
                          TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
                          FontFamily="Consolas" FontSize="12"
-                         ToolTip="Paste MCP server JSON config (Claude Desktop format or array format)"/>
+                         ToolTip="{Binding LblPasteJsonTip, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"/>
 
                 <StackPanel Grid.Row="1" Grid.Column="1" Margin="8,0,0,0" VerticalAlignment="Bottom">
                     <Button x:Name="ParseJsonButton" Content=" Detect &amp; Add"
@@ -210,25 +210,27 @@
                                                   IsChecked="{Binding Enabled}"
                                                   VerticalAlignment="Center"
                                                   Margin="0,0,8,0"
-                                                  ToolTip="Enable/Disable this MCP server"/>
+                                                  ToolTip="{Binding LblEnable, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"/>
                                         <TextBox Grid.Row="0" Grid.Column="1"
                                                  Text="{Binding Name, UpdateSourceTrigger=PropertyChanged}"
                                                  FontWeight="Bold" FontSize="14"
                                                  Background="Transparent" BorderThickness="0"
-                                                 ToolTip="Server name"/>
+                                                 ToolTip="{Binding LblServerName, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"/>
 
                                         <!-- 操作按钮 -->
                                         <StackPanel Grid.Row="0" Grid.Column="2" Orientation="Horizontal">
-                                            <Button Content="Test" Style="{StaticResource ToolbarButton}"
+                                            <Button Content="{Binding LblTest, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"
+                                                    Style="{StaticResource ToolbarButton}"
                                                     FontSize="11" Foreground="#4EC9B0"
                                                     Tag="{Binding}"
                                                     Click="TestServerButton_Click"
-                                                    ToolTip="Test connection to this MCP server"/>
-                                            <Button Content="Delete" Style="{StaticResource ToolbarButton}"
+                                                    ToolTip="{Binding LblTestTip, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"/>
+                                            <Button Content="{Binding LblDelete, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"
+                                                    Style="{StaticResource ToolbarButton}"
                                                     FontSize="11" Foreground="#F48771"
                                                     Tag="{Binding}"
                                                     Click="DeleteServerButton_Click"
-                                                    ToolTip="Delete this server"/>
+                                                    ToolTip="{Binding LblDeleteTip, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"/>
                                         </StackPanel>
 
                                         <!-- 命令 + 参数 -->
@@ -239,12 +241,16 @@
                                                 <ColumnDefinition Width="Auto"/>
                                                 <ColumnDefinition Width="2*"/>
                                             </Grid.ColumnDefinitions>
-                                            <TextBlock Grid.Column="0" x:Name="CommandLabel" Text="Command:" Foreground="#888888"
+                                            <TextBlock Grid.Column="0" x:Name="CommandLabel"
+                                                       Text="{Binding LblCommand, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"
+                                                       Foreground="#888888"
                                                        FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
                                             <TextBox Grid.Column="1"
                                                      Text="{Binding Command, UpdateSourceTrigger=PropertyChanged}"
                                                      FontSize="12" FontFamily="Consolas"/>
-                                            <TextBlock Grid.Column="2" x:Name="ArgsLabel" Text="Args:" Foreground="#888888"
+                                            <TextBlock Grid.Column="2" x:Name="ArgsLabel"
+                                                       Text="{Binding LblArgs, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"
+                                                       Foreground="#888888"
                                                        FontSize="12" VerticalAlignment="Center" Margin="12,0,6,0"/>
                                             <TextBox Grid.Column="3"
                                                      Text="{Binding Args, UpdateSourceTrigger=PropertyChanged}"
@@ -257,12 +263,14 @@
                                                 <ColumnDefinition Width="Auto"/>
                                                 <ColumnDefinition Width="*"/>
                                             </Grid.ColumnDefinitions>
-                                            <TextBlock Grid.Column="0" x:Name="UrlLabel" Text="URL:" Foreground="#888888"
+                                            <TextBlock Grid.Column="0" x:Name="UrlLabel"
+                                                       Text="{Binding LblUrl, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"
+                                                       Foreground="#888888"
                                                        FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
                                             <TextBox Grid.Column="1"
                                                      Text="{Binding Url, UpdateSourceTrigger=PropertyChanged}"
                                                      FontSize="12" FontFamily="Consolas"
-                                                     ToolTip="HTTP MCP server URL (e.g. https://mcp.example.com/mcp)"/>
+                                                     ToolTip="{Binding LblUrlTip, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"/>
                                         </Grid>
 
                                         <!-- 环境变量 -->
@@ -271,12 +279,14 @@
                                                 <ColumnDefinition Width="Auto"/>
                                                 <ColumnDefinition Width="*"/>
                                             </Grid.ColumnDefinitions>
-                                            <TextBlock Grid.Column="0" x:Name="EnvLabel" Text="Environment:" Foreground="#888888"
+                                            <TextBlock Grid.Column="0" x:Name="EnvLabel"
+                                                       Text="{Binding LblEnvironment, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"
+                                                       Foreground="#888888"
                                                        FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
                                             <TextBox Grid.Column="1"
                                                      Text="{Binding Environment, UpdateSourceTrigger=PropertyChanged}"
                                                      FontSize="12" FontFamily="Consolas"
-                                                     ToolTip="Format: KEY1=VALUE1;KEY2=VALUE2"/>
+                                                     ToolTip="{Binding LblEnvFormatTip, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"/>
                                         </Grid>
 
                                         <!-- 传输类型 + 状态信息 -->
@@ -287,7 +297,8 @@
                                                 <ColumnDefinition Width="Auto"/>
                                                 <ColumnDefinition Width="*"/>
                                             </Grid.ColumnDefinitions>
-                                            <TextBlock Grid.Column="0" Text="Transport:" Foreground="#888888"
+                                            <TextBlock Grid.Column="0" Text="{Binding LblTransport, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"
+                                                       Foreground="#888888"
                                                        FontSize="12" VerticalAlignment="Center" Margin="0,0,4,0"/>
                                             <ComboBox Grid.Column="1"
                                                       SelectedValue="{Binding Transport, UpdateSourceTrigger=PropertyChanged}"

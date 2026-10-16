@@ -2496,7 +2496,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 var toastService = CompositionRoot.GetServiceOrDefault<ToastNotificationService>();
                 if (toastService == null) return;
 
-                string message = string.IsNullOrWhiteSpace(detail) ? "请切换到 Visual Studio 处理" : detail;
+                string message = string.IsNullOrWhiteSpace(detail)
+                    ? LocalizationService.Instance["notification.answerNeededFallback"]
+                    : detail;
                 toastService.Show(title, message);
             }
             catch (Exception ex)
@@ -2846,8 +2848,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     // ── v1.1.10: Toast 通知用户需要回答问题 ──
                     string questionSummary = request.Questions.Count == 1
                         ? request.Questions[0].Header.Truncate(80)
-                        : $"{request.Questions.Count} 个问题需要回答";
-                    NotifyUserActionRequired("AI 需要你的回答", questionSummary);
+                        : LocalizationService.Instance.Format("notification.questionsNeedAnswer", request.Questions.Count);
+                    NotifyUserActionRequired(LocalizationService.Instance["notification.answerNeededTitle"], questionSummary);
 
                     string js = ChatHtmlService.BuildAskQuestionsJs(request);
                     StatusLabel.Text = string.Format(LocalizationService.Instance["status.questionsWaiting"],
