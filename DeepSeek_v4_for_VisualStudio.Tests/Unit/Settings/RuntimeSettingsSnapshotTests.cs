@@ -122,6 +122,7 @@ public class RuntimeSettingsSnapshotTests
             EnableWebSearch: false,
             SearchProvider: "DuckDuckGo",
             BaiduApiKey: string.Empty,
+            WebFetchMode: DeepSeekOptionsPage.DefaultWebFetchMode,
             BingApiKey: string.Empty,
             ApprovalMode: "SmartBlock",
             EnableAutoSkillRouting: false,

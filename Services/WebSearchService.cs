@@ -14,6 +14,16 @@ using System.Web;
 
 namespace DeepSeek_v4_for_VisualStudio.Services
 {
+    /// <summary>fetch_webpage 的正文获取方式（用户可在设置中选择）。</summary>
+    public enum WebFetchMode
+    {
+        /// <summary>DeepSeek 官方 Fetch 接口；不在官方 API 来源时自动回退本地解析。</summary>
+        Official,
+
+        /// <summary>本地抓取 HTML 并自行解析正文。</summary>
+        Local,
+    }
+
     /// <summary>
     /// 联网搜索服务。
     /// 搜索优先级：百度千帆 API（需 API Key）→ Bing API（需 Azure Key）→ DuckDuckGo（免费备用）。
@@ -39,8 +49,29 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// <summary>DuckDuckGo Lite 搜索端点（免费备用，无 JS，易解析）</summary>
         private const string DuckDuckGoLiteUrl = "https://lite.duckduckgo.com/lite/";
 
+        /// <summary>DeepSeek 官方 Search 接口端点</summary>
+        public const string DeepSeekSearchApiUrl = "https://api.deepseek.com/v1/tools/search";
+
+        /// <summary>DeepSeek 官方 Fetch 接口端点</summary>
+        public const string DeepSeekFetchApiUrl = "https://api.deepseek.com/v1/tools/fetch";
+
         /// <summary>搜索结果最大条数</summary>
         private const int MaxSearchResults = 10;
+
+        /// <summary>DeepSeek 官方 Search/Fetch 请求超时（秒）。Fetch 需等待下游抓取，比通用搜索更宽松。</summary>
+        private const int DeepSeekRequestTimeoutSeconds = 40;
+
+        /// <summary>DeepSeek Search 接口单价（元 / 每 1000 次成功请求）。</summary>
+        public const double SearchPriceCnyPer1K = 5.0;
+
+        /// <summary>DeepSeek Fetch 接口单价（元 / 每 1000 次成功请求）。</summary>
+        public const double FetchPriceCnyPer1K = 5.0;
+
+        /// <summary>DeepSeek Search 接口单价（美元 / 每 1000 次成功请求）。</summary>
+        public const double SearchPriceUsdPer1K = 0.75;
+
+        /// <summary>DeepSeek Fetch 接口单价（美元 / 每 1000 次成功请求）。</summary>
+        public const double FetchPriceUsdPer1K = 0.75;
 
         /// <summary>请求超时（秒）</summary>
         private const int RequestTimeoutSeconds = 15;
@@ -80,10 +111,19 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         #region Properties
 
         private readonly HttpClient _httpClient;
+        /// <summary>DeepSeek 官方 Search/Fetch 专用客户端：抓取可能较慢，超时比通用搜索更宽松。</summary>
+        private readonly HttpClient _deepSeekHttpClient;
         private string? _baiduApiKey;
         private string? _bingApiKey;
+        /// <summary>DeepSeek 官方 API Key；仅官方 API 来源持有，官方 Search 与 Fetch 共用。</summary>
+        private string? _officialApiKey;
+        private WebFetchMode _webFetchMode = WebFetchMode.Official;
         private SearchProvider _activeProvider;
         private bool _isBaiduQuotaExhausted;
+
+        // ── 官方 Search / Fetch 按次计费统计（每次成功且产生结果的请求计数）──
+        private int _officialSearchSuccessCount;
+        private int _officialFetchSuccessCount;
 
         /// <summary>
         /// 获取当前正在使用的搜索提供商。
@@ -94,6 +134,82 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// 百度额度是否已耗尽（本次会话内）。
         /// </summary>
         public bool IsBaiduQuotaExhausted => _isBaiduQuotaExhausted;
+
+        /// <summary>
+        /// 是否持有 DeepSeek 官方 API Key（即当前为官方 API 来源）。
+        /// </summary>
+        public bool HasOfficialApiKey => !string.IsNullOrWhiteSpace(_officialApiKey);
+
+        /// <summary>
+        /// 是否使用 DeepSeek 官方 Search 接口做联网搜索：
+        /// 需「官方 API 来源 + 当前搜索引擎选中 DeepSeek」同时成立。
+        /// </summary>
+        public bool IsDeepSeekSearchEnabled
+            => _activeProvider == SearchProvider.DeepSeek && HasOfficialApiKey;
+
+        /// <summary>
+        /// 是否使用 DeepSeek 官方 Fetch 接口抓取网页（fetch_webpage）。
+        /// 设置选择「官方 API」且为官方 API 来源时为 true；
+        /// 自定义端点或未配置官方 Key 时自动回退本地解析，返回 false。
+        /// </summary>
+        public bool UseOfficialWebFetch
+            => _webFetchMode == WebFetchMode.Official && HasOfficialApiKey;
+
+        // ── 官方 Search / Fetch 用量与计费（按次，见官方计费说明）──
+
+        /// <summary>本会话官方 Search 成功（HTTP 200 且 results 非空）的请求次数。</summary>
+        public int OfficialSearchSuccessCount => Volatile.Read(ref _officialSearchSuccessCount);
+
+        /// <summary>本会话官方 Fetch 成功（HTTP 200 且返回正文）的请求次数。</summary>
+        public int OfficialFetchSuccessCount => Volatile.Read(ref _officialFetchSuccessCount);
+
+        /// <summary>
+        /// 本会话官方 Search / Fetch 计费金额（人民币）。
+        /// 按成功请求次数计费（每 1000 次 5 元），失败/空结果不计数。
+        /// </summary>
+        public double OfficialToolCostYuan =>
+            OfficialSearchSuccessCount / 1000.0 * SearchPriceCnyPer1K +
+            OfficialFetchSuccessCount / 1000.0 * FetchPriceCnyPer1K;
+
+        /// <summary>
+        /// 本会话官方 Search / Fetch 计费金额（美元）。
+        /// 按成功请求次数计费（每 1000 次 $0.75），失败/空结果不计数。
+        /// </summary>
+        public double OfficialToolCostUsd =>
+            OfficialSearchSuccessCount / 1000.0 * SearchPriceUsdPer1K +
+            OfficialFetchSuccessCount / 1000.0 * FetchPriceUsdPer1K;
+
+        /// <summary>重置官方 Search / Fetch 用量与费用统计（新会话开始时调用）。</summary>
+        public void ResetOfficialToolStats()
+        {
+            Interlocked.Exchange(ref _officialSearchSuccessCount, 0);
+            Interlocked.Exchange(ref _officialFetchSuccessCount, 0);
+        }
+
+        /// <summary>
+        /// 从会话恢复官方 Search / Fetch 调用次数（重启 VS / 切换会话时调用）。
+        /// 采用绝对值覆盖语义，避免与内存中的当前累计值叠加；负值按 0 处理。
+        /// </summary>
+        /// <param name="searchCount">官方 Search 成功次数</param>
+        /// <param name="fetchCount">官方 Fetch 成功次数</param>
+        public void RestoreOfficialToolStats(int searchCount, int fetchCount)
+        {
+            Interlocked.Exchange(ref _officialSearchSuccessCount, searchCount > 0 ? searchCount : 0);
+            Interlocked.Exchange(ref _officialFetchSuccessCount, fetchCount > 0 ? fetchCount : 0);
+        }
+
+        /// <summary>
+        /// 记录一次成功的官方工具请求。仅"HTTP 200 且产生结果"的请求会计费
+        /// （Search 的 results 非空、Fetch 返回正文），失败/空结果/超时不计。
+        /// </summary>
+        /// <param name="isSearch">true 表示 Search，false 表示 Fetch</param>
+        private void RecordOfficialToolSuccess(bool isSearch)
+        {
+            if (isSearch)
+                Interlocked.Increment(ref _officialSearchSuccessCount);
+            else
+                Interlocked.Increment(ref _officialFetchSuccessCount);
+        }
 
         #endregion
 
@@ -112,6 +228,15 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             _httpClient.DefaultRequestHeaders.Add("User-Agent",
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 DeepSeekVS/1.0");
 
+            _deepSeekHttpClient = new HttpClient(new HttpClientHandler
+            {
+                AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate,
+            })
+            {
+                Timeout = TimeSpan.FromSeconds(DeepSeekRequestTimeoutSeconds),
+            };
+            _deepSeekHttpClient.DefaultRequestHeaders.Add("User-Agent", "DeepSeekVS/1.0");
+
             _activeProvider = SearchProvider.DuckDuckGo;
             _isBaiduQuotaExhausted = false;
         }
@@ -119,6 +244,39 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         #endregion
 
         #region Public Methods
+
+        /// <summary>
+        /// 配置 DeepSeek 官方 API 来源的可用性（官方 Search 与 Fetch 共用同一官方 Key）。
+        /// 仅记录 Key，不改动当前搜索提供商；调用方随后通过
+        /// <see cref="ConfigureBaiduSearch"/> / <see cref="ConfigureBingSearch"/> /
+        /// <see cref="ConfigureDuckDuckGo"/> / <see cref="ConfigureDeepSeekSearch"/> 选择引擎。
+        /// 自定义端点传 null，行为与之前完全一致（第三方引擎 + 本地 HTML 抓取）。
+        /// </summary>
+        /// <param name="apiKey">DeepSeek 官方 API Key；为空表示官方 API 不可用</param>
+        public void ConfigureOfficialApi(string? apiKey)
+        {
+            bool available = !string.IsNullOrWhiteSpace(apiKey);
+            bool changed = available != HasOfficialApiKey;
+
+            _officialApiKey = available ? apiKey : null;
+
+            if (changed)
+            {
+                Logger.Info(available
+                    ? "联网搜索与网页抓取: DeepSeek 官方 API 可用"
+                    : "联网搜索与网页抓取: DeepSeek 官方 API 不可用");
+            }
+        }
+
+        /// <summary>
+        /// 选择 DeepSeek 官方自研搜索引擎（需官方 API 来源，否则回退 DuckDuckGo）。
+        /// </summary>
+        public void ConfigureDeepSeekSearch()
+        {
+            _activeProvider = HasOfficialApiKey
+                ? SearchProvider.DeepSeek
+                : SearchProvider.DuckDuckGo;
+        }
 
         /// <summary>
         /// 配置百度千帆搜索 API Key。
@@ -164,14 +322,41 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         }
 
         /// <summary>
+        /// 配置 fetch_webpage 的正文获取方式（官方 API / 本地解析）。
+        /// 选择官方时若官方 Key 不可用（自定义端点），仍会自动回退本地解析。
+        /// </summary>
+        public void ConfigureWebFetchMode(WebFetchMode mode)
+        {
+            if (_webFetchMode == mode) return;
+
+            _webFetchMode = mode;
+            Logger.Info($"网页抓取方式切换为: {mode}");
+        }
+
+        /// <summary>
+        /// 选择 DuckDuckGo 作为搜索引擎（免费备用，不影响 DeepSeek 官方 Fetch 的可用性）。
+        /// </summary>
+        public void ConfigureDuckDuckGo()
+        {
+            _activeProvider = SearchProvider.DuckDuckGo;
+        }
+
+        /// <summary>
         /// 执行联网搜索，返回格式化的搜索结果。
         /// 自动处理百度额度耗尽 → DuckDuckGo 的切换。
         /// </summary>
         /// <param name="query">搜索关键词</param>
         /// <param name="cancellationToken">取消令牌</param>
         /// <param name="searchRecency">时效过滤（可选）：week/month/semiyear/year</param>
+        /// <param name="count">期望返回条数（可选）：1～50；为空使用各引擎默认值</param>
+        /// <param name="originalQuestion">触发搜索的用户原始问题（可选，仅官方 Search 使用）</param>
         /// <returns>搜索结果列表（标题、URL、摘要）</returns>
-        public async Task<List<WebSearchResult>> SearchAsync(string query, CancellationToken cancellationToken = default, string? searchRecency = null)
+        public async Task<List<WebSearchResult>> SearchAsync(
+            string query,
+            CancellationToken cancellationToken = default,
+            string? searchRecency = null,
+            int? count = null,
+            string? originalQuestion = null)
         {
             if (string.IsNullOrWhiteSpace(query))
                 return new List<WebSearchResult>();
@@ -181,6 +366,17 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             try
             {
                 var ct = cancellationToken;
+
+                // ── DeepSeek 官方 Search 接口（仅官方 API 来源启用）──
+                if (IsDeepSeekSearchEnabled)
+                {
+                    var results = await SearchDeepSeekAsync(query, ct, searchRecency, count, originalQuestion);
+                    if (results.Count > 0)
+                        return results;
+
+                    // 官方接口无结果或失败时，回退到用户配置的搜索引擎，避免搜索功能整体不可用。
+                    Logger.Info("DeepSeek 官方搜索无结果，回退到 " + _activeProvider);
+                }
 
                 // ── 百度搜索（优先） ──
                 if (_activeProvider == SearchProvider.Baidu && !_isBaiduQuotaExhausted)
@@ -257,96 +453,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         }
 
         /// <summary>
-        /// 将搜索结果格式化为可供 AI 使用的上下文字符串。
-        /// </summary>
-        public static string FormatSearchResultsForContext(List<WebSearchResult> results)
-        {
-            if (results == null || results.Count == 0)
-                return string.Empty;
-
-            var sb = new StringBuilder();
-            sb.AppendLine("=== 联网搜索结果 ===");
-            sb.AppendLine();
-
-            for (int i = 0; i < results.Count; i++)
-            {
-                var r = results[i];
-                sb.AppendLine($"[{i + 1}] {r.Title}");
-                sb.AppendLine($"URL: {r.Url}");
-                sb.AppendLine($"摘要: {r.Snippet}");
-                if (!string.IsNullOrWhiteSpace(r.Date))
-                    sb.AppendLine($"日期: {r.Date}");
-                sb.AppendLine();
-            }
-
-            sb.AppendLine("=== 搜索结果结束 ===");
-            sb.AppendLine(AiPrompts.WebSearchContextInstruction);
-            return sb.ToString();
-        }
-
-        /// <summary>
-        /// 批量抓取多个 URL 的网页内容，并格式化为上下文文本。
-        /// 这是"尽力而为"的操作：单个 URL 失败不影响其他 URL。
-        /// </summary>
-        /// <param name="urls">待抓取的 URL 列表</param>
-        /// <param name="ct">取消令牌</param>
-        /// <param name="maxFetchCount">最多抓取的 URL 数量（默认 5）</param>
-        /// <param name="maxContentLength">单个页面内容最大字符数（默认 2000）</param>
-        /// <returns>格式化的链接上下文文本，如果没有成功抓取到内容则返回空字符串</returns>
-        public async Task<string> FetchUrlContextAsync(
-            List<string> urls,
-            CancellationToken ct = default,
-            int maxFetchCount = 5,
-            int maxContentLength = 2000)
-        {
-            if (urls == null || urls.Count == 0)
-                return string.Empty;
-
-            var sb = new StringBuilder();
-            int fetchedCount = 0;
-
-            foreach (string url in urls)
-            {
-                if (fetchedCount >= maxFetchCount || ct.IsCancellationRequested)
-                    break;
-
-                try
-                {
-                    string? content = await FetchWebPageContentAsync(url, ct);
-                    if (!string.IsNullOrWhiteSpace(content))
-                    {
-                        fetchedCount++;
-                        // RAG-MARK: no-truncate — 不再截断网页内容
-                        // RAG-SOURCE: web-fetch 搜索结果链接网页内容
-
-                        sb.AppendLine($"--- 链接 [{fetchedCount}]: {url} ---");
-                        sb.AppendLine(content);
-                        sb.AppendLine();
-                        Logger.Info($"链接内容抓取成功 ({url}): {content.Length} 字符");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Logger.Info($"链接内容抓取跳过 ({url}): {ex.Message}");
-                }
-            }
-
-            if (fetchedCount == 0)
-                return string.Empty;
-
-            // 添加头部说明
-            var header = new StringBuilder();
-            header.AppendLine("=== 用户消息中的链接内容 ===");
-            header.AppendLine($"共抓取 {fetchedCount} 个链接的内容：");
-            header.AppendLine();
-            header.Append(sb.ToString());
-            header.AppendLine("=== 链接内容结束 ===");
-            header.AppendLine(AiPrompts.WebFetchContextInstruction);
-
-            return header.ToString();
-        }
-
-        /// <summary>
         /// 重置百度额度耗尽标记（新会话开始时调用）。
         /// </summary>
         public void ResetQuotaState()
@@ -388,11 +494,21 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         {
             if (string.IsNullOrWhiteSpace(url)) return null;
 
+            // ── Punycode 编码域名，防止同形异义攻击（Homograph Attack）──
+            url = EncodeUrlHostname(url);
+
+            // ── DeepSeek 官方 Fetch 接口（仅官方 API 来源启用）：直接返回 Markdown 正文 ──
+            if (UseOfficialWebFetch)
+            {
+                var page = await FetchWebPageViaDeepSeekAsync(url, ct, maxContentLength);
+                if (page != null && !string.IsNullOrWhiteSpace(page.Text))
+                    return page;
+
+                Logger.Info($"DeepSeek Fetch 未返回可用内容，回退本地 HTML 抓取: {url}");
+            }
+
             try
             {
-                // ── Punycode 编码域名，防止同形异义攻击（Homograph Attack）──
-                url = EncodeUrlHostname(url);
-
                 using var request = new HttpRequestMessage(HttpMethod.Get, url);
                 request.Headers.Add("Accept", "text/html,application/xhtml+xml");
                 request.Headers.Add("Accept-Language", "zh-CN,zh;q=0.9");
@@ -570,6 +686,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         public void Dispose()
         {
             _httpClient?.Dispose();
+            _deepSeekHttpClient?.Dispose();
         }
 
         #endregion
@@ -923,6 +1040,233 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             catch { }
             return responseJson.Length > 200 ? responseJson.Substring(0, 200) : responseJson;
         }
+
+        #endregion
+
+        #region Private Methods - DeepSeek 官方 Search / Fetch
+
+        /// <summary>
+        /// 通过 DeepSeek 官方 Search 接口搜索网页。
+        /// API 文档: https://api-docs.deepseek.com/zh-cn/guides/search
+        /// 鉴权与 DeepSeek API 相同（Bearer）。失败时返回空列表，由调用方回退到其它搜索引擎。
+        /// </summary>
+        private async Task<List<WebSearchResult>> SearchDeepSeekAsync(
+            string query, CancellationToken ct, string? searchRecency = null,
+            int? count = null, string? originalQuestion = null)
+        {
+            if (!IsDeepSeekSearchEnabled)
+                return new List<WebSearchResult>();
+
+            try
+            {
+                // 官方 Search 接口没有独立的时效过滤字段，改用 query 语法表达。
+                string effectiveQuery = AppendRecencySyntax(query, searchRecency);
+
+                // count：官方允许 1～50，超出范围一律夹到边界，避免 400。
+                // net472 没有 Math.Clamp，这里手动夹逼。
+                int effectiveCount = count ?? MaxSearchResults;
+                if (effectiveCount < 1) effectiveCount = 1;
+                else if (effectiveCount > 50) effectiveCount = 50;
+
+                var requestBody = new Dictionary<string, object>
+                {
+                    ["query"] = TruncateQueryChars(effectiveQuery, 128),
+                    ["count"] = effectiveCount,
+                    ["need_content"] = false,
+                };
+
+                // ori_question：帮助官方引擎理解搜索意图，仅在非空且未超长时携带。
+                if (!string.IsNullOrWhiteSpace(originalQuestion))
+                    requestBody["ori_question"] = TruncateQueryChars(originalQuestion.Trim(), 128);
+
+                var jsonContent = JsonSerializer.Serialize(requestBody);
+                using var request = new HttpRequestMessage(HttpMethod.Post, DeepSeekSearchApiUrl)
+                {
+                    Content = new StringContent(jsonContent, Encoding.UTF8, "application/json"),
+                };
+                request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {_officialApiKey}");
+
+                using var response = await _deepSeekHttpClient.SendAsync(request, ct);
+                var responseJson = await response.Content.ReadAsStringAsync();
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    Logger.Error($"DeepSeek 官方搜索返回 HTTP {(int)response.StatusCode}: {TruncateForLog(responseJson)}");
+                    return new List<WebSearchResult>();
+                }
+
+                var results = ParseDeepSeekSearchResponse(responseJson);
+                // 只有 results 非空才算"成功请求"（官方计费口径）；空结果不计费。
+                if (results.Count > 0)
+                    RecordOfficialToolSuccess(isSearch: true);
+                Logger.Info($"DeepSeek 官方搜索完成，获取 {results.Count} 条结果");
+                return results;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"DeepSeek 官方搜索失败: {ex.Message}", ex);
+                return new List<WebSearchResult>();
+            }
+        }
+
+        /// <summary>
+        /// 把时效过滤转换成官方 Search 支持的 query 语法（after:/before:）。
+        /// 无法映射的取值原样返回查询词。
+        /// </summary>
+        private static string AppendRecencySyntax(string query, string? searchRecency)
+        {
+            string? syntax = searchRecency?.Trim().ToLowerInvariant() switch
+            {
+                "week" => "after:" + DateTime.UtcNow.AddDays(-7).ToString("yyyy-MM-dd"),
+                "month" => "after:" + DateTime.UtcNow.AddMonths(-1).ToString("yyyy-MM-dd"),
+                "semiyear" => "after:" + DateTime.UtcNow.AddMonths(-6).ToString("yyyy-MM-dd"),
+                "year" => "after:" + DateTime.UtcNow.AddYears(-1).ToString("yyyy-MM-dd"),
+                _ => null,
+            };
+
+            return syntax == null ? query : query + " " + syntax;
+        }
+
+        /// <summary>
+        /// 解析 DeepSeek Search 接口响应。优先使用长摘要 summary，缺失时回退 snippet。
+        /// </summary>
+        internal static List<WebSearchResult> ParseDeepSeekSearchResponse(string responseJson)
+        {
+            var results = new List<WebSearchResult>();
+            if (string.IsNullOrWhiteSpace(responseJson))
+                return results;
+
+            try
+            {
+                using var doc = JsonDocument.Parse(responseJson);
+                if (!doc.RootElement.TryGetProperty("results", out var items) ||
+                    items.ValueKind != JsonValueKind.Array)
+                {
+                    return results;
+                }
+
+                foreach (var item in items.EnumerateArray())
+                {
+                    string summary = GetStringProperty(item, "summary");
+                    if (string.IsNullOrWhiteSpace(summary))
+                        summary = GetStringProperty(item, "snippet");
+
+                    results.Add(new WebSearchResult
+                    {
+                        Title = GetStringProperty(item, "title"),
+                        Url = GetStringProperty(item, "url"),
+                        Snippet = NormalizeSnippet(summary),
+                        Date = GetStringProperty(item, "date"),
+                        SiteName = GetStringProperty(item, "site_name"),
+                        Authority = GetIntProperty(item, "authority", WebSearchResult.UnknownAuthority),
+                        RerankScore = GetDoubleProperty(item, "rerank_score", WebSearchResult.UnknownScore),
+                    });
+                }
+            }
+            catch (JsonException ex)
+            {
+                Logger.Error($"解析 DeepSeek 官方搜索响应 JSON 失败: {ex.Message}", ex);
+            }
+
+            return results;
+        }
+
+        /// <summary>
+        /// 通过 DeepSeek 官方 Fetch 接口抓取单个网页，返回 Markdown 正文。
+        /// 官方接口只返回 Markdown 正文，图片与子链接从 Markdown 语法中提取，
+        /// 以保持与本地 HTML 路径一致：图片供视觉模型直读，子链接供递归抓取。
+        /// </summary>
+        private async Task<WebPageContent?> FetchWebPageViaDeepSeekAsync(
+            string url, CancellationToken ct, int maxContentLength)
+        {
+            try
+            {
+                var requestBody = new Dictionary<string, object> { ["url"] = url };
+                var jsonContent = JsonSerializer.Serialize(requestBody);
+
+                using var request = new HttpRequestMessage(HttpMethod.Post, DeepSeekFetchApiUrl)
+                {
+                    Content = new StringContent(jsonContent, Encoding.UTF8, "application/json"),
+                };
+                request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {_officialApiKey}");
+
+                using var response = await _deepSeekHttpClient.SendAsync(request, ct);
+                var responseJson = await response.Content.ReadAsStringAsync();
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    Logger.Info($"DeepSeek Fetch 返回 HTTP {(int)response.StatusCode}: {TruncateForLog(responseJson)}");
+                    return null;
+                }
+
+                using var doc = JsonDocument.Parse(responseJson);
+                string title = GetStringProperty(doc.RootElement, "title");
+                string content = GetStringProperty(doc.RootElement, "content");
+                if (string.IsNullOrWhiteSpace(content))
+                    return null;
+
+                // 只有返回正文才算"成功请求"（官方计费口径）；空正文不计费。
+                RecordOfficialToolSuccess(isSearch: false);
+
+                string text = string.IsNullOrWhiteSpace(title)
+                    ? content.Trim()
+                    : title.Trim() + "\n\n" + content.Trim();
+
+                if (maxContentLength > 0 && text.Length > maxContentLength)
+                    text = text.Substring(0, maxContentLength);
+
+                return new WebPageContent
+                {
+                    Text = text,
+                    ImageUrls = ExtractMarkdownImageUrls(content, url),
+                    LinkUrls = ExtractMarkdownLinkUrls(content, url),
+                };
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                Logger.Info($"DeepSeek Fetch 抓取失败 ({url}): {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>读取 JSON 字符串属性，缺失或类型不符时返回空字符串。</summary>
+        private static string GetStringProperty(JsonElement element, string propertyName)
+            => element.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.String
+                ? value.GetString() ?? string.Empty
+                : string.Empty;
+
+        /// <summary>读取 JSON 整数属性，缺失或类型不符时返回 <paramref name="fallback"/>。</summary>
+        private static int GetIntProperty(JsonElement element, string propertyName, int fallback)
+            => element.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.Number
+                && value.TryGetInt32(out int result)
+                ? result
+                : fallback;
+
+        /// <summary>读取 JSON 数字属性，缺失或类型不符时返回 <paramref name="fallback"/>。</summary>
+        private static double GetDoubleProperty(JsonElement element, string propertyName, double fallback)
+            => element.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.Number
+                && value.TryGetDouble(out double result)
+                ? result
+                : fallback;
+
+        /// <summary>日志中截断过长的响应体，避免刷屏。</summary>
+        private static string TruncateForLog(string text)
+            => string.IsNullOrEmpty(text) ? string.Empty
+                : text.Length > 300 ? text.Substring(0, 300) : text;
+
+        /// <summary>按 Unicode 字符数截断查询词（官方 Search 接口限制 1～128 字符）。</summary>
+        private static string TruncateQueryChars(string query, int maxChars)
+            => string.IsNullOrEmpty(query) || query.Length <= maxChars
+                ? query
+                : query.Substring(0, maxChars);
 
         #endregion
 
@@ -1328,6 +1672,81 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             }
         }
 
+        /// <summary>
+        /// 从 Markdown 文本中提取图片绝对 URL（官方 Fetch 接口返回 Markdown 时使用）。
+        /// 支持 ![alt](url) 语法；相对路径基于页面 URL 解析，跳过 data: 等无效值。
+        /// </summary>
+        public static List<string> ExtractMarkdownImageUrls(string markdown, string baseUrl, int maxImages = MaxImagesPerPage)
+        {
+            var urls = new List<string>();
+            if (string.IsNullOrWhiteSpace(markdown) || maxImages <= 0) return urls;
+
+            Uri? baseUri = TryCreateHttpBaseUri(baseUrl);
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (Match m in Regex.Matches(
+                markdown,
+                @"!\[[^\]]*\]\(\s*(?<url><[^>]*>|[^)\s]+)",
+                RegexOptions.Singleline))
+            {
+                string? absolute = NormalizeWebUrl(UnwrapAngleBrackets(m.Groups["url"].Value), baseUri);
+                if (absolute == null) continue;
+                if (seen.Add(absolute))
+                {
+                    urls.Add(absolute);
+                    if (urls.Count >= maxImages) break;
+                }
+            }
+
+            return urls;
+        }
+
+        /// <summary>
+        /// 从 Markdown 文本中提取普通链接 [text](url)（官方 Fetch 接口返回 Markdown 时使用）。
+        /// 图片链接被排除，避免同一地址同时进入图片与子链接列表。
+        /// </summary>
+        public static List<string> ExtractMarkdownLinkUrls(string markdown, string baseUrl, int maxLinks = MaxLinksPerPage)
+        {
+            var urls = new List<string>();
+            if (string.IsNullOrWhiteSpace(markdown) || maxLinks <= 0) return urls;
+
+            Uri? baseUri = TryCreateHttpBaseUri(baseUrl);
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            // 前置负向后行断言排除图片语法 "![alt](...)"，只取普通链接。
+            foreach (Match m in Regex.Matches(
+                markdown,
+                @"(?<!!)\[[^\]]*\]\(\s*(?<url><[^>]*>|[^)\s]+)",
+                RegexOptions.Singleline))
+            {
+                string? absolute = NormalizeWebUrl(UnwrapAngleBrackets(m.Groups["url"].Value), baseUri);
+                if (absolute == null) continue;
+                if (seen.Add(absolute))
+                {
+                    urls.Add(absolute);
+                    if (urls.Count >= maxLinks) break;
+                }
+            }
+
+            return urls;
+        }
+
+        /// <summary>去掉 Markdown 链接目标两侧的可选尖括号（&lt;url&gt; 写法）。</summary>
+        private static string UnwrapAngleBrackets(string raw)
+        {
+            raw = raw.Trim();
+            return raw.Length > 1 && raw[0] == '<' && raw[raw.Length - 1] == '>'
+                ? raw.Substring(1, raw.Length - 2).Trim()
+                : raw;
+        }
+
+        /// <summary>把基准 URL 解析为 http(s) 的 Uri；无法解析时返回 null。</summary>
+        private static Uri? TryCreateHttpBaseUri(string baseUrl)
+            => Uri.TryCreate(baseUrl, UriKind.Absolute, out var parsed) &&
+               (parsed.Scheme == Uri.UriSchemeHttp || parsed.Scheme == Uri.UriSchemeHttps)
+                ? parsed
+                : null;
+
         #endregion
     }
 
@@ -1351,6 +1770,9 @@ namespace DeepSeek_v4_for_VisualStudio.Services
     /// </summary>
     public enum SearchProvider
     {
+        /// <summary>DeepSeek 官方 Search / Fetch 接口（仅官方 API 来源启用，使用自研搜索引擎）</summary>
+        DeepSeek,
+
         /// <summary>DuckDuckGo（完全免费，无需 API Key，备用方案）</summary>
         DuckDuckGo,
 
@@ -1377,6 +1799,27 @@ namespace DeepSeek_v4_for_VisualStudio.Services
 
         /// <summary>发布日期（百度 API 返回，DuckDuckGo 可能为空）</summary>
         public string Date { get; set; } = string.Empty;
+
+        /// <summary>
+        /// 站点名称（DeepSeek 官方 Search 返回；其它引擎为空）。
+        /// </summary>
+        public string SiteName { get; set; } = string.Empty;
+
+        /// <summary>
+        /// 网页权威性 0～4（DeepSeek 官方 Search），-1 表示未知；其它引擎为 <see cref="UnknownAuthority"/>。
+        /// </summary>
+        public int Authority { get; set; } = UnknownAuthority;
+
+        /// <summary>
+        /// 排序分数 0～3（DeepSeek 官方 Search），综合考虑相关性/权威性/时效性；其它引擎为 <see cref="UnknownScore"/>。
+        /// </summary>
+        public double RerankScore { get; set; } = UnknownScore;
+
+        /// <summary>权威性未知（非官方引擎或接口未返回）。</summary>
+        public const int UnknownAuthority = -1;
+
+        /// <summary>排序分数未知（非官方引擎或接口未返回）。</summary>
+        public const double UnknownScore = -1d;
     }
 
     /// <summary>

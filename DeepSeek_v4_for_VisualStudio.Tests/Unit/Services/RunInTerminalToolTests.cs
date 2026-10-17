@@ -211,7 +211,8 @@ public class RunInTerminalToolTests
     public async Task ExecuteAsync_DetachedCommandReturnsSnapshotWithoutWaitingForExit()
     {
         var tool = new RunInTerminalTool();
-        var command = "Write-Output 'DETACHED_OK'; Start-Sleep -Seconds 2";
+        const string marker = "DETACHED_OK";
+        var command = $"Write-Output '{marker}'; Start-Sleep -Seconds 2";
         var args = ParseArgs(JsonSerializer.Serialize(new Dictionary<string, string>
         {
             ["command"] = command,
@@ -225,8 +226,11 @@ public class RunInTerminalToolTests
         string startResult = await tool.ExecuteAsync(args, null);
 
         startResult.Should().Contain("PID");
+        // 按 command 精确定位本次作业（而不是「唯一的新作业」）：AsyncJobs 是静态共享字典，
+        // 将来若有其他测试/用例也注册作业，`Single(不是旧 id)` 会抛「Sequence contains
+        // more than one element」——那是测试自身的耦合，不是产品缺陷。
         var job = RunInTerminalTool.AsyncJobs.Values
-            .Single(candidate => !existingIds.Contains(candidate.Id));
+            .Single(candidate => !existingIds.Contains(candidate.Id) && candidate.Command == command);
 
         try
         {
@@ -236,21 +240,47 @@ public class RunInTerminalToolTests
                 ["id"] = job.Id,
             }));
 
+            // ── 观测窗口用「截止时间」而不是「固定轮询次数」──
+            // 历史缺陷：这里曾是 35 × 100ms ≈ 3.5s 的固定预算，而窗口内要等的是
+            // powershell.exe 冷启动 + 脚本执行 + 输出泵落盘。本机实测首行输出约 220ms，
+            // 但 CI 上（Release + coverlet 插桩、并行测试抢占 CPU、首次加载 powershell.exe
+            // 被 Defender 扫描）冷启动可轻易超过 3.5s，于是断言在“进程仍在运行、日志还是空”
+            // 的快照上失败——表现为小概率 flaky，与产品逻辑无关。
+            // 现在：拿到输出立即跳出（正常 < 1s，不拖慢测试），只有真慢才等到 60s。
+            var deadline = DateTime.UtcNow.AddSeconds(60);
             string outputSnapshot = string.Empty;
-            for (int attempt = 0; attempt < 35; attempt++)
+            while (DateTime.UtcNow < deadline)
             {
                 outputSnapshot = await outputTool.ExecuteAsync(outputArgs, null);
-                if (outputSnapshot.Contains("DETACHED_OK"))
+                if (outputSnapshot.Contains(marker))
                     break;
                 await Task.Delay(100);
             }
 
-            outputSnapshot.Should().Contain("DETACHED_OK");
+            outputSnapshot.Should().Contain(
+                marker,
+                $"detached 作业应在 60s 内产出输出；最后快照: {outputSnapshot}");
         }
         finally
         {
             RunInTerminalTool.AsyncJobs.TryRemove(job.Id, out _);
             job.DisposeDetachedProcess();
+
+            // detached 命令仍在 Start-Sleep 中时不会自行退出；Dispose 不结束进程，
+            // 留着会在 CI 上累积后台 powershell.exe 并拖慢后续测试，这里显式收尾。
+            try
+            {
+                if (int.TryParse(job.Id, out int pid))
+                {
+                    using var process = System.Diagnostics.Process.GetProcessById(pid);
+                    if (!process.HasExited)
+                        process.Kill();
+                }
+            }
+            catch
+            {
+                // 进程已退出或 PID 已回收：无需处理
+            }
         }
     }
 

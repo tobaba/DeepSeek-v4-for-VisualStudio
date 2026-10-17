@@ -48,6 +48,112 @@ public class ChatSessionTitleTests
         session.Title.Should().BeEmpty("标题不应绑定到创建时的界面语言");
     }
 
+    /// <summary>
+    /// 回归：标题生成请求不得携带 system 提示词。
+    /// <para>
+    /// 历史缺陷（v1.1.11 引入）：<c>GenerateAiTitleAsync</c> 为了蹭 Prompt Cache
+    /// 在 messages[0] 前置了 <c>AiPrompts.SharedImmutablePrefix</c>，导致一个「≤20 字摘要」
+    /// 请求实际发送了完整的 Agent system prompt（Windows/PowerShell 终端规则 + Handoff 规则）。
+    /// 本测试锁定标题 prompt 自洽、不依赖任何 system 的契约。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void GenerateTitlePrompt_IsSelfContained_NoSystemPromptNeeded()
+    {
+        // 标题 prompt 必须自带「不要使用工具」约束，否则去掉 system 后模型可能尝试调用工具。
+        var template = AiPrompts.SessionTitlePromptTemplate;
+
+        template.Should().NotBeNullOrWhiteSpace();
+        template.Should().Contain("工具");
+    }
+
+    /// <summary>
+    /// 回归：用户消息与助手回复之间必须有换行，不能粘连成
+    /// <c>用户：&lt;问题&gt;助手：&lt;回复&gt;</c>。
+    /// <para>
+    /// 历史缺陷：分段完全依赖资源文件里的 <c>\n\n</c> 转义，转义缺失时两段直接粘在一起。
+    /// 修复后由 <see cref="AiPrompts.EnsureBreakAfterPlaceholders"/> 保证占位符后必有换行。
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void BuildSessionTitlePrompt_SeparatesUserAndAssistantWithNewline()
+    {
+        const string user = "输出的所有记忆助手";
+        const string assistant = "三层记忆库均已查询完毕，全部为空";
+
+        string prompt = AiPrompts.BuildSessionTitlePrompt(user, assistant);
+
+        // 关键断言：用户正文与紧随其后的助手标签不得粘连
+        prompt.Should().NotContain(user + "助手：");
+        prompt.Should().NotContain(user + "Assistant:");
+        prompt.Should().Contain("\n\n");
+
+        // 用户内容与助手内容必须各自独立存在，且顺序正确
+        prompt.Should().Contain(user);
+        prompt.Should().Contain(assistant);
+        prompt.IndexOf(user, StringComparison.Ordinal)
+            .Should().BeLessThan(prompt.IndexOf(assistant, StringComparison.Ordinal));
+
+        // 占位符必须被真实内容替换，不能有残留
+        prompt.Should().NotContain("{0}").And.NotContain("{1}");
+    }
+
+    /// <summary>
+    /// 回归（缺陷复现）：模板缺少分段换行时，构建结果仍必须把两段分开。
+    /// 这条用「破损模板」直接覆盖历史缺陷的形态——<c>用户：{0}助手：{1}标题：</c>。
+    /// </summary>
+    [Fact]
+    public void EnsureBreakAfterPlaceholders_RepairsGluedTemplate()
+    {
+        const string glued = "生成标题：用户：{0}助手：{1}标题：";
+
+        string repaired = AiPrompts.EnsureBreakAfterPlaceholders(glued);
+
+        repaired.Should().Contain("用户：{0}\n\n助手：");
+        repaired.Should().Contain("{1}\n\n标题：");
+
+        // 修复后再格式化，不得出现「<用户内容>助手：」这种粘连
+        string prompt = string.Format(repaired, "问题", "回复");
+        prompt.Should().NotContain("问题助手：");
+    }
+
+    [Fact]
+    public void EnsureBreakAfterPlaceholders_IsIdempotent_WhenBreaksAlreadyPresent()
+    {
+        // 当前中英语言包都是这个形态：已有空行分隔，不应被再加一行
+        const string healthy = "生成标题：\n\n用户：{0}\n\n助手：{1}\n\n标题：";
+
+        AiPrompts.EnsureBreakAfterPlaceholders(healthy).Should().Be(healthy);
+
+        // 单个换行（\n 或 \r\n）也视作已分隔，不应重复插入
+        AiPrompts.EnsureBreakAfterPlaceholders("用户：{0}\n助手：{1}\n标题：")
+            .Should().Be("用户：{0}\n助手：{1}\n标题：");
+        AiPrompts.EnsureBreakAfterPlaceholders("用户：{0}\r\n助手：{1}\r\n标题：")
+            .Should().Be("用户：{0}\r\n助手：{1}\r\n标题：");
+    }
+
+    [Fact]
+    public void GenerateTitlePromptTemplate_KeepsPlaceholdersForLocalizedLabels()
+    {
+        // 标签文案（「用户：」「助手：」「标题：」）属于可翻译内容，必须留在语言包里，
+        // 不得硬编码进 Services/ 下的 .cs（见 tools/check-cjk-strings.ps1 的 i18n 约束）。
+        var template = AiPrompts.SessionTitlePromptTemplate;
+
+        template.Should().Contain("{0}");
+        template.Should().Contain("{1}");
+    }
+
+    [Fact]
+    public void BuildSessionTitlePrompt_WithEmptyReply_StillProducesUsablePrompt()
+    {
+        // 首轮回复可能为空（Agent 只调用了工具、或返回被截断）。
+        // 契约：不抛异常、占位符不残留；空回复只是少一段内容，不影响标题生成。
+        string prompt = AiPrompts.BuildSessionTitlePrompt("只有用户消息", string.Empty);
+
+        prompt.Should().Contain("只有用户消息");
+        prompt.Should().NotContain("{0}").And.NotContain("{1}");
+    }
+
     [Theory]
     [InlineData("中文标题")]
     [InlineData("English Title")]

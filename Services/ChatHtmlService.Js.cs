@@ -20,7 +20,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 "tokens:" + EscapeJsString(L["chat.html.context.tokens"]) + "," +
                 "injected:" + EscapeJsString(L["chat.html.context.injected"]) + "," +
                 "characters:" + EscapeJsString(L["chat.html.context.characters"]) + "," +
-                "search:" + EscapeJsString(L["chat.html.context.search"]) + "," +
                 "file:" + EscapeJsString(L["chat.html.context.file"]) + "," +
                 "selection:" + EscapeJsString(L["chat.html.context.selection"]) + "," +
                 "cursor:" + EscapeJsString(L["chat.html.context.cursor"]) + "," +
@@ -652,7 +651,7 @@ window._showCopyFeedback=function(msgIndex){
                 +'  ('+(tk.percent!=null?tk.percent:0)+'%)');
             var inj=d.injected||{};
             rows.push((t.injected||'Injected')+' : IDE='+!!inj.ide+' ('+(inj.ideChars||0)+' '+(t.characters||'ch')+')'
-                +'  '+(t.search||'Search')+'='+!!inj.search+'  RAG='+!!inj.rag);
+                +'  RAG='+!!inj.rag);
             var ide=d.ideSnapshot;
             if(ide){
                 rows.push((t.file||'File')+' : '+(ide.file||'-'));

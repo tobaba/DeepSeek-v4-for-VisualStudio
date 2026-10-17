@@ -193,18 +193,6 @@ public class ConversationContextManagerTests
         _manager.MessageCount.Should().Be(5);
     }
 
-    [Fact]
-    public void SetSearchContext_IsInjectedIntoMessages()
-    {
-        _manager.SetSearchContext("Search results: ...");
-        _manager.AddUserMessage("query");
-
-        var volatileBlock = _manager.BuildVolatileContextBlock();
-
-        volatileBlock.Should().NotBeNull();
-        volatileBlock!.Should().Contain("Search results");
-    }
-
     /// <summary>
     /// 回归：用户消息落库即带「本轮用户需求」前缀，中途切换 Agent（Handoff）
     /// 后前缀仍必须存在于请求中——此前前缀只在请求时临时加到副本上，

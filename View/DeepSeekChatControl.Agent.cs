@@ -495,7 +495,6 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     {
                         ide = ide != null,
                         ideChars = _contextManager.IdeContextChars,
-                        search = _contextManager.HasSearchContext,
                         rag = _contextManager.HasRagContext,
                     },
                     tokensPerSecond = _latestTurnMetrics == null ? null : new
@@ -570,7 +569,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     var ideCur = _ideContextTracker?.Current;
                     Logger.Info($"[ContextDebug] IDE={(ideCur != null ? ideCur.FilePath : "off")}" +
                         $"(sel={ideCur?.HasSelection == true}, diag={ideCur?.ErrorCount ?? 0}e/{ideCur?.WarningCount ?? 0}w) " +
-                        $"Search={_contextManager.HasSearchContext} RAG={_contextManager.HasRagContext} " +
+                        $"RAG={_contextManager.HasRagContext} " +
                         $"WS={_contextManager.GetWorkingSetTopPaths(6).Count} " +
                         $"Tokens={dbgStats.EstimatedTokens:N0}/{dbgStats.TokenBudget:N0}");
 
@@ -922,86 +921,6 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 }
                 if (_agentFactory.EditAgent is EditAgent editAgent)
                     editAgent.PlanUpdated += OnAgentPlanUpdated;
-
-                // ── 联网搜索：在 Agent 执行前进行搜索，注入上下文和结果卡片 ──
-                List<WebSearchResult>? searchResults = null;
-                string searchContext = string.Empty;
-                if (_webSearchEngine != "Off" && _webSearchService != null && !string.IsNullOrWhiteSpace(userText))
-                {
-                    try
-                    {
-                        bool isBaidu = _webSearchEngine == "Baidu";
-                        string providerName = _webSearchEngine switch
-                        {
-                            "Baidu" => "百度搜索",
-                            "Bing" => "Bing",
-                            _ => "DuckDuckGo",
-                        };
-                        var searchCt = context.CancellationToken;
-                        var L = LocalizationService.Instance;
-
-                        // Step 1: AI 优化搜索关键词
-                        await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-                        StatusLabel.Text = L["status.search.optimizing"];
-                        await TaskScheduler.Default;
-
-                        var optimization = await OptimizeSearchQueryAsync(userText, searchCt, isBaidu);
-                        if (context.CancellationToken.IsCancellationRequested)
-                            return;
-
-                        string searchQuery = optimization?.SearchQuery ?? userText;
-                        if (optimization?.NeedSearch == false)
-                        {
-                            Logger.Info("[Search] AI 判断无需搜索，跳过");
-                        }
-                        else
-                        {
-                            // Step 2: 执行搜索
-                            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-                            StatusLabel.Text = string.Format(L["status.search.searching"], providerName);
-                            await TaskScheduler.Default;
-
-                            searchResults = await _webSearchService.SearchAsync(searchQuery, searchCt,
-                                searchRecency: optimization?.SearchRecency);
-                            if (context.CancellationToken.IsCancellationRequested)
-                                return;
-
-                            if (searchResults.Count > 0)
-                            {
-                                // Step 3: 抓取网页内容增强结果
-                                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-                                StatusLabel.Text = L["status.search.enriching"];
-                                await TaskScheduler.Default;
-
-                                await EnrichSearchContextAsync(searchResults, searchCt);
-
-                                // Step 4: 构建搜索上下文注入 AI
-                                searchContext = BuildSearchContextFromResults(searchResults);
-                                _contextManager.SetSearchContext(searchContext);
-                                Logger.Info($"[Search] {providerName} 返回 {searchResults.Count} 条结果，已注入上下文 ({searchContext.Length} 字符)");
-
-                                // Step 5: 在 UI 中展示搜索结果卡片
-                                string searchCardJs = ChatHtmlService.BuildSearchResultsInjectionJs(
-                                    _agentStreamingMsgIndex, searchResults, providerName);
-                                await PostSearchResultsJsAsync(searchCardJs);
-                            }
-                            else
-                            {
-                                Logger.Info($"[Search] {providerName} 返回 0 条结果");
-                            }
-                        }
-                    }
-                    catch (OperationCanceledException) when (context.CancellationToken.IsCancellationRequested)
-                    {
-                        Logger.Info("[Search] 用户停止生成，结束搜索阶段");
-                        return;
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.Warn($"[Search] 搜索流程异常: {ex.Message}");
-                        _contextManager.SetSearchContext(null);
-                    }
-                }
 
                 AgentResult agentResult;
                 try
@@ -2107,6 +2026,19 @@ namespace DeepSeek_v4_for_VisualStudio.View
             {
                 Logger.Warn($"[Cache] 恢复统计失败: {ex.Message}");
             }
+
+            // ── 恢复官方 Search / Fetch 调用次数（与 token 统计同一时机）──
+            try
+            {
+                _webSearchService?.RestoreOfficialToolStats(
+                    _activeSession.CumulativeOfficialSearchCount,
+                    _activeSession.CumulativeOfficialFetchCount);
+                Logger.Info($"[Search] 从会话恢复官方工具调用次数: search={_activeSession.CumulativeOfficialSearchCount}, fetch={_activeSession.CumulativeOfficialFetchCount}");
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"[Search] 恢复官方工具调用次数失败: {ex.Message}");
+            }
         }
 
         /// <summary>
@@ -2358,6 +2290,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
             // 工具调用摘要由 BaseAgent 显式标记，始终作为用户可见的过程输出展示。
             if (entry.Level == "TOOL")
+                return msg;
+            // 工具结果摘要（如 web_search 的网页列表）：同样作为过程行展示。
+            if (entry.Level == "TOOLRESULT")
                 return msg;
 
             // ── 过滤纯内部日志（中英文双语匹配）──

@@ -45,6 +45,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             "list_dir",         // 快速查看项目目录结构
             // 文件读写与编辑
             "read_file",
+            "web_search",       // 联网搜索（需在设置中开启）
+            "fetch_webpage",    // 抓取指定网页内容
             "capture_window",    // 捕获窗口截图（视觉模型直接查看）
             "capture_webpage",   // 离屏渲染 URL 截图（视觉模型直接查看）
             "replace_string_in_file",

@@ -910,6 +910,14 @@ namespace DeepSeek_v4_for_VisualStudio.Models
         /// <summary>累计费用（美元，国际价目）。与人民币双轨累计，显示时按账户币种取用</summary>
         [DataMember]
         public double CumulativeCostUsd { get; set; }
+
+        /// <summary>累计官方 Search 成功调用次数（跨会话持久化，重启后恢复显示）</summary>
+        [DataMember]
+        public int CumulativeOfficialSearchCount { get; set; }
+
+        /// <summary>累计官方 Fetch 成功调用次数（跨会话持久化，重启后恢复显示）</summary>
+        [DataMember]
+        public int CumulativeOfficialFetchCount { get; set; }
     }
 
     /// <summary>
@@ -929,27 +937,6 @@ namespace DeepSeek_v4_for_VisualStudio.Models
 
         [DataMember]
         public string? ActiveSessionId { get; set; }
-    }
-
-    // ======== 搜索查询优化模型 ========
-
-    /// <summary>
-    /// AI 返回的搜索查询优化结果。由 AI 分析用户问题和上下文后生成。
-    /// 必须严格校验 JSON 格式。
-    /// </summary>
-    public class SearchQueryOptimization
-    {
-        /// <summary>优化后的搜索关键词（必填，不超过72字符）</summary>
-        [JsonPropertyName("search_query")]
-        public string SearchQuery { get; set; } = string.Empty;
-
-        /// <summary>搜索时效过滤（可选）: week/month/semiyear/year</summary>
-        [JsonPropertyName("search_recency")]
-        public string? SearchRecency { get; set; }
-
-        /// <summary>是否需要联网搜索</summary>
-        [JsonPropertyName("need_search")]
-        public bool NeedSearch { get; set; } = true;
     }
 
     // ======== 文件上传模型 ========

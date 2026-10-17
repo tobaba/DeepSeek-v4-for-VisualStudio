@@ -473,67 +473,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         }
 
         /// <summary>
-        /// 构建联网搜索结果的 HTML 卡片（可折叠）。
-        /// 用于在 AI 回复之前展示搜索到的网页结果。
-        /// </summary>
-        /// <param name="results">搜索结果列表</param>
-        /// <param name="providerName">搜索提供商名称（如 "百度搜索"、"DuckDuckGo"）</param>
-        /// <returns>搜索结果卡片的 HTML 字符串</returns>
-        public static string BuildSearchResultsHtml(IReadOnlyList<WebSearchResult> results, string? providerName = null)
-        {
-            if (results == null || results.Count == 0)
-                return string.Empty;
-
-            string label = providerName ?? L["chat.html.webSearchLabel"];
-
-            var sb = new StringBuilder();
-            sb.Append("<details class='search-results-card' open='true'>");
-            sb.Append($"<summary> {label} ({results.Count} {L["chat.html.webSearchResults"]})</summary>");
-
-            foreach (var result in results)
-            {
-                string escapedTitle = System.Net.WebUtility.HtmlEncode(result.Title ?? string.Empty);
-                string escapedUrl = System.Net.WebUtility.HtmlEncode(result.Url ?? string.Empty);
-                string escapedSnippet = System.Net.WebUtility.HtmlEncode(result.Snippet ?? string.Empty);
-                string escapedDate = System.Net.WebUtility.HtmlEncode(result.Date ?? string.Empty);
-
-                sb.Append("<div class='search-result-item'>");
-                sb.Append($"<a class='search-result-title' href='{escapedUrl}' target='_blank'>{escapedTitle}</a>");
-                sb.Append($"<span class='search-result-url'>{escapedUrl}</span>");
-                sb.Append($"<div class='search-result-snippet'>{escapedSnippet}</div>");
-                if (!string.IsNullOrWhiteSpace(result.Date))
-                    sb.Append($"<span class='search-result-date'> {escapedDate}</span>");
-                sb.Append("</div>");
-            }
-
-            sb.Append("</details>");
-            return sb.ToString();
-        }
-
-        /// <summary>
-        /// 构建用于 JS 注入的搜索结果卡片脚本。
-        /// 将搜索结果卡片插入到指定 AI 消息的上方。
-        /// </summary>
-        public static string BuildSearchResultsInjectionJs(int messageIndex, IReadOnlyList<WebSearchResult> results, string providerName = null)
-        {
-            string cardHtml = BuildSearchResultsHtml(results, providerName);
-            string escapedCard = EscapeJsString(cardHtml);
-
-            return $@"
-(function(){{
-    var msgDiv=document.getElementById('msg-{messageIndex}');
-    if(!msgDiv)return;
-    var existing=document.getElementById('search-card-{messageIndex}');
-    if(existing)existing.remove();
-    var temp=document.createElement('div');
-    temp.id='search-card-{messageIndex}';
-    temp.innerHTML={escapedCard};
-    msgDiv.parentNode.insertBefore(temp,msgDiv);
-    window.__scrollToBottom('smooth');
-}})();";
-        }
-
-        /// <summary>
         /// 构建内联编辑区域的 JS 脚本。
         /// 在用户消息气泡中用 textarea + 保存/取消按钮替换正文区域。
         /// </summary>

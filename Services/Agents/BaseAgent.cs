@@ -38,7 +38,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         protected static readonly HashSet<string> KnownBuiltInToolNames = new(StringComparer.OrdinalIgnoreCase)
         {
             "list_dir", "read_file", "file_search", "grep_search", "symbol_search", "get_file_symbols", "get_errors",
-            "fetch_webpage", "capture_window", "capture_webpage", "build_solution",
+            "fetch_webpage", "web_search", "capture_window", "capture_webpage", "build_solution",
             "replace_string_in_file", "multi_replace_string_in_file",
             "create_file", "delete_file", "apply_patch", "create_directory", "run_in_terminal",
             "get_terminal_output", "load_skill", "read_skill_resource",
@@ -1993,6 +1993,15 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                         }
 
                         Logger.Info($"[Agent:{Definition.Name}] 工具 {tc.Function.Name} 返回: {(toolResult.Length > 200 ? toolResult.Substring(0, 200) + "..." : toolResult)}");
+
+                        // ── 过程区展示工具结果摘要：目前仅 web_search 提供可读的网页列表 ──
+                        // 以独立日志级别标记，UI 侧将其作为过程行展示且不计入工具调用次数。
+                        if (string.Equals(tc.Function.Name, "web_search", StringComparison.OrdinalIgnoreCase))
+                        {
+                            string resultSummary = BuiltInToolService.GetToolResultSummary(tc.Function.Name, resultText);
+                            if (!string.IsNullOrWhiteSpace(resultSummary))
+                                AddLog("TOOLRESULT", resultSummary);
+                        }
                     }
 
                     if (!noToolsReminderAppended
@@ -2935,6 +2944,10 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             // ── 2. 内置工具（回退）──
             if (BuiltInTools != null && BuiltInToolService.IsBuiltInTool(toolName))
             {
+                // 注入当前轮用户原始问题（AsyncLocal）：web_search 会把它作为
+                // 官方 Search 的 ori_question，帮助引擎理解搜索意图。
+                BuiltInToolBase.CurrentUserQuestion = Context?.CurrentUserContent;
+
                 string? result = await BuiltInTools.ExecuteBuiltInToolAsync(toolName, argumentsJson, workspaceRoot, ct);
                 if (result != null)
                     return result;
@@ -3416,7 +3429,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                 "DSML", "calls", "function_calls?", "tool_calls?", "invoke", "parameter",
                 "VisualStudio_askQuestions", "runSubagent", "tool_result",
                 "file_search", "grep_search", "list_dir", "read_file",
-                "semantic_search", "fetch_webpage", "run_in_terminal",
+                "semantic_search", "fetch_webpage", "web_search", "run_in_terminal",
                 "create_file", "replace_string_in_file",
                 "create_directory", "runSubagent", "mcp_\\w+", "github_\\w+",
                 // DeepSeek DSML wrapper tags

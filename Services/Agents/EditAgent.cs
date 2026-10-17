@@ -97,6 +97,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         {
             // 读取与探索工具
             "read_file",
+            "web_search",
+            "fetch_webpage",
             "capture_window",
             "capture_webpage",
             "file_search",

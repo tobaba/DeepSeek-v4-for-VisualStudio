@@ -33,6 +33,54 @@ public class BuiltInToolServiceTests
         service.ToolResultCompactor.Should().NotBeNull();
     }
 
+    #region Web Search Toggle
+
+    [Fact]
+    public void WebSearchEnabled_DefaultOff_ExcludesToolFromToolSet()
+    {
+        var service = new BuiltInToolService();
+
+        service.WebSearchEnabled.Should().BeFalse();
+        service.GetFullToolDefinitions()
+            .Select(d => d.Function.Name)
+            .Should().NotContain("web_search");
+    }
+
+    [Fact]
+    public void WebSearchEnabled_On_AddsToolToToolSet()
+    {
+        var service = new BuiltInToolService { WebSearchEnabled = true };
+
+        service.GetFullToolDefinitions()
+            .Select(d => d.Function.Name)
+            .Should().Contain("web_search");
+    }
+
+    [Fact]
+    public void WebSearchEnabled_OffAgain_RemovesToolFromToolSet()
+    {
+        var service = new BuiltInToolService { WebSearchEnabled = true };
+        service.WebSearchEnabled = false;
+
+        service.GetFullToolDefinitions()
+            .Select(d => d.Function.Name)
+            .Should().NotContain("web_search");
+    }
+
+    [Fact]
+    public async Task ExecuteBuiltInToolAsync_WebSearchDisabled_ReturnsDisabledMessage()
+    {
+        var service = new BuiltInToolService();
+
+        var result = await service.ExecuteBuiltInToolAsync("web_search", "{\"query\":\"test\"}");
+
+        result.Should().NotBeNull();
+        result.Should().Contain("Error:");
+        result.Should().Contain("web_search");
+    }
+
+    #endregion
+
     [Fact]
     public void GetFilteredToolDefinitions_WithWhitelist_ReturnsOnlyAllowed()
     {
@@ -99,6 +147,7 @@ public class BuiltInToolServiceTests
     [InlineData("load_skill", true)]
     [InlineData("read_skill_resource", true)]
     [InlineData("fetch_webpage", true)]
+    [InlineData("web_search", true)]
     [InlineData("capture_window", true)]
     [InlineData("capture_webpage", true)]
     [InlineData("build_solution", true)]
@@ -186,11 +235,12 @@ public class BuiltInToolServiceTests
     #region Static GetBuiltInToolDefinitions
 
     [Fact]
-    public void GetBuiltInToolDefinitions_Returns25Tools()
+    public void GetBuiltInToolDefinitions_ReturnsAllBuiltInTools()
     {
         var defs = BuiltInToolService.GetBuiltInToolDefinitions();
 
-        defs.Should().HaveCount(25);
+        defs.Select(d => d.Function.Name).Should().Contain("web_search");
+        defs.Should().HaveCount(defs.Select(d => d.Function.Name).Distinct().Count());
     }
 
     [Fact]

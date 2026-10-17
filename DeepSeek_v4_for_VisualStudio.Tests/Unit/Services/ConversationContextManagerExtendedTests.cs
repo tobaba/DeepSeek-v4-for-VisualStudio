@@ -1083,15 +1083,12 @@ public class ConversationContextManagerExtendedTests
     public void ContextBlocks_IncludeSystemAndVolatileSources()
     {
         _manager.SetSystemPrompt("You are helpful.");
-        _manager.SetSearchContext("Web search results");
         _manager.AddUserMessage("Query");
 
         var messages = _manager.BuildApiMessages();
         var volatileBlock = _manager.BuildVolatileContextBlock();
 
         messages.Should().Contain(m => m.Role == "system" && m.Content!.Contains("You are helpful"));
-        volatileBlock.Should().NotBeNull();
-        volatileBlock!.Should().Contain("Web search results");
     }
 
     [Fact]
@@ -1103,17 +1100,6 @@ public class ConversationContextManagerExtendedTests
 
         volatileBlock.Should().NotBeNull();
         volatileBlock!.Should().Contain("RAG context from database");
-    }
-
-    [Fact]
-    public void BuildVolatileContextBlock_IncludesSearchContext()
-    {
-        _manager.SetSearchContext("Web search results");
-
-        var volatileBlock = _manager.BuildVolatileContextBlock();
-
-        volatileBlock.Should().NotBeNull();
-        volatileBlock!.Should().Contain("Web search results");
     }
 
     [Fact]

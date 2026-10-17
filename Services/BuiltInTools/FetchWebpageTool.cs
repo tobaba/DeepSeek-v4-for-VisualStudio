@@ -65,7 +65,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services.BuiltInTools
         {
             string url = GetStringArg(args, "url");
             int maxDepth = GetIntArg(args, "maxDepth", 1);
-            int maxContentLength = GetIntArg(args, "maxContentLength", 3000);
+            // 默认 0 = 不截断正文；仅在模型显式传入正数时才限制长度。
+            int maxContentLength = GetIntArg(args, "maxContentLength", 0);
 
             if (string.IsNullOrWhiteSpace(url))
                 return LocalizationService.Instance["tool.fetchWebpage.missingUrl"];
@@ -75,7 +76,9 @@ namespace DeepSeek_v4_for_VisualStudio.Services.BuiltInTools
                 return LocalizationService.Instance.Format("tool.fetchWebpage.invalidUrl", url);
 
             if (maxDepth < 1) maxDepth = 1; else if (maxDepth > 3) maxDepth = 3;
-            if (maxContentLength < 500) maxContentLength = 500; else if (maxContentLength > 10000) maxContentLength = 10000;
+            // 负数视为未指定（不截断）；显式传入太小或过大的正值也不再强制夹逼，
+            // 由调用方按需自行设置，避免"要全文却只拿到 10000 字符"的隐性截断。
+            if (maxContentLength < 0) maxContentLength = 0;
 
             if (_webSearchService == null)
                 return LocalizationService.Instance["tool.fetchWebpage.serviceNotInit"];

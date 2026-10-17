@@ -130,6 +130,13 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 _activeSession.CumulativeCostUsd = _apiService.TotalSessionCostUsd;
             }
 
+            // ── 持久化官方 Search / Fetch 调用次数（按会话，重启后恢复显示）──
+            if (_webSearchService != null)
+            {
+                _activeSession.CumulativeOfficialSearchCount = _webSearchService.OfficialSearchSuccessCount;
+                _activeSession.CumulativeOfficialFetchCount = _webSearchService.OfficialFetchSuccessCount;
+            }
+
             _sessionsContainer.ActiveSessionId = _activeSession.Id;
             ChatPersistenceService.SaveSessions(_solutionPath, _sessionsContainer);
         }
@@ -172,12 +179,23 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 string userSnippet = firstUserMessage;
                 string assistantSnippet = firstAssistantReply;
 
-                var prompt = string.Format(LocalizationService.Instance["session.generateTitlePrompt"], userSnippet, assistantSnippet);
+                // ── 标题 prompt：文案来自语言包，分段换行由 AiPrompts 保证 ──
+                // 历史缺陷：「用户：/助手：/标题：」之间的换行全部依赖资源文件的 JSON 转义
+                // （\n\n），转义缺失时两段内容直接粘连成「用户：<问题>助手：<回复>」，
+                // 模型无法分辨问题与回复的边界。BuildSessionTitlePrompt 会在占位符后
+                // 补足换行（已有换行则保持原样），因此资源文件怎么写都不会再退化。
+                var prompt = AiPrompts.BuildSessionTitlePrompt(userSnippet, assistantSnippet);
 
-                // ── v1.1.11: 前置 SharedImmutablePrefix 以命中 Prompt Cache ──
+                // ── 标题请求不发 system 提示词 ──
+                // 历史缺陷（v1.1.11 引入）：此处曾前置 AiPrompts.SharedImmutablePrefix 以蹭
+                // Prompt Cache，结果把一个「只做 ≤20 字摘要」的请求变成了完整 Agent 请求——
+                // 「Windows/PowerShell 终端规则 + Agent Handoff 规则」整段被发出去，既与任务无关
+                // （模型可能被误导去执行终端/探索行为），又白付一次输入 token。
+                // 标题 prompt 自身已自洽（含「不要使用工具」约束），无需 system。
+                // 附带好处：messages[0] 不再是 SharedImmutablePrefix，该请求因此不会进入
+                // PrefixCacheManager 的基准检查/pin，不会用标题请求的短上下文污染前缀基准。
                 var messages = new List<ChatApiMessage>
                 {
-                    new ChatApiMessage { Role = "system", Content = AiPrompts.SharedImmutablePrefix },
                     new ChatApiMessage { Role = "user", Content = prompt }
                 };
 
@@ -677,6 +695,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
             // 重置搜索额度状态（新会话可能额度已恢复）
             _webSearchService?.ResetQuotaState();
+            // 重置官方 Search / Fetch 的按次计费用量统计
+            _webSearchService?.ResetOfficialToolStats();
 
             // 清空附件列表
             ClearAttachedFiles();
@@ -865,6 +885,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 RefreshAppendQueuePanel();
                 // ── 重置累计 Token / 费用计数器 ──
                 _apiService?.ResetAccumulatedStats();
+                // 官方 Search / Fetch 调用次数同属本会话累计，清空消息时一并归零
+                _webSearchService?.ResetOfficialToolStats();
 
                 // ── 聊天区即将重建：清空审批显示队列，移除残留审批卡片 ──
                 ResetApprovalQueue();

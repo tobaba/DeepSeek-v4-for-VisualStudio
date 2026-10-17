@@ -203,7 +203,11 @@ namespace DeepSeek_v4_for_VisualStudio.View
         /// <summary>程序化填充会话下拉时抑制 SelectionChanged（P2 交互修复）。</summary>
         private bool _suppressSessionSelection;
         private bool _isRefreshingCoreControls;
-        private string _webSearchEngine = "Off"; // "Off" | "Baidu" | "DuckDuckGo"
+        private string _webSearchEngine = "Off"; // "Off" | "DeepSeek" | "Baidu" | "Bing" | "DuckDuckGo"
+
+        /// <summary>联网搜索下拉框各项对应的引擎 Id，与 <see cref="WebSearchEngineComboBox"/> 的显示文本一一对应。
+        /// 官方 API 来源时首项为 DeepSeek（官方 Search/Fetch），自定义端点时不提供该项。</summary>
+        private string[] _searchEngineIds = Array.Empty<string>();
 
         // ── 文件上传 ──
         private readonly List<string> _attachedFilePaths = new(); // 已选文件路径列表
@@ -558,7 +562,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
             // 联网搜索: 默认关闭
             RefreshSearchEngineItems();
-            WebSearchEngineComboBox.SelectedIndex = 0; // 默认百度
+            // 首次构建时还没有 _options，_searchEngineIds 不含 DeepSeek 项，默认落到第一个引擎。
+            if (WebSearchEngineComboBox.SelectedIndex < 0 && WebSearchEngineComboBox.Items.Count > 0)
+                WebSearchEngineComboBox.SelectedIndex = 0;
 
             _webSearchEngine = "Off";
             UpdateWebSearchToggleAppearance();
@@ -1294,7 +1300,17 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
             // ── API 消耗 + 费用部分 ──
             string apiPart;
-            if (totalTokens == 0)
+            // 官方 Search / Fetch 按次计费与本会话 token 费用合并展示：
+            // 即使 token 为 0（例如只调用了 web_search 就被停止），也要显示这部分费用。
+            double officialToolCost = 0;
+            if (IsOfficialSource && _webSearchService != null)
+            {
+                officialToolCost = ResolveAccountCurrency() == "USD"
+                    ? _webSearchService.OfficialToolCostUsd
+                    : _webSearchService.OfficialToolCostYuan;
+            }
+
+            if (totalTokens == 0 && officialToolCost <= 0)
             {
                 apiPart = "";
             }
@@ -1317,14 +1333,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 else
                 {
                     // ── 币种判定：余额 API 缓存优先，其次 ApiService 捕获值，默认 CNY（国内价）──
-                    string currency =
-                        (_lastBalance != null && _lastBalance.BalanceInfos.Count > 0
-                            ? _lastBalance.BalanceInfos[0].Currency
-                            : null)
-                        ?? _apiService.AccountCurrency;
-                    if (string.IsNullOrWhiteSpace(currency))
-                        currency = "CNY";
-                    currency = currency.ToUpperInvariant();
+                    string currency = ResolveAccountCurrency();
                     bool isUsd = currency == "USD";
                     string symbol = GetCurrencySymbol(currency);
 
@@ -1339,6 +1348,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
                                   + cacheHitTokens / 1_000_000.0 * hitPrice
                                   + completionTokens / 1_000_000.0 * outputPrice;
                     }
+
+                    // 叠加官方 Search / Fetch 的按次计费
+                    totalCost += officialToolCost;
 
                     string costStr = totalCost >= 0.01
                         ? $"{symbol}{totalCost:F2}"
@@ -1408,6 +1420,62 @@ namespace DeepSeek_v4_for_VisualStudio.View
             {
                 ShowConsumptionFallback();
             }
+
+            UpdateSessionConsumptionToolTip();
+        }
+
+        /// <summary>
+        /// 刷新会话消耗标签的 ToolTip：说明官方 Search / Fetch 的按次计费口径
+        /// （成功请求才计费、北京时间 2026-11-01 00:00 起生效）与本会话实际用量。
+        /// 非官方来源（不产生官方计费）时清除 ToolTip。
+        /// </summary>
+        private void UpdateSessionConsumptionToolTip()
+        {
+            var balanceLabel = BalanceLabel;
+            if (balanceLabel == null) return;
+
+            if (_webSearchService == null || !IsOfficialSource)
+            {
+                balanceLabel.ToolTip = null;
+                return;
+            }
+
+            int searchCount = _webSearchService.OfficialSearchSuccessCount;
+            int fetchCount = _webSearchService.OfficialFetchSuccessCount;
+
+            // 两类调用都没发生时不必显示计费说明，避免悬停出现无信息量的提示。
+            if (searchCount == 0 && fetchCount == 0)
+            {
+                balanceLabel.ToolTip = null;
+                return;
+            }
+
+            string currency = ResolveAccountCurrency();
+            string symbol = GetCurrencySymbol(currency);
+            double cost = currency == "USD"
+                ? _webSearchService.OfficialToolCostUsd
+                : _webSearchService.OfficialToolCostYuan;
+            string costStr = cost >= 0.01 ? $"{symbol}{cost:F2}" : $"{symbol}{cost:F4}";
+
+            balanceLabel.ToolTip = LocalizationService.Instance.Format(
+                "status.toolBilling.tooltip",
+                searchCount,
+                fetchCount,
+                costStr);
+        }
+
+        /// <summary>
+        /// 判定账户币种：余额 API 缓存优先，其次 ApiService 捕获值，默认 CNY（国内价）。
+        /// 会话消耗显示与官方工具计费说明共用同一判定，避免两处口径不一致。
+        /// </summary>
+        private string ResolveAccountCurrency()
+        {
+            string? currency = (_lastBalance != null && _lastBalance.BalanceInfos.Count > 0
+                    ? _lastBalance.BalanceInfos[0].Currency
+                    : null)
+                ?? _apiService?.AccountCurrency;
+
+            return string.IsNullOrWhiteSpace(currency) ? "CNY" : currency.ToUpperInvariant();
         }
 
         /// <summary>
@@ -1694,23 +1762,50 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 if (WebSearchEngineComboBox == null) return;
 
                 var L = LocalizationService.Instance;
-                int previousIndex = WebSearchEngineComboBox.SelectedIndex;
+                string? previousEngine = GetSelectedSearchEngineId();
 
-                WebSearchEngineComboBox.ItemsSource = new[] {
-                    " " + L["websearch.searchEngine.baidu"],
-                    " " + L["websearch.searchEngine.bing"],
-                    " " + L["websearch.searchEngine.duckduckgo"]
-                };
+                var ids = new List<string>();
+                var items = new List<string>();
 
-                // 首次构建时 SelectedIndex 为 -1，交由调用方决定默认值
-                if (previousIndex >= 0 && previousIndex < WebSearchEngineComboBox.Items.Count)
-                    WebSearchEngineComboBox.SelectedIndex = previousIndex;
+                // DeepSeek 官方 Search/Fetch 仅在官方 API 来源下提供，且为首选默认项。
+                if (IsOfficialSource)
+                {
+                    ids.Add("DeepSeek");
+                    items.Add(" " + L["websearch.searchEngine.deepseek"]);
+                }
+                ids.Add("Baidu");
+                items.Add(" " + L["websearch.searchEngine.baidu"]);
+                ids.Add("Bing");
+                items.Add(" " + L["websearch.searchEngine.bing"]);
+                ids.Add("DuckDuckGo");
+                items.Add(" " + L["websearch.searchEngine.duckduckgo"]);
+
+                _searchEngineIds = ids.ToArray();
+                WebSearchEngineComboBox.ItemsSource = items;
+
+                // 按引擎 Id（而非索引）恢复选中项：端点来源变化导致列表长度改变时也不会错位。
+                int restoreIndex = previousEngine == null
+                    ? -1
+                    : Array.IndexOf(_searchEngineIds, previousEngine);
+                if (restoreIndex >= 0)
+                    WebSearchEngineComboBox.SelectedIndex = restoreIndex;
             }
             catch (Exception ex)
             {
                 Logger.Warn($"[i18n] 重建搜索引擎下拉项失败: {ex.Message}");
             }
         }
+
+        /// <summary>当前下拉框选中项对应的引擎 Id；无选中项时返回 null。</summary>
+        private string? GetSelectedSearchEngineId()
+        {
+            int index = WebSearchEngineComboBox?.SelectedIndex ?? -1;
+            return index >= 0 && index < _searchEngineIds.Length ? _searchEngineIds[index] : null;
+        }
+
+        /// <summary>引擎 Id 在当前下拉项中的索引；不存在时返回 -1。</summary>
+        private int IndexOfSearchEngine(string engineId)
+            => Array.IndexOf(_searchEngineIds, engineId);
 
         /// <summary>
         /// 更新所有按钮的 ToolTip 和文本（跟随 i18n 语言设置）。

@@ -1626,6 +1626,22 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     // 模型/来源切换影响 capture_window 等工具可见性 → 使 Agent 完整工具集缓存失效
                     _agentFactory?.InvalidateFullToolSetCache();
                     Logger.Info($"模型端点切换为: source={targetSource}, baseUrl={_apiService.BaseUrl}, model={config.Model}");
+
+                    // 官方 ↔ 自定义来源切换会改变联网搜索的下拉项（DeepSeek 官方仅在官方来源提供）
+                    // 与官方 Search / Fetch 的可用性，必须重新按新来源刷新搜索配置。
+                    if (sourceChanged)
+                    {
+                        RefreshWebSearchFromSettings();
+
+                        // 用户此前在自定义端点下偏好过 DeepSeek 引擎时，列表里没有对应项，
+                        // 这里把偏好纠正为官方默认引擎，避免保存值与实际显示长期不一致。
+                        if (_options != null && !string.Equals(_options.SearchProvider, _webSearchEngine, StringComparison.Ordinal))
+                        {
+                            _options.SearchProvider = _webSearchEngine;
+                            try { _options.SaveSettingsToStorage(); } catch { /* 非关键路径 */ }
+                            UnifiedSettingsSync.PushFromPage(_options);
+                        }
+                    }
                 }
                 Logger.Info($"模型切换为: {item.Display}");
                 RecordRuntimeSettingsApplied();
@@ -1717,7 +1733,15 @@ namespace DeepSeek_v4_for_VisualStudio.View
         #region Event Handlers - Web Search
 
         /// <summary>
-        /// 联网搜索开关按钮点击：切换开启/关闭，联动下拉框可见性。
+        /// 鼠标悬停到会话消耗标签时刷新 ToolTip，确保显示的是最新调用次数与费用。
+        /// 计费说明涉及官方 Search / Fetch 的按次计费口径，悬停时才计算可避免无谓刷新。
+        /// </summary>
+        private void BalanceLabel_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
+            => UpdateSessionConsumptionToolTip();
+
+        /// <summary>
+        /// 联网搜索开关按钮点击：切换开启/关闭。
+        /// 开关只决定 web_search 工具是否加入工具集，开启后由模型按需调用，不再固定每轮搜索。
         /// </summary>
         private void WebSearchToggleButton_Click(object sender, RoutedEventArgs e)
         {
@@ -1726,24 +1750,14 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 bool enable = _webSearchEngine == "Off";
                 if (_webSearchEngine == "Off")
                 {
-                    // 使用 ComboBox 当前选择的搜索引擎，而非硬编码 DuckDuckGo
-                    string? selected = WebSearchEngineComboBox.SelectedItem as string;
-                    string newEngine = selected switch
-                    {
-                        string s when s.Contains("百度") || s.Contains("Baidu") => "Baidu",
-                        string s when s.Contains("Bing") => "Bing",
-                        _ => "DuckDuckGo"
-                    };
+                    // 使用 ComboBox 当前选择的引擎 Id，而非硬编码 DuckDuckGo。
+                    // 下拉项在端点来源切换后会重建，只有 Id 与显示文本解耦才不会错位。
+                    string newEngine = GetSelectedSearchEngineId() ?? "DuckDuckGo";
                     _webSearchEngine = newEngine;
                     // 同步 ComboBox 选中项到当前引擎（确保 UI 一致）
-                    int idx = newEngine switch
-                    {
-                        "Baidu" => 0,
-                        "Bing" => 1,
-                        "DuckDuckGo" => 2,
-                        _ => 2
-                    };
-                    WebSearchEngineComboBox.SelectedIndex = idx;
+                    int idx = IndexOfSearchEngine(newEngine);
+                    if (idx >= 0)
+                        WebSearchEngineComboBox.SelectedIndex = idx;
                 }
                 else
                 {
@@ -1758,6 +1772,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 }
 
                 ApplyWebSearchConfig();
+                RefreshWebSearchToolRegistration();
                 Logger.Info($"联网搜索状态切换为: {_webSearchEngine}");
                 UpdateWebSearchToggleAppearance();
 
@@ -1847,6 +1862,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
         /// </summary>
         private void UpdateWebSearchToggleAppearance()
         {
+            // 主题应用阶段也会调用此方法，需容忍控件尚未就绪。
+            if (WebSearchToggleButton == null || WebSearchEngineComboBox == null) return;
+
             bool isOn = _webSearchEngine != "Off";
             var L = LocalizationService.Instance;
             if (isOn)
@@ -1880,13 +1898,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 // 搜索关闭时，ComboBox 仅作为偏好存储，不切换引擎
                 if (_webSearchEngine == "Off") return;
 
-                string? selected = WebSearchEngineComboBox.SelectedItem as string;
-                string newEngine = selected switch
-                {
-                    string s when s.Contains("百度") || s.Contains("Baidu") => "Baidu",
-                    string s when s.Contains("Bing") => "Bing",
-                    _ => "DuckDuckGo"
-                };
+                string? newEngine = GetSelectedSearchEngineId();
+                if (newEngine == null) return;
 
                 if (_webSearchEngine == newEngine) return; // 避免循环触发
 
@@ -1924,68 +1937,101 @@ namespace DeepSeek_v4_for_VisualStudio.View
         #region Event Handlers - WebView2
 
         /// <summary>
-        /// WebView2 新窗口请求事件：拦截 target='_blank' 链接，在系统默认浏览器中打开。
-        /// 使搜索结果卡片中的 URL 可以点击跳转。
+        /// WebView2 新窗口请求事件：拦截 target='_blank' / window.open 链接，
+        /// 一律在系统默认浏览器中打开，不在 WebView2 内新建窗口。
         /// </summary>
         private void CoreWebView2_NewWindowRequested(object? sender, CoreWebView2NewWindowRequestedEventArgs e)
         {
             e.Handled = true; // 阻止 WebView2 内部打开
-            try
-            {
-                Process.Start(new ProcessStartInfo
-                {
-                    FileName = e.Uri,
-                    UseShellExecute = true,
-                });
-                Logger.Info($"在外部浏览器打开: {e.Uri}");
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"打开外部浏览器失败 ({e.Uri}): {ex.Message}", ex);
-            }
+            OpenUriInSystemBrowser(e.Uri);
         }
 
         /// <summary>
-        /// WebView2 导航请求拦截：处理 vs-navigate:// 自定义协议链接。
-        /// 文件名和符号名在 Markdown 渲染时被转为 vs-navigate://file?name=... 或 vs-navigate://symbol?name=... 链接。
+        /// WebView2 导航请求拦截：
+        /// - vs-navigate:// 自定义协议：文件名/符号名跳转，交宿主处理；
+        /// - 用户点击的网页链接：取消 WebView2 内导航，改用系统默认浏览器打开，
+        ///   避免点击回答里的引用链接后整个聊天页面被导航走；
+        /// - 其它真实导航（页面重建等）：放行，并屏蔽缩放持久化以便完成后恢复缩放。
         /// </summary>
         private void CoreWebView2_NavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
         {
             if (string.IsNullOrEmpty(e.Uri)) return;
 
-            // ── 真实导航会重置用户缩放，先屏蔽持久化事件，导航完成后恢复保存的比例 ──
-            if (!e.Uri.StartsWith("vs-navigate://", StringComparison.OrdinalIgnoreCase))
+            // ── 只拦截 vs-navigate:// 自定义协议 ──
+            if (e.Uri.StartsWith("vs-navigate://", StringComparison.OrdinalIgnoreCase))
             {
-                _suppressWebViewZoomPersistence = true;
+                _suppressWebViewZoomPersistence = false;
+                e.Cancel = true; // 阻止 WebView2 导航
+
+                try
+                {
+                    Uri uri = new Uri(e.Uri);
+                    var queryParams = System.Web.HttpUtility.ParseQueryString(uri.Query);
+                    string? name = System.Net.WebUtility.UrlDecode(queryParams["name"]);
+                    string? line = System.Net.WebUtility.UrlDecode(queryParams["line"]);
+
+                    if (string.IsNullOrEmpty(name)) return;
+
+                    if (uri.Host == "file")
+                    {
+                        _ = NavigateToFileAsync(name, line);
+                    }
+                    else if (uri.Host == "symbol")
+                    {
+                        _ = NavigateToSymbolAsync(name);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"[Nav] vs-navigate 拦截失败 ({e.Uri}): {ex.Message}", ex);
+                }
+
                 return;
             }
 
-            // ── 只拦截 vs-navigate:// 自定义协议 ──
-            _suppressWebViewZoomPersistence = false;
+            // ── 用户点击的网页链接：不在 WebView2 内导航，交给系统默认浏览器 ──
+            if (e.IsUserInitiated && IsExternalLinkUri(e.Uri))
+            {
+                e.Cancel = true;
+                OpenUriInSystemBrowser(e.Uri);
+                return;
+            }
 
-            e.Cancel = true; // 阻止 WebView2 导航
+            // ── 真实导航会重置用户缩放，先屏蔽持久化事件，导航完成后恢复保存的比例 ──
+            _suppressWebViewZoomPersistence = true;
+        }
 
+        /// <summary>
+        /// 判断是否为应交给系统默认程序打开的网页链接（http/https/mailto）。
+        /// 内部协议（vs-navigate://、about:、data:、file:）与页内锚点都不算外部链接。
+        /// </summary>
+        internal static bool IsExternalLinkUri(string? uri)
+        {
+            if (string.IsNullOrWhiteSpace(uri)) return false;
+            if (!Uri.TryCreate(uri, UriKind.Absolute, out var parsed)) return false;
+
+            return parsed.Scheme switch
+            {
+                "http" or "https" or "mailto" => true,
+                _ => false,
+            };
+        }
+
+        /// <summary>用系统默认浏览器/程序打开指定 URI。</summary>
+        private static void OpenUriInSystemBrowser(string uri)
+        {
             try
             {
-                Uri uri = new Uri(e.Uri);
-                var queryParams = System.Web.HttpUtility.ParseQueryString(uri.Query);
-                string? name = System.Net.WebUtility.UrlDecode(queryParams["name"]);
-                string? line = System.Net.WebUtility.UrlDecode(queryParams["line"]);
-
-                if (string.IsNullOrEmpty(name)) return;
-
-                if (uri.Host == "file")
+                Process.Start(new ProcessStartInfo
                 {
-                    _ = NavigateToFileAsync(name, line);
-                }
-                else if (uri.Host == "symbol")
-                {
-                    _ = NavigateToSymbolAsync(name);
-                }
+                    FileName = uri,
+                    UseShellExecute = true,
+                });
+                Logger.Info($"在外部浏览器打开: {uri}");
             }
             catch (Exception ex)
             {
-                Logger.Error($"[Nav] vs-navigate 拦截失败 ({e.Uri}): {ex.Message}", ex);
+                Logger.Error($"打开外部浏览器失败 ({uri}): {ex.Message}", ex);
             }
         }
 
