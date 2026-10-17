@@ -210,4 +210,167 @@ public class DiagramExportTests
         normalized.Should().Contain("mermaid-diagram");
         DeepSeekChatControl.IsWellFormedXml(normalized).Should().BeTrue();
     }
+
+    // ── 过期清扫 ──
+    // 图表是一次性辅助产物，按保留期清理；同时只允许删除自己的 diagram_*.svg，
+    // 同目录下的日志/会话文件绝不能被牵连。
+
+    private static string CreateDiagramTempDir() =>
+        Path.Combine(Path.GetTempPath(), $"diagrams_{Guid.NewGuid():N}");
+
+    private static string WriteDiagramFile(string dir, string name, DateTime lastWrite)
+    {
+        string path = Path.Combine(dir, name);
+        File.WriteAllText(path, "<svg/>");
+        File.SetLastWriteTime(path, lastWrite);
+        return path;
+    }
+
+    [Fact]
+    public void CleanupExpiredDiagrams_RemovesOnlyExpiredFiles()
+    {
+        string dir = CreateDiagramTempDir();
+        Directory.CreateDirectory(dir);
+
+        string oldFile = WriteDiagramFile(dir, "diagram_old.svg", DateTime.Now.AddDays(-30));
+        string freshFile = WriteDiagramFile(dir, "diagram_fresh.svg", DateTime.Now.AddDays(-1));
+
+        try
+        {
+            int removed = DeepSeekChatControl.CleanupExpiredDiagrams(7, 200, dir);
+
+            removed.Should().Be(1);
+            File.Exists(oldFile).Should().BeFalse("超过保留期的图表应被清理");
+            File.Exists(freshFile).Should().BeTrue("保留期内的图表应保留");
+        }
+        finally
+        {
+            if (Directory.Exists(dir)) Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public void CleanupExpiredDiagrams_RetentionBoundary_KeepsExactlyAtCutoff()
+    {
+        string dir = CreateDiagramTempDir();
+        Directory.CreateDirectory(dir);
+
+        // 保留 7 天：第 6 天保留，第 8 天清理（避开边界抖动）
+        string insideFile = WriteDiagramFile(dir, "diagram_inside.svg", DateTime.Now.AddDays(-6));
+        string outsideFile = WriteDiagramFile(dir, "diagram_outside.svg", DateTime.Now.AddDays(-8));
+
+        try
+        {
+            int removed = DeepSeekChatControl.CleanupExpiredDiagrams(7, 200, dir);
+
+            removed.Should().Be(1);
+            File.Exists(insideFile).Should().BeTrue();
+            File.Exists(outsideFile).Should().BeFalse();
+        }
+        finally
+        {
+            if (Directory.Exists(dir)) Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public void CleanupExpiredDiagrams_IgnoresUnrelatedFiles()
+    {
+        string dir = CreateDiagramTempDir();
+        Directory.CreateDirectory(dir);
+
+        // 同目录下还有其他类型的文件（日志、会话、用户自建文件）
+        string logFile = WriteDiagramFile(dir, "diagnostic-2020-01-01.log", DateTime.Now.AddDays(-900));
+        string conversation = WriteDiagramFile(dir, "conversations.json", DateTime.Now.AddDays(-900));
+        string handwritten = WriteDiagramFile(dir, "my-sketch.svg", DateTime.Now.AddDays(-900));
+        string expiredDiagram = WriteDiagramFile(dir, "diagram_expired.svg", DateTime.Now.AddDays(-900));
+
+        try
+        {
+            int removed = DeepSeekChatControl.CleanupExpiredDiagrams(7, 200, dir);
+
+            removed.Should().Be(1);
+            File.Exists(logFile).Should().BeTrue("日志文件不属于图表清理范围");
+            File.Exists(conversation).Should().BeTrue("会话文件不属于图表清理范围");
+            File.Exists(handwritten).Should().BeTrue("非 diagram_ 前缀的 SVG 不应被删除");
+            File.Exists(expiredDiagram).Should().BeFalse();
+        }
+        finally
+        {
+            if (Directory.Exists(dir)) Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public void CleanupExpiredDiagrams_OverCountLimit_RemovesOldestFirst()
+    {
+        string dir = CreateDiagramTempDir();
+        Directory.CreateDirectory(dir);
+
+        // 都在保留期内，但超出数量上限 → 只删最旧的
+        var files = new List<string>();
+        for (int i = 0; i < 5; i++)
+        {
+            files.Add(WriteDiagramFile(dir, $"diagram_{i}.svg", DateTime.Now.AddHours(-i - 1)));
+        }
+
+        try
+        {
+            int removed = DeepSeekChatControl.CleanupExpiredDiagrams(7, 3, dir);
+
+            removed.Should().Be(2);
+            File.Exists(files[0]).Should().BeTrue("最新的一张必须保留");
+            File.Exists(files[4]).Should().BeFalse("最旧的应先被清理");
+            Directory.GetFiles(dir, "diagram_*.svg").Length.Should().Be(3);
+        }
+        finally
+        {
+            if (Directory.Exists(dir)) Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public void CleanupExpiredDiagrams_MissingDirectory_DoesNotThrow()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), $"diagrams_missing_{Guid.NewGuid():N}");
+
+        int removed = DeepSeekChatControl.CleanupExpiredDiagrams(7, 200, dir);
+
+        removed.Should().Be(0);
+    }
+
+    [Fact]
+    public void CleanupExpiredDiagrams_LockedFile_SkipsAndKeepsGoing()
+    {
+        string dir = CreateDiagramTempDir();
+        Directory.CreateDirectory(dir);
+
+        string lockedFile = WriteDiagramFile(dir, "diagram_locked.svg", DateTime.Now.AddDays(-30));
+        string otherFile = WriteDiagramFile(dir, "diagram_other.svg", DateTime.Now.AddDays(-30));
+
+        try
+        {
+            // 打开句柄模拟"文件正在被查看器占用"，此时删除会抛共享冲突
+            using (var hold = new FileStream(lockedFile, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                int removed = DeepSeekChatControl.CleanupExpiredDiagrams(7, 200, dir);
+
+                removed.Should().Be(1, "被占用的文件跳过，其余过期文件仍应清理");
+                File.Exists(lockedFile).Should().BeTrue();
+                File.Exists(otherFile).Should().BeFalse();
+            }
+        }
+        finally
+        {
+            // 句柄释放后再删目录，否则会因占用失败
+            if (Directory.Exists(dir)) Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public void CleanupDefaults_AreSaneValues()
+    {
+        DeepSeekChatControl.DiagramRetentionDays.Should().Be(7);
+        DeepSeekChatControl.DiagramMaxFileCount.Should().Be(200);
+    }
 }

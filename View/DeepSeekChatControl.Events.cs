@@ -536,6 +536,16 @@ namespace DeepSeek_v4_for_VisualStudio.View
         /// </summary>
         private const string StableDiagramSvgId = "mermaid-diagram";
 
+        /// <summary>图表文件保留天数。图表是一次性查看的辅助产物，过期即清理。</summary>
+        internal const int DiagramRetentionDays = 7;
+
+        /// <summary>图表文件数量上限。即便都在保留期内，也只保留最新的这么多张。</summary>
+        internal const int DiagramMaxFileCount = 200;
+
+        /// <summary>最近一次图表清理日期，保证每天只真正清扫一次（读写由该锁保护）。</summary>
+        private static readonly object _diagramCleanupLock = new object();
+        private static DateTime _lastDiagramCleanupDate = DateTime.MinValue;
+
         /// <summary>
         /// 匹配 HTML 空元素（void element）。用于兜底修复页面序列化产物：
         /// Mermaid 把节点文字放在 foreignObject 的 XHTML 里，标签内可能出现
@@ -599,11 +609,121 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     FileName = filePath,
                     UseShellExecute = true,
                 });
+
+                // 保存成功后顺带清扫（每天只真正执行一次），失败不影响本次保存
+                CleanupExpiredDiagramsIfNeeded();
             }
             catch (Exception ex)
             {
                 Logger.Error($"[Diagram] 保存图表失败: {ex.Message}", ex);
                 StatusLabel.Text = LocalizationService.Instance["status.diagramSaveFailed"];
+            }
+        }
+
+        /// <summary>
+        /// 每天最多执行一次的图表清扫（懒执行）。
+        /// 采用与 Logger/DiagnosticLog 相同的双检锁，避免并发保存时重复清扫。
+        /// </summary>
+        internal static void CleanupExpiredDiagramsIfNeeded()
+        {
+            DateTime today = DateTime.Today;
+            if (_lastDiagramCleanupDate >= today) return;
+
+            lock (_diagramCleanupLock)
+            {
+                if (_lastDiagramCleanupDate >= today) return;
+
+                CleanupExpiredDiagrams();
+                _lastDiagramCleanupDate = today;
+            }
+        }
+
+        /// <summary>
+        /// 清理导出目录中的过期图表：超过保留期，或数量超过上限时最旧的若干张。
+        /// 只处理 <c>diagram_*.svg</c>，绝不触碰同目录下的日志、会话等其他文件；
+        /// 单个文件删除失败（例如正被查看器占用）只跳过该文件，不中断整轮清扫。
+        /// </summary>
+        /// <param name="retentionDays">保留天数。</param>
+        /// <param name="maxFiles">保留的文件数量上限。</param>
+        /// <param name="directoryOverride">测试用的目录覆盖；为空时使用默认导出目录。</param>
+        /// <returns>实际删除的文件数。</returns>
+        internal static int CleanupExpiredDiagrams(
+            int retentionDays = DiagramRetentionDays,
+            int maxFiles = DiagramMaxFileCount,
+            string? directoryOverride = null)
+        {
+            try
+            {
+                string directory = directoryOverride ?? DiagramExportDirectory;
+                if (!Directory.Exists(directory)) return 0;
+
+                var candidates = new List<FileInfo>();
+                foreach (string path in Directory.EnumerateFiles(directory, "diagram_*.svg"))
+                {
+                    try
+                    {
+                        candidates.Add(new FileInfo(path));
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Warn($"[Diagram] 读取图表文件信息失败（跳过）: {path} — {ex.Message}");
+                    }
+                }
+
+                DateTime cutoff = DateTime.Now.AddDays(-retentionDays);
+                int removed = 0;
+
+                // 先按保留期清理
+                var survivors = new List<FileInfo>(candidates.Count);
+                foreach (FileInfo file in candidates)
+                {
+                    if (file.LastWriteTime < cutoff)
+                    {
+                        if (TryDeleteDiagramFile(file)) removed++;
+                    }
+                    else
+                    {
+                        survivors.Add(file);
+                    }
+                }
+
+                // 再按数量上限清理最旧的（即便未过期）
+                if (maxFiles >= 0 && survivors.Count > maxFiles)
+                {
+                    survivors.Sort((a, b) => a.LastWriteTime.CompareTo(b.LastWriteTime));
+                    int overflow = survivors.Count - maxFiles;
+                    for (int i = 0; i < overflow; i++)
+                    {
+                        if (TryDeleteDiagramFile(survivors[i])) removed++;
+                    }
+                }
+
+                if (removed > 0)
+                    Logger.Info($"[Diagram] 图表清扫完成：移除 {removed} 个文件");
+
+                return removed;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"[Diagram] 图表清扫失败: {ex.Message}");
+                return 0;
+            }
+        }
+
+        /// <summary>删除单个图表文件；失败只记录警告并返回 false，不向上抛出。</summary>
+        private static bool TryDeleteDiagramFile(FileInfo file)
+        {
+            try
+            {
+                file.Delete();
+                Logger.Info($"[Diagram] 已清理过期图表: {file.Name}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                // 典型情况：文件正被浏览器/查看器占用，下次清扫再试即可
+                Logger.Warn($"[Diagram] 清理图表失败（跳过）: {file.Name} — {ex.Message}");
+                return false;
             }
         }
 
