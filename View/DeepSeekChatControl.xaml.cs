@@ -1456,9 +1456,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
             balanceLabel.ToolTip = LocalizationService.Instance.Format(
                 "status.toolBilling.tooltip",
                 _webSearchService.OfficialSearchSuccessCount,
-                _webSearchService.BillableSearchCount,
-                _webSearchService.OfficialFetchSuccessCount,
-                _webSearchService.BillableFetchCount);
+                _webSearchService.OfficialFetchSuccessCount);
         }
 
         /// <summary>

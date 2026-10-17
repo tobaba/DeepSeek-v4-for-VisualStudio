@@ -368,27 +368,6 @@ public class WebSearchServiceTests
     #region 官方 Search / Fetch 按次计费
 
     [Fact]
-    public void BillingStart_IsBeijingMidnightOn20261101()
-    {
-        var beijing = WebSearchService.SearchFetchBillingStart;
-
-        // 北京时间 2026-11-01 00:00 == UTC 2026-10-31 16:00
-        beijing.UtcDateTime.Should().Be(new DateTime(2026, 10, 31, 16, 0, 0, DateTimeKind.Utc));
-        TimeZoneInfo.ConvertTime(beijing, TimeZoneInfo.FindSystemTimeZoneById("China Standard Time"))
-            .Should().Be(new DateTime(2026, 11, 1, 0, 0, 0));
-    }
-
-    [Fact]
-    public void IsSearchFetchBillingActive_BeforeAndAfterStart()
-    {
-        var start = WebSearchService.SearchFetchBillingStart;
-
-        WebSearchService.IsSearchFetchBillingActive(start.AddSeconds(-1)).Should().BeFalse();
-        WebSearchService.IsSearchFetchBillingActive(start).Should().BeTrue();
-        WebSearchService.IsSearchFetchBillingActive(start.AddDays(1)).Should().BeTrue();
-    }
-
-    [Fact]
     public void Prices_MatchOfficialRates()
     {
         WebSearchService.SearchPriceCnyPer1K.Should().Be(5.0);
@@ -404,8 +383,6 @@ public class WebSearchServiceTests
 
         service.OfficialSearchSuccessCount.Should().Be(0);
         service.OfficialFetchSuccessCount.Should().Be(0);
-        service.BillableSearchCount.Should().Be(0);
-        service.BillableFetchCount.Should().Be(0);
         service.OfficialToolCostYuan.Should().Be(0);
         service.OfficialToolCostUsd.Should().Be(0);
     }
@@ -413,7 +390,7 @@ public class WebSearchServiceTests
     [Fact]
     public void CostFormula_IsPerThousandSuccessfulRequests()
     {
-        // 计费生效后：每次成功请求 5 元 / 0.75 美元（按 1000 次为单位）。
+        // 每次成功请求 5 元 / 0.75 美元（按 1000 次为单位），无生效日期门槛。
         // 通过公开常量验证单价换算，避免依赖真实网络调用。
         double oneThousandSearchYuan = 1000 / 1000.0 * WebSearchService.SearchPriceCnyPer1K;
         double oneThousandFetchUsd = 1000 / 1000.0 * WebSearchService.FetchPriceUsdPer1K;
@@ -433,8 +410,6 @@ public class WebSearchServiceTests
 
         service.OfficialSearchSuccessCount.Should().Be(0);
         service.OfficialFetchSuccessCount.Should().Be(0);
-        service.BillableSearchCount.Should().Be(0);
-        service.BillableFetchCount.Should().Be(0);
         service.OfficialToolCostYuan.Should().Be(0);
         service.OfficialToolCostUsd.Should().Be(0);
     }

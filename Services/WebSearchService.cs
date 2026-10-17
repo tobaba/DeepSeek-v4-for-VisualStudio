@@ -73,13 +73,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// <summary>DeepSeek Fetch 接口单价（美元 / 每 1000 次成功请求）。</summary>
         public const double FetchPriceUsdPer1K = 0.75;
 
-        /// <summary>
-        /// Search / Fetch 开始按次计费的时间点（北京时间 2026-11-01 00:00）。
-        /// 在此之前调用不计费；仅"成功且产生结果"的请求计入。
-        /// </summary>
-        public static readonly DateTimeOffset SearchFetchBillingStart =
-            new DateTimeOffset(2026, 11, 1, 0, 0, 0, TimeSpan.FromHours(8));
-
         /// <summary>请求超时（秒）</summary>
         private const int RequestTimeoutSeconds = 15;
 
@@ -131,8 +124,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         // ── 官方 Search / Fetch 按次计费统计（每次成功且产生结果的请求计数）──
         private int _officialSearchSuccessCount;
         private int _officialFetchSuccessCount;
-        private int _billableSearchCount;
-        private int _billableFetchCount;
 
         /// <summary>
         /// 获取当前正在使用的搜索提供商。
@@ -172,33 +163,27 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// <summary>本会话官方 Fetch 成功（HTTP 200 且返回正文）的请求次数。</summary>
         public int OfficialFetchSuccessCount => Volatile.Read(ref _officialFetchSuccessCount);
 
-        /// <summary>本会话计入计费的 Search 次数（计费生效日之前的成功请求不计费）。</summary>
-        public int BillableSearchCount => Volatile.Read(ref _billableSearchCount);
-
-        /// <summary>本会话计入计费的 Fetch 次数（计费生效日之前的成功请求不计费）。</summary>
-        public int BillableFetchCount => Volatile.Read(ref _billableFetchCount);
-
-        /// <summary>本会话官方 Search / Fetch 计费金额（人民币）。</summary>
+        /// <summary>
+        /// 本会话官方 Search / Fetch 计费金额（人民币）。
+        /// 按成功请求次数计费（每 1000 次 5 元），失败/空结果不计数。
+        /// </summary>
         public double OfficialToolCostYuan =>
-            BillableSearchCount / 1000.0 * SearchPriceCnyPer1K +
-            BillableFetchCount / 1000.0 * FetchPriceCnyPer1K;
+            OfficialSearchSuccessCount / 1000.0 * SearchPriceCnyPer1K +
+            OfficialFetchSuccessCount / 1000.0 * FetchPriceCnyPer1K;
 
-        /// <summary>本会话官方 Search / Fetch 计费金额（美元）。</summary>
+        /// <summary>
+        /// 本会话官方 Search / Fetch 计费金额（美元）。
+        /// 按成功请求次数计费（每 1000 次 $0.75），失败/空结果不计数。
+        /// </summary>
         public double OfficialToolCostUsd =>
-            BillableSearchCount / 1000.0 * SearchPriceUsdPer1K +
-            BillableFetchCount / 1000.0 * FetchPriceUsdPer1K;
+            OfficialSearchSuccessCount / 1000.0 * SearchPriceUsdPer1K +
+            OfficialFetchSuccessCount / 1000.0 * FetchPriceUsdPer1K;
 
-        /// <summary>判断指定时刻是否已进入官方 Search / Fetch 按次计费期。</summary>
-        public static bool IsSearchFetchBillingActive(DateTimeOffset now)
-            => now >= SearchFetchBillingStart;
-
-        /// <summary>重置官方 Search / Fetch 用量与计费统计（新会话开始时调用）。</summary>
+        /// <summary>重置官方 Search / Fetch 用量与费用统计（新会话开始时调用）。</summary>
         public void ResetOfficialToolStats()
         {
             Interlocked.Exchange(ref _officialSearchSuccessCount, 0);
             Interlocked.Exchange(ref _officialFetchSuccessCount, 0);
-            Interlocked.Exchange(ref _billableSearchCount, 0);
-            Interlocked.Exchange(ref _billableFetchCount, 0);
         }
 
         /// <summary>
@@ -212,14 +197,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 Interlocked.Increment(ref _officialSearchSuccessCount);
             else
                 Interlocked.Increment(ref _officialFetchSuccessCount);
-
-            if (!IsSearchFetchBillingActive(DateTimeOffset.UtcNow))
-                return; // 计费生效日之前免费
-
-            if (isSearch)
-                Interlocked.Increment(ref _billableSearchCount);
-            else
-                Interlocked.Increment(ref _billableFetchCount);
         }
 
         #endregion
