@@ -1849,6 +1849,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
         /// </summary>
         private void UpdateWebSearchToggleAppearance()
         {
+            // 主题应用阶段也会调用此方法，需容忍控件尚未就绪。
+            if (WebSearchToggleButton == null || WebSearchEngineComboBox == null) return;
+
             bool isOn = _webSearchEngine != "Off";
             var L = LocalizationService.Instance;
             if (isOn)

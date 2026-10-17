@@ -982,11 +982,7 @@
                         <ComboBox x:Name="EffortComboBox"
                                   MinWidth="65" Margin="2,0,4,0"
                                   SelectionChanged="EffortComboBox_SelectionChanged" />
-                        <ComboBox x:Name="WebSearchEngineComboBox"
-                            MinWidth="100" Margin="2,0,4,0"
-                            SelectionChanged="WebSearchEngineComboBox_SelectionChanged"
-                            ToolTip="选择搜索引擎"
-                            Visibility="Collapsed" />
+                        <!-- 联网搜索：图标按钮在左，仅在开启时于其右侧显示搜索引擎下拉框 -->
                         <Button x:Name="WebSearchToggleButton"
                                 Click="WebSearchToggleButton_Click"
                                 Style="{StaticResource TransparentButton}"
@@ -997,6 +993,11 @@
                                 <TextBlock Text="&#xE774;" FontSize="13" FontFamily="{StaticResource IconFontFamily}" />
                             </Button.Content>
                         </Button>
+                        <ComboBox x:Name="WebSearchEngineComboBox"
+                            MinWidth="100" Margin="0,0,8,0"
+                            SelectionChanged="WebSearchEngineComboBox_SelectionChanged"
+                            ToolTip="选择搜索引擎"
+                            Visibility="Collapsed" />
                         <Button x:Name="McpConfigButton"
                                 Click="McpConfigButton_Click"
                                 Style="{StaticResource TransparentButton}"
