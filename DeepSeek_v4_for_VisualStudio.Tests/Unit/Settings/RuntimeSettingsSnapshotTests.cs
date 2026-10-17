@@ -112,6 +112,7 @@ public class RuntimeSettingsSnapshotTests
             SelectedModel: "deepseek-chat",
             CustomModelName: "deepseek-chat",
             CustomVisionModels: string.Empty,
+            CustomModelMetadata: string.Empty,
             ActiveCustomModel: "deepseek-chat",
             ActiveModelSource: "custom",
             TokenBudgetPercent: 90,

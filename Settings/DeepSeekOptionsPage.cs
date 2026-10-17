@@ -31,6 +31,13 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
         internal const int DefaultTokenBudgetPercent = ModelTokenLimitService.DefaultBudgetPercent;
 
         /// <summary>
+        /// 推理强度兜底档位。官方模型以 /models 的 effort.supported_levels 为准，
+        /// 该列表仅在接口未提供（自定义端点、旧服务端）时使用。
+        /// </summary>
+        internal static readonly IReadOnlyList<string> DefaultReasoningEfforts =
+            new[] { "low", "high", "max" };
+
+        /// <summary>
         /// 静态构造：订阅语言变更，刷新属性描述符缓存。
         /// 说明：
         /// - 属性名（DisplayName）会随语言实时切换；
@@ -112,7 +119,96 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
         internal IReadOnlyList<string> GetCustomModels()
             => ParseCustomModels(CustomModelName);
 
-        /// <summary>获取指定模型的最大 Token；未配置时默认 1M。</summary>
+        /// <summary>
+        /// 解析自定义端点模型的扩展元数据。每行格式：
+        /// <c>模型名=展示名称=输出上限=推理档位</c>，推理档位以 <c>/</c> 分隔，空字段表示未设置。
+        /// </summary>
+        internal static IReadOnlyDictionary<string, ModelExtraMetadata> ParseCustomModelMetadata(
+            string? value)
+        {
+            var result = new Dictionary<string, ModelExtraMetadata>(StringComparer.OrdinalIgnoreCase);
+            if (string.IsNullOrWhiteSpace(value))
+                return result;
+
+            foreach (var rawLine in value.Split(
+                new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var line = rawLine.Trim();
+                if (line.Length == 0 || line.StartsWith("#", StringComparison.Ordinal))
+                    continue;
+
+                // 以 '=' 分段：模型名 / 展示名称 / 输出上限 / 推理档位；多余段忽略。
+                var parts = line.Split('=');
+                var model = parts[0].Trim();
+                if (model.Length == 0)
+                    continue;
+
+                string displayName = parts.Length > 1 ? parts[1].Trim() : string.Empty;
+                int maxOutput = 0;
+                if (parts.Length > 2 &&
+                    ModelTokenLimitService.TryParseTokenCount(parts[2].Trim(), out int parsed))
+                {
+                    maxOutput = parsed;
+                }
+
+                IReadOnlyList<string> effortLevels = Array.Empty<string>();
+                if (parts.Length > 3)
+                {
+                    effortLevels = parts[3]
+                        .Split(new[] { '/', '|', ';', ',', '；', '，' },
+                            StringSplitOptions.RemoveEmptyEntries)
+                        .Select(level => level.Trim())
+                        .Where(level => level.Length > 0)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+                }
+
+                if (displayName.Length > 0 || maxOutput > 0 || effortLevels.Count > 0)
+                    result[model] = new ModelExtraMetadata(displayName, maxOutput, effortLevels);
+            }
+
+            return result;
+        }
+
+        /// <summary>把自定义模型的扩展元数据回写为持久化字符串（与 <see cref="ParseCustomModelMetadata"/> 互逆）。</summary>
+        internal static string FormatCustomModelMetadata(
+            IEnumerable<(string Model, ModelExtraMetadata Metadata)> entries)
+        {
+            var lines = new List<string>();
+            foreach (var (model, metadata) in entries)
+            {
+                if (string.IsNullOrWhiteSpace(model) || metadata.IsEmpty)
+                    continue;
+
+                var modelName = model.Trim();
+                if (modelName.Length == 0)
+                    continue;
+
+                string effort = string.Join("/", metadata.EffortLevels);
+                string maxOutput = metadata.MaxOutputTokens > 0
+                    ? metadata.MaxOutputTokens.ToString(CultureInfo.InvariantCulture)
+                    : string.Empty;
+                lines.Add($"{modelName}={metadata.DisplayName}={maxOutput}={effort}");
+            }
+            return string.Join(Environment.NewLine, lines);
+        }
+
+        /// <summary>自定义端点模型的扩展元数据（展示名称、输出上限、推理档位）。</summary>
+        internal sealed record ModelExtraMetadata(
+            string DisplayName,
+            int MaxOutputTokens,
+            IReadOnlyList<string> EffortLevels)
+        {
+            internal bool IsEmpty
+                => string.IsNullOrWhiteSpace(DisplayName)
+                   && MaxOutputTokens <= 0
+                   && (EffortLevels == null || EffortLevels.Count == 0);
+        }
+
+        /// <summary>
+        /// 获取指定模型的最大 Token：官方模型取 /models 声明的 context_window，
+        /// 自定义模型取用户配置，均无值时默认 1M。
+        /// </summary>
         internal int GetModelMaxTokens(string? model)
             => ModelTokenLimitService.GetMaxTokens(model, ModelMaxTokenLimits);
 
@@ -144,8 +240,19 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
         internal string GetSelectedModelChoice()
         {
             var config = DeepSeekEndpointResolver.Resolve(this);
-            return config.IsCustom
-                ? FormatCustomModelChoice(config.Model)
+            if (config.Model.Length == 0)
+                return string.Empty;
+
+            if (config.IsCustom)
+            {
+                var metadata = ParseCustomModelMetadata(CustomModelMetadata);
+                metadata.TryGetValue(config.Model, out var extra);
+                return FormatCustomModelChoice(config.Model, extra?.DisplayName);
+            }
+
+            var official = OfficialModelCatalogService.TryGetMetadata(config.Model);
+            return official != null && !string.IsNullOrWhiteSpace(official.DisplayName)
+                ? official.DisplayName!.Trim()
                 : config.Model;
         }
 
@@ -160,7 +267,10 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
             if (customSuffix.Length > 0 &&
                 choice.EndsWith(customSuffix, StringComparison.OrdinalIgnoreCase))
             {
-                var model = choice.Substring(0, choice.Length - customSuffix.Length).Trim();
+                // 下拉项可能是展示名称（不含模型 id），需要还原出真实模型 id。
+                var label = choice.Substring(0, choice.Length - customSuffix.Length).Trim();
+                var model = ResolveModelFromChoice(
+                    label, GetCustomModels(), BuildCustomDisplayNames()) ?? label;
                 if (model.Length > 0)
                 {
                     var models = GetCustomModels()
@@ -173,8 +283,75 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
                 return;
             }
 
-            SelectedModel = choice;
+            SelectedModel = ResolveModelFromChoice(
+                choice, OfficialModelCatalogService.GetModels(), BuildOfficialDisplayNames())
+                ?? choice;
             ActiveModelSource = "official";
+        }
+
+        /// <summary>
+        /// 从下拉显示文本还原模型 id：先按已知模型精确匹配，再按展示名称匹配，
+        /// 最后兼容旧的“展示名称 · 模型名”格式（模型名在最后一段）。
+        /// </summary>
+        internal static string? ResolveModelFromChoice(
+            string label,
+            IReadOnlyList<string> knownModels,
+            IReadOnlyDictionary<string, string>? displayNames = null)
+        {
+            if (label.Length == 0)
+                return null;
+
+            var exact = knownModels.FirstOrDefault(
+                model => string.Equals(model, label, StringComparison.OrdinalIgnoreCase));
+            if (exact != null)
+                return exact;
+
+            // 展示名称 → 模型 id（新格式：下拉框只显示展示名称）。
+            if (displayNames != null &&
+                displayNames.TryGetValue(label, out var mapped) &&
+                !string.IsNullOrWhiteSpace(mapped))
+            {
+                return mapped;
+            }
+
+            // 旧格式“展示名称 · 模型名”：取最后一段仍能命中的模型名。
+            int separator = label.LastIndexOf(" · ", StringComparison.Ordinal);
+            if (separator < 0)
+                return null;
+
+            var tail = label.Substring(separator + 3).Trim();
+            if (tail.Length == 0)
+                return null;
+
+            return knownModels.FirstOrDefault(
+                       model => string.Equals(model, tail, StringComparison.OrdinalIgnoreCase))
+                   ?? tail;
+        }
+
+        /// <summary>官方模型的 展示名称 → 模型 id 映射（仅包含填写了展示名称的条目）。</summary>
+        private IReadOnlyDictionary<string, string> BuildOfficialDisplayNames()
+        {
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var metadata in OfficialModelCatalogService.GetMetadata())
+            {
+                var name = (metadata.DisplayName ?? string.Empty).Trim();
+                if (name.Length > 0 && !map.ContainsKey(name))
+                    map[name] = metadata.Id;
+            }
+            return map;
+        }
+
+        /// <summary>自定义模型的 展示名称 → 模型 id 映射（仅包含填写了展示名称的条目）。</summary>
+        private IReadOnlyDictionary<string, string> BuildCustomDisplayNames()
+        {
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var pair in ParseCustomModelMetadata(CustomModelMetadata))
+            {
+                var name = (pair.Value.DisplayName ?? string.Empty).Trim();
+                if (name.Length > 0 && !map.ContainsKey(name))
+                    map[name] = pair.Key;
+            }
+            return map;
         }
 
         /// <summary>官方模型 + 自定义模型（自定义条目带来源后缀，避免同名冲突）。</summary>
@@ -183,15 +360,18 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
             var choices = new List<string>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            foreach (var model in OfficialModelCatalogService.GetModels())
+            foreach (var metadata in OfficialModelCatalogService.GetMetadata())
             {
-                if (seen.Add(model))
-                    choices.Add(model);
+                var display = metadata.Display;
+                if (seen.Add(display))
+                    choices.Add(display);
             }
 
+            var customMetadata = ParseCustomModelMetadata(CustomModelMetadata);
             foreach (var model in GetCustomModels())
             {
-                var display = FormatCustomModelChoice(model);
+                customMetadata.TryGetValue(model, out var extra);
+                var display = FormatCustomModelChoice(model, extra?.DisplayName);
                 if (seen.Add(display))
                     choices.Add(display);
             }
@@ -206,8 +386,15 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
         private static string GetCustomModelSuffix()
             => LocalizationService.Instance["chat.model.customSuffix"] ?? string.Empty;
 
-        private static string FormatCustomModelChoice(string model)
-            => model + GetCustomModelSuffix();
+        /// <summary>下拉显示文本：填写了展示名称就只显示展示名称，否则回退到模型名。</summary>
+        internal static string FormatModelChoice(string model, string? displayName)
+        {
+            var name = (displayName ?? string.Empty).Trim();
+            return name.Length > 0 ? name : model;
+        }
+
+        private static string FormatCustomModelChoice(string model, string? displayName = null)
+            => FormatModelChoice(model, displayName) + GetCustomModelSuffix();
 
         /// <summary>返回当前应请求的自定义模型；激活项失效时回退列表第一项。</summary>
         internal string GetActiveCustomModel()
@@ -589,7 +776,7 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
 
         /// <summary>
         /// 各模型的最大上下文 Token。每行格式：模型名=最大Token。
-        /// 未配置的模型默认 1M，自定义端点模型也使用同一配置。
+        /// 官方模型改由 /models 声明的 context_window 提供（不再落盘）；该配置仅承载自定义端点模型。
         /// </summary>
         [LocalizedCategory("settings.category.model")]
         [Browsable(false)] // 已并入统一「模型设置」表格（ModelCatalog），不再单独展示。
@@ -597,13 +784,24 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
         public string ModelMaxTokenLimits { get; set; } = string.Empty;
 
         /// <summary>
-        /// 用户手动勾选为支持图片/PDF 直传（多模态）的模型名单；
-        /// 官方接口模型与自定义端点模型共用同一份名单。
+        /// 用户手动勾选为支持图片/PDF 直传（多模态）的模型名单。
+        /// 官方模型的视觉能力以 /models 的 input_modalities 为准（不落盘），
+        /// 该名单仅承载自定义端点模型，以及接口未提供模态信息时的官方回退。
         /// </summary>
         [LocalizedCategory("settings.category.model")]
         [Browsable(false)] // 已并入统一「模型设置」表格（ModelCatalog），不再单独展示。
         [DesignerSerializationVisibility(DesignerSerializationVisibility.Visible)] // Fix for WFO1000
         public string CustomVisionModels { get; set; } = string.Empty;
+
+        /// <summary>
+        /// 自定义端点模型的扩展元数据，每行格式：模型名=展示名称=输出上限=推理档位（以 / 分隔）。
+        /// 官方模型的这些字段由 /models 接口提供（不落盘），该配置仅承载自定义模型；
+        /// 空白字段表示未设置。
+        /// </summary>
+        [LocalizedCategory("settings.category.model")]
+        [Browsable(false)] // 已并入统一「模型设置」表格（ModelCatalog），不再单独展示。
+        [DesignerSerializationVisibility(DesignerSerializationVisibility.Visible)] // Fix for WFO1000
+        public string CustomModelMetadata { get; set; } = string.Empty;
 
         /// <summary>
         /// 统一「模型设置」入口：在一个表格中同时维护自定义模型列表、每个模型的
@@ -707,7 +905,7 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
             // 连接与模型配置视为用户凭据的一部分，恢复默认时保留：
             // ApiKey / CustomApiKey / BaiduApiKey / BingApiKey /
             // ApiBaseUrl / SelectedModel / CustomModelName / ModelMaxTokenLimits / CustomVisionModels /
-            // ActiveCustomModel / ActiveModelSource。
+            // CustomModelMetadata / ActiveCustomModel / ActiveModelSource。
             SystemPrompt = AiPrompts.DefaultSystemPrompt;
             SystemPromptEn = AiPrompts.DefaultSystemPromptEn;
             IsThinkingEnabled = true;
@@ -1174,13 +1372,29 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
     }
 
     /// <summary>
-    /// 推理强度下拉选项。
+    /// 推理强度下拉选项：优先使用当前官方模型在 /models 中声明的 effort 档位，
+    /// 接口未提供时回退 low / high / max。
     /// </summary>
     internal class ReasoningEffortConverter : StringConverter
     {
         public override bool GetStandardValuesSupported(ITypeDescriptorContext? context) => true;
+
         public override StandardValuesCollection GetStandardValues(ITypeDescriptorContext? context)
-            => new(new[] { "low", "high", "max" });
+        {
+            var levels = context?.Instance is DeepSeekOptionsPage page
+                ? GetEffortLevelsForModel(page)
+                : null;
+            return new(levels is { Count: > 0 }
+                ? levels.ToList()
+                : DeepSeekOptionsPage.DefaultReasoningEfforts.ToList());
+        }
+
+        /// <summary>当前生效模型的 effort 档位；接口未声明时返回空列表。</summary>
+        internal static IReadOnlyList<string> GetEffortLevelsForModel(DeepSeekOptionsPage page)
+        {
+            string model = DeepSeekEndpointResolver.Resolve(page).Model;
+            return OfficialModelCatalogService.GetEffortLevels(model);
+        }
     }
 
     /// <summary>

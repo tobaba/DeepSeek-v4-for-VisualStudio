@@ -521,6 +521,393 @@ namespace DeepSeek_v4_for_VisualStudio.View
             }
         }
 
+        /// <summary>图表导出目录：%LocalAppData%\DeepSeekVS\diagrams\</summary>
+        internal static string DiagramExportDirectory => Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "DeepSeekVS", "diagrams");
+
+        /// <summary>SVG 文档声明：独立 .svg 文件按 XML 解析，声明缺失时部分查看器会误判编码。</summary>
+        private const string DiagramXmlDeclaration = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>";
+
+        /// <summary>
+        /// 归一化后的根 &lt;svg&gt; id。Mermaid 每次渲染都用时间戳生成新 id，
+        /// 且该 id 同时出现在 style 选择器、marker id 与 url(#...) 引用里，
+        /// 不统一替换就做不到"同一张图内容相同"。
+        /// </summary>
+        private const string StableDiagramSvgId = "mermaid-diagram";
+
+        /// <summary>图表文件保留天数。图表是一次性查看的辅助产物，过期即清理。</summary>
+        internal const int DiagramRetentionDays = 7;
+
+        /// <summary>图表文件数量上限。即便都在保留期内，也只保留最新的这么多张。</summary>
+        internal const int DiagramMaxFileCount = 200;
+
+        /// <summary>最近一次图表清理日期，保证每天只真正清扫一次（读写由该锁保护）。</summary>
+        private static readonly object _diagramCleanupLock = new object();
+        private static DateTime _lastDiagramCleanupDate = DateTime.MinValue;
+
+        /// <summary>
+        /// 匹配 HTML 空元素（void element）。用于兜底修复页面序列化产物：
+        /// Mermaid 把节点文字放在 foreignObject 的 XHTML 里，标签内可能出现
+        /// &lt;br&gt;，在 XML 里必须自闭合，否则独立 .svg 打开时报
+        /// "Opening and ending tag mismatch"。
+        /// 属性部分只接受 name="value" 形式，避免误吞属性值里的 &gt;。
+        /// </summary>
+        private static readonly Regex HtmlVoidTagRegex = new(
+            @"<(?<tag>area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)"
+            + @"(?<attrs>(?:\s+[:\w-]+\s*=\s*""[^""<>]*"")*)\s*(?<selfclose>/?)>",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        /// <summary>
+        /// 保存图表 SVG 到本地固定目录并用系统默认程序打开。
+        /// </summary>
+        /// <remarks>
+        /// 只接受以 &lt;svg 开头的单张图（Mermaid 已渲染产物），并限制长度，
+        /// 避免把任意 HTML 写盘后交给默认浏览器打开。
+        /// </remarks>
+        private void SaveDiagramToFile(string svg)
+        {
+            try
+            {
+                if (!IsExportableDiagramSvg(svg))
+                {
+                    Logger.Warn("[Diagram] 忽略不可导出的图表内容");
+                    StatusLabel.Text = LocalizationService.Instance["status.diagramSaveFailed"];
+                    return;
+                }
+
+                Directory.CreateDirectory(DiagramExportDirectory);
+
+                string document = NormalizeDiagramSvg(svg);
+                if (!IsWellFormedXml(document))
+                    Logger.Warn("[Diagram] 导出内容不是合法 XML，已按原文写出（独立打开可能报错）");
+
+                // 同一张图只落盘一次：重复点击直接复用已有文件，避免堆积同名副本
+                string hash = ComputeDiagramHash(document);
+                string? existing = FindExistingDiagramFile(DiagramExportDirectory, hash);
+
+                string filePath;
+                if (existing != null)
+                {
+                    filePath = existing;
+                    Logger.Info($"[Diagram] 复用已保存的图表: {filePath}");
+                }
+                else
+                {
+                    filePath = Path.Combine(DiagramExportDirectory,
+                        $"diagram_{DateTime.Now:yyyyMMdd_HHmmss_fff}_{hash}.svg");
+
+                    // 已带 XML 声明，按 UTF-8 无 BOM 写出，避免部分查看器把 BOM 当正文
+                    File.WriteAllText(filePath, document, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+                    Logger.Info($"[Diagram] 图表已保存: {filePath}");
+                }
+
+                StatusLabel.Text = LocalizationService.Instance.Format("status.diagramSaved", filePath);
+
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = filePath,
+                    UseShellExecute = true,
+                });
+
+                // 保存成功后顺带清扫（每天只真正执行一次），失败不影响本次保存
+                CleanupExpiredDiagramsIfNeeded();
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"[Diagram] 保存图表失败: {ex.Message}", ex);
+                StatusLabel.Text = LocalizationService.Instance["status.diagramSaveFailed"];
+            }
+        }
+
+        /// <summary>
+        /// 每天最多执行一次的图表清扫（懒执行）。
+        /// 采用与 Logger/DiagnosticLog 相同的双检锁，避免并发保存时重复清扫。
+        /// </summary>
+        internal static void CleanupExpiredDiagramsIfNeeded()
+        {
+            DateTime today = DateTime.Today;
+            if (_lastDiagramCleanupDate >= today) return;
+
+            lock (_diagramCleanupLock)
+            {
+                if (_lastDiagramCleanupDate >= today) return;
+
+                CleanupExpiredDiagrams();
+                _lastDiagramCleanupDate = today;
+            }
+        }
+
+        /// <summary>
+        /// 清理导出目录中的过期图表：超过保留期，或数量超过上限时最旧的若干张。
+        /// 只处理 <c>diagram_*.svg</c>，绝不触碰同目录下的日志、会话等其他文件；
+        /// 单个文件删除失败（例如正被查看器占用）只跳过该文件，不中断整轮清扫。
+        /// </summary>
+        /// <param name="retentionDays">保留天数。</param>
+        /// <param name="maxFiles">保留的文件数量上限。</param>
+        /// <param name="directoryOverride">测试用的目录覆盖；为空时使用默认导出目录。</param>
+        /// <returns>实际删除的文件数。</returns>
+        internal static int CleanupExpiredDiagrams(
+            int retentionDays = DiagramRetentionDays,
+            int maxFiles = DiagramMaxFileCount,
+            string? directoryOverride = null)
+        {
+            try
+            {
+                string directory = directoryOverride ?? DiagramExportDirectory;
+                if (!Directory.Exists(directory)) return 0;
+
+                var candidates = new List<FileInfo>();
+                foreach (string path in Directory.EnumerateFiles(directory, "diagram_*.svg"))
+                {
+                    try
+                    {
+                        candidates.Add(new FileInfo(path));
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Warn($"[Diagram] 读取图表文件信息失败（跳过）: {path} — {ex.Message}");
+                    }
+                }
+
+                DateTime cutoff = DateTime.Now.AddDays(-retentionDays);
+                int removed = 0;
+
+                // 先按保留期清理
+                var survivors = new List<FileInfo>(candidates.Count);
+                foreach (FileInfo file in candidates)
+                {
+                    if (file.LastWriteTime < cutoff)
+                    {
+                        if (TryDeleteDiagramFile(file)) removed++;
+                    }
+                    else
+                    {
+                        survivors.Add(file);
+                    }
+                }
+
+                // 再按数量上限清理最旧的（即便未过期）
+                if (maxFiles >= 0 && survivors.Count > maxFiles)
+                {
+                    survivors.Sort((a, b) => a.LastWriteTime.CompareTo(b.LastWriteTime));
+                    int overflow = survivors.Count - maxFiles;
+                    for (int i = 0; i < overflow; i++)
+                    {
+                        if (TryDeleteDiagramFile(survivors[i])) removed++;
+                    }
+                }
+
+                if (removed > 0)
+                    Logger.Info($"[Diagram] 图表清扫完成：移除 {removed} 个文件");
+
+                return removed;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"[Diagram] 图表清扫失败: {ex.Message}");
+                return 0;
+            }
+        }
+
+        /// <summary>删除单个图表文件；失败只记录警告并返回 false，不向上抛出。</summary>
+        private static bool TryDeleteDiagramFile(FileInfo file)
+        {
+            try
+            {
+                file.Delete();
+                Logger.Info($"[Diagram] 已清理过期图表: {file.Name}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                // 典型情况：文件正被浏览器/查看器占用，下次清扫再试即可
+                Logger.Warn($"[Diagram] 清理图表失败（跳过）: {file.Name} — {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 校验待导出的 SVG 文本：必须是单张 &lt;svg&gt; 图且长度在合理范围内。
+        /// </summary>
+        internal static bool IsExportableDiagramSvg(string? svg)
+        {
+            if (string.IsNullOrWhiteSpace(svg)) return false;
+            if (svg.Length > 4 * 1024 * 1024) return false;
+
+            string trimmed = svg.TrimStart();
+            // 页面正常发的是 HTML 序列化的 <svg> 片段，这里也允许已带 XML 声明的输入
+            if (trimmed.StartsWith("<?xml", StringComparison.OrdinalIgnoreCase))
+            {
+                int declEnd = trimmed.IndexOf("?>", StringComparison.Ordinal);
+                trimmed = declEnd >= 0 ? trimmed.Substring(declEnd + 2).TrimStart() : trimmed;
+            }
+            if (!trimmed.StartsWith("<svg", StringComparison.OrdinalIgnoreCase)) return false;
+
+            // 页面 JS 用 outerHTML 序列化，正常不会带 <script>；此处做纵深防御
+            if (trimmed.IndexOf("<script", StringComparison.OrdinalIgnoreCase) >= 0) return false;
+
+            return true;
+        }
+
+        /// <summary>
+        /// 把 Mermaid 渲染出的 SVG 片段整理成合法、可独立打开的 .svg 文档：
+        /// 补 XML 声明与 xmlns；当内容不是合法 XML 时，兜底把 HTML 空元素自闭合。
+        /// </summary>
+        internal static string NormalizeDiagramSvg(string? svg)
+        {
+            string text = (svg ?? string.Empty).Trim();
+            if (text.Length == 0) return string.Empty;
+
+            if (!text.StartsWith("<?xml", StringComparison.OrdinalIgnoreCase))
+                text = DiagramXmlDeclaration + "\n" + text;
+
+            text = EnsureSvgNamespace(text);
+            text = NormalizeDiagramIdentity(text);
+
+            // 正常路径由页面 XMLSerializer 产出合法 XML，直接返回；
+            // 仅在不合法时才动手修复，避免误改本来就正确的内容。
+            if (IsWellFormedXml(text)) return text;
+
+            string repaired = SelfCloseVoidElements(text);
+            return IsWellFormedXml(repaired) ? repaired : text;
+        }
+
+        /// <summary>给根 &lt;svg&gt; 补 xmlns（缺省命名空间会导致独立打开时按 HTML 解析）。</summary>
+        private static string EnsureSvgNamespace(string text)
+        {
+            Match match = Regex.Match(text, @"<svg(\s|>)", RegexOptions.IgnoreCase);
+            if (!match.Success) return text;
+
+            int tagEnd = text.IndexOf('>', match.Index);
+            if (tagEnd < 0) return text;
+
+            string tag = text.Substring(match.Index, tagEnd - match.Index + 1);
+            if (tag.IndexOf("xmlns", StringComparison.OrdinalIgnoreCase) >= 0) return text;
+
+            return text.Substring(0, match.Index + 4)
+                + " xmlns=\"http://www.w3.org/2000/svg\""
+                + text.Substring(match.Index + 4);
+        }
+
+        /// <summary>
+        /// 计算图表内容指纹，用于"同一张图只存一次"。
+        /// 先消除 Mermaid 每次渲染不同的 id，再按 UTF-8 内容取 SHA-256 前 16 位十六进制。
+        /// </summary>
+        internal static string ComputeDiagramHash(string document)
+        {
+            string canonical = NormalizeDiagramIdentity(document ?? string.Empty);
+
+            using (var sha256 = System.Security.Cryptography.SHA256.Create())
+            {
+                byte[] digest = sha256.ComputeHash(new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)
+                    .GetBytes(canonical));
+
+                var sb = new StringBuilder(16);
+                for (int i = 0; i < 8; i++)
+                    sb.Append(digest[i].ToString("X2"));
+                return sb.ToString();
+            }
+        }
+
+        /// <summary>
+        /// 抹掉 Mermaid 渲染随机 id，使同一张图得到同一份文本。
+        /// Mermaid 的 id 形如 mermaid-svg-1792252615344-3，会同时出现在
+        /// 根标签 id、style 选择器、marker/clipPath id 与 url(#...) 引用中，
+        /// 这里做整体字面量替换（含其中的时间戳），保证替换彻底且可复现。
+        /// </summary>
+        internal static string NormalizeDiagramIdentity(string document)
+        {
+            if (string.IsNullOrEmpty(document)) return string.Empty;
+
+            return Regex.Replace(document,
+                @"mermaid-svg-\d+-\d+",
+                StableDiagramSvgId,
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        }
+
+        /// <summary>识别文件名里已内嵌的内容指纹（diagram_时间_指纹.svg）。</summary>
+        private static readonly Regex DiagramFileNameHashRegex = new(
+            @"_([0-9A-F]{16})\.svg$",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        /// <summary>
+        /// 在导出目录中查找已存在且内容相同的图表文件。
+        /// 文件名内嵌内容指纹，直接命中即可；兼容早期不带指纹的旧文件时退化为内容比较。
+        /// </summary>
+        private static string? FindExistingDiagramFile(string directory, string hash)
+        {
+            try
+            {
+                foreach (string candidate in Directory.EnumerateFiles(directory, "*.svg"))
+                {
+                    string fileName = Path.GetFileName(candidate);
+                    if (fileName.IndexOf(hash, StringComparison.OrdinalIgnoreCase) >= 0)
+                        return candidate;
+
+                    // 文件名已带别的指纹 → 内容必然不同，跳过读取
+                    if (DiagramFileNameHashRegex.IsMatch(fileName)) continue;
+                    if (!fileName.StartsWith("diagram_", StringComparison.OrdinalIgnoreCase)) continue;
+
+                    // 旧文件名不含指纹：读一次内容比对，避免重复堆积
+                    try
+                    {
+                        string existingDocument = File.ReadAllText(candidate);
+                        if (string.Equals(ComputeDiagramHash(existingDocument), hash,
+                                StringComparison.OrdinalIgnoreCase))
+                            return candidate;
+                    }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                }
+            }
+            catch (DirectoryNotFoundException) { }
+            catch (UnauthorizedAccessException ex)
+            {
+                Logger.Warn($"[Diagram] 扫描导出目录失败: {ex.Message}");
+            }
+
+            return null;
+        }
+
+        /// <summary>把未闭合的 HTML 空元素改为自闭合形式（&lt;br&gt; → &lt;br /&gt;）。</summary>
+        private static string SelfCloseVoidElements(string text)
+        {
+            return HtmlVoidTagRegex.Replace(text, match =>
+            {
+                if (match.Groups["selfclose"].Value.Length > 0) return match.Value;
+                return $"<{match.Groups["tag"].Value}{match.Groups["attrs"].Value} />";
+            });
+        }
+
+        /// <summary>
+        /// 判断文本是否为合法 XML。禁用 DTD 与外部实体解析，避免校验动作本身引入 XXE。
+        /// </summary>
+        internal static bool IsWellFormedXml(string? xml)
+        {
+            if (string.IsNullOrWhiteSpace(xml)) return false;
+
+            try
+            {
+                var settings = new System.Xml.XmlReaderSettings
+                {
+                    DtdProcessing = System.Xml.DtdProcessing.Prohibit,
+                    XmlResolver = null,
+                };
+
+                using (var reader = System.Xml.XmlReader.Create(new StringReader(xml), settings))
+                {
+                    while (reader.Read()) { }
+                }
+
+                return true;
+            }
+            catch (System.Xml.XmlException)
+            {
+                return false;
+            }
+        }
+
         /// <summary>
         /// 清空已上传的文件列表。
         /// </summary>
@@ -2480,6 +2867,12 @@ namespace DeepSeek_v4_for_VisualStudio.View
                             ? pathProp.GetString() ?? string.Empty : string.Empty;
                         if (!string.IsNullOrWhiteSpace(filePath))
                             TryOpenAttachment(filePath);
+                    }
+                    else if (type == "saveDiagramToFile")
+                    {
+                        string svg = obj.TryGetProperty("svg", out var svgProp)
+                            ? svgProp.GetString() ?? string.Empty : string.Empty;
+                        SaveDiagramToFile(svg);
                     }
                     else if (type == "retryMessage")
                     {

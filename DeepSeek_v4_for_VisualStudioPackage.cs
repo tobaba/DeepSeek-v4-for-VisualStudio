@@ -558,6 +558,21 @@ namespace DeepSeek_v4_for_VisualStudio
                 }
             });
 
+            // ── 图表导出清扫（后台、非 UI 线程）──
+            // 点图表导出的 SVG 是临时产物，超过保留期就清掉；
+            // 与保存路径共用"每天一次"的节流，避免重复扫描目录。
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    View.DeepSeekChatControl.CleanupExpiredDiagramsIfNeeded();
+                }
+                catch (Exception ex)
+                {
+                    DiagnosticLog.Write($"[Diagram] startup sweep failed: {ex.Message}");
+                }
+            });
+
             // ── 自动恢复聊天窗口（标记门控）──
             // 仅当用户此前显式打开过聊天窗口（存在标记文件）时才随启动自动弹出；
             // 空白实例 / 从未使用过的实例不再强制走"加载持久化配置 + 创建窗口"链路。

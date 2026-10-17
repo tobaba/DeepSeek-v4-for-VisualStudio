@@ -107,6 +107,45 @@ public class ModelFetchServiceTests
         handler.LastAuthorization.Should().Be("Bearer sk-secret");
     }
 
+    [Fact]
+    public void FetchModelsAsync_ProjectsMetadataToIds()
+    {
+        var handler = new UrlRouterHandler();
+        handler.Route["https://api.example.com/v1/models"] = (
+            HttpStatusCode.OK,
+            """{"data":[{"id":"m-b","context_window":200000},{"id":"m-a"}]}""");
+
+        var models = ModelFetchService.FetchModelsAsync(
+            "https://api.example.com", "sk-test", default, handler).GetAwaiter().GetResult();
+
+        models.Should().Equal("m-a", "m-b");
+    }
+
+    [Fact]
+    public void FetchModelsWithMetadataAsync_ReturnsDeclaredMetadata()
+    {
+        var handler = new UrlRouterHandler();
+        handler.Route["https://api.example.com/v1/models"] = (
+            HttpStatusCode.OK,
+            """
+            {"data":[{"id":"m1","name":"Model One","context_window":200000,
+            "max_output_tokens":64000,"input_modalities":["text","image"],
+            "effort":{"supported_levels":["low","high"],"default_level":"high"}}]}
+            """);
+
+        var models = ModelFetchService.FetchModelsWithMetadataAsync(
+            "https://api.example.com", "sk-test", default, handler).GetAwaiter().GetResult();
+
+        var model = models.Should().ContainSingle().Subject;
+        model.Id.Should().Be("m1");
+        model.Display.Should().Be("Model One");
+        model.ContextWindow.Should().Be(200_000);
+        model.MaxOutputTokens.Should().Be(64_000);
+        model.SupportsImageInput.Should().BeTrue();
+        model.EffortLevelsOrEmpty.Should().Equal("low", "high");
+        model.DefaultEffortLevel.Should().Be("high");
+    }
+
     private sealed class UrlRouterHandler : HttpMessageHandler
     {
         public Dictionary<string, (HttpStatusCode Status, string Body)> Route { get; } = new();

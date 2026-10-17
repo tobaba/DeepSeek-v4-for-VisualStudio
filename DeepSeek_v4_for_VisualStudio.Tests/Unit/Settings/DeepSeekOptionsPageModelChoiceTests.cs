@@ -95,6 +95,7 @@ public class DeepSeekOptionsPageModelChoiceTests
             nameof(DeepSeekOptionsPage.CustomModelName),
             nameof(DeepSeekOptionsPage.ModelMaxTokenLimits),
             nameof(DeepSeekOptionsPage.CustomVisionModels),
+            nameof(DeepSeekOptionsPage.CustomModelMetadata),
             nameof(DeepSeekOptionsPage.CustomModelPicker),
         })
         {

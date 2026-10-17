@@ -7,6 +7,7 @@ using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using DeepSeek_v4_for_VisualStudio.Models;
 
 namespace DeepSeek_v4_for_VisualStudio.Services
 {
@@ -29,6 +30,22 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// </summary>
         /// <exception cref="InvalidOperationException">全部候选失败或上游报错时抛出，消息含最后一次 HTTP 状态。</exception>
         public static async Task<IReadOnlyList<string>> FetchModelsAsync(
+            string? baseUrl,
+            string? apiKey,
+            CancellationToken cancellationToken = default,
+            HttpMessageHandler? httpMessageHandler = null)
+        {
+            var metadata = await FetchModelsWithMetadataAsync(
+                baseUrl, apiKey, cancellationToken, httpMessageHandler);
+            return metadata.Select(model => model.Id).ToList();
+        }
+
+        /// <summary>
+        /// 抓取可用模型及其元数据。按候选端点顺序尝试；成功返回按 id 排序去重的列表。
+        /// 元数据（上下文窗口、输入模态、effort 档位等）供设置界面只读展示。
+        /// </summary>
+        /// <exception cref="InvalidOperationException">全部候选失败或上游报错时抛出，消息含最后一次 HTTP 状态。</exception>
+        public static async Task<IReadOnlyList<ModelMetadata>> FetchModelsWithMetadataAsync(
             string? baseUrl,
             string? apiKey,
             CancellationToken cancellationToken = default,
@@ -70,7 +87,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                     if (response.IsSuccessStatusCode)
                     {
                         var json = await response.Content.ReadAsStringAsync();
-                        var models = ParseModelIds(json);
+                        var models = ModelMetadataParser.Parse(json);
                         if (models.Count > 0)
                             return models;
                         lastError = "empty model list";

@@ -14,9 +14,24 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
     /// 统一「模型设置」表格中的一行数据。
     /// </summary>
     /// <param name="Model">模型名称（官方或自定义端点模型）。</param>
-    /// <param name="MaxTokens">该模型的最大上下文 Token；0 表示未配置（运行时回退默认 1M）。</param>
-    /// <param name="IsVision">是否勾选为支持图片/PDF 直传的多模态模型。</param>
-    internal sealed record ModelCatalogRow(string Model, int MaxTokens, bool IsVision);
+    /// <param name="MaxTokens">该模型的最大上下文 Token；0 表示未配置（运行时回退默认值）。</param>
+    /// <param name="IsVision">是否支持图片/PDF 直传（多模态）。</param>
+    /// <param name="IsOfficial">是否来自官方远端目录。</param>
+    /// <param name="FromMetadata">
+    /// Token/视觉是否来自官方接口元数据。为 true 时表格中该行只读，用户不可手改。
+    /// </param>
+    /// <param name="DisplayName">展示名称：官方取接口 name，自定义模型可自行填写。</param>
+    /// <param name="MaxOutputTokens">单次输出上限（token）；官方取接口值，自定义模型可自行填写，0 表示未设置。</param>
+    /// <param name="EffortLevels">推理档位列表；官方取接口 supported_levels，自定义模型可自行填写。</param>
+    internal sealed record ModelCatalogRow(
+        string Model,
+        int MaxTokens,
+        bool IsVision,
+        bool IsOfficial = false,
+        bool FromMetadata = false,
+        string DisplayName = "",
+        int MaxOutputTokens = 0,
+        IReadOnlyList<string>? EffortLevels = null);
 
     /// <summary>
     /// 选项页三个底层字符串与统一表格行集合之间的双向映射。
@@ -42,11 +57,13 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
             var customModels = page.GetCustomModels();
             var limits = ModelTokenLimitService.ParseLimits(page.ModelMaxTokenLimits);
             var vision = new HashSet<string>(page.GetVisionModels(), StringComparer.OrdinalIgnoreCase);
+            var extra = DeepSeekOptionsPage.ParseCustomModelMetadata(page.CustomModelMetadata);
 
             var rows = new List<ModelCatalogRow>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             // 局部函数：统一做非空校验、去重并填充该行的 Token/视觉初始值。
+            // 官方模型以接口元数据为权威值；接口未给出时回退用户配置。
             void Add(string? model)
             {
                 if (string.IsNullOrWhiteSpace(model))
@@ -55,8 +72,25 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
                 if (name.Length == 0 || !seen.Add(name))
                     return;
 
+                var metadata = OfficialModelCatalogService.TryGetMetadata(name);
+                if (metadata != null)
+                {
+                    int officialTokens = metadata.ContextWindow ?? 0;
+                    bool officialVision = metadata is { HasModalityInfo: true, SupportsImageInput: true };
+                    rows.Add(new ModelCatalogRow(
+                        name, officialTokens, officialVision, IsOfficial: true, FromMetadata: true,
+                        metadata.DisplayName ?? string.Empty, metadata.MaxOutputTokens ?? 0,
+                        metadata.EffortLevelsOrEmpty));
+                    return;
+                }
+
                 limits.TryGetValue(name, out int maxTokens);
-                rows.Add(new ModelCatalogRow(name, maxTokens, vision.Contains(name)));
+                extra.TryGetValue(name, out var customExtra);
+                rows.Add(new ModelCatalogRow(
+                    name, maxTokens, vision.Contains(name),
+                    DisplayName: customExtra?.DisplayName ?? string.Empty,
+                    MaxOutputTokens: customExtra?.MaxOutputTokens ?? 0,
+                    EffortLevels: customExtra?.EffortLevels ?? Array.Empty<string>()));
             }
 
             foreach (string model in officialModels)
@@ -99,14 +133,27 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
                 .ToList();
             page.SetCustomModels(customModels);
 
-            // ② 模型最大 Token：仅写入配置了有效值的行，格式保持 "模型名=token"。
+            // ② 模型最大 Token：只写入用户可编辑（非官方元数据）的行，格式保持 "模型名=token"。
+            //    官方模型的上下文窗口由接口提供，落盘会造成过期副本。
             var limitLines = rows
-                .Where(row => row.MaxTokens > 0)
+                .Where(row => row.MaxTokens > 0 && !row.FromMetadata)
                 .Select(row => row.Model + "=" + row.MaxTokens);
             page.ModelMaxTokenLimits = string.Join(Environment.NewLine, limitLines);
 
-            // ③ 视觉模型：写入全部勾选行，换行分隔。
-            page.SetVisionModels(rows.Where(row => row.IsVision).Select(row => row.Model));
+            // ③ 视觉模型：官方模型由接口的 input_modalities 权威判定，只写入自定义模型的手动勾选。
+            page.SetVisionModels(
+                rows.Where(row => row.IsVision && !row.IsOfficial).Select(row => row.Model));
+
+            // ④ 自定义模型的扩展元数据（展示名称 / 输出上限 / 推理档位）：
+            //    官方模型由 /models 提供，不落盘；仅记录自定义模型的用户输入。
+            page.CustomModelMetadata = DeepSeekOptionsPage.FormatCustomModelMetadata(
+                rows.Where(row => !row.IsOfficial)
+                    .Select(row => (
+                        row.Model,
+                        new DeepSeekOptionsPage.ModelExtraMetadata(
+                            row.DisplayName ?? string.Empty,
+                            row.MaxOutputTokens,
+                            row.EffortLevels ?? Array.Empty<string>()))));
         }
     }
 
@@ -178,6 +225,9 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
             // 官方模型由远端目录动态提供、删除无处落盘，下次打开必然重现，
             // 故预先构建集合，用于标注来源并拦截对官方行的删除操作。
             _officialSet = new HashSet<string>(officialModels, StringComparer.OrdinalIgnoreCase);
+            _metadataSet = new HashSet<string>(
+                OfficialModelCatalogService.GetMetadata().Select(model => model.Id),
+                StringComparer.OrdinalIgnoreCase);
 
             var l = LocalizationService.Instance;
             Text = l["settings.modelCatalog.title"];
@@ -185,8 +235,8 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
             FormBorderStyle = FormBorderStyle.Sizable;
             ShowInTaskbar = false;
             MinimizeBox = false;
-            ClientSize = new Size(680, 460);
-            MinimumSize = new Size(520, 340);
+            ClientSize = new Size(940, 500);
+            MinimumSize = new Size(720, 360);
             Font = new Font("Segoe UI", 9f);
 
             var descriptionLabel = new Label
@@ -232,7 +282,15 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
                 Name = "model",
                 HeaderText = l["settings.modelCatalog.modelColumn"],
                 AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
-                FillWeight = 40,
+                FillWeight = 26,
+            });
+            // 「展示名称」列：官方模型由接口 name 自动填入（该行只读）；自定义模型可自行填写。
+            _grid.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                Name = "display",
+                HeaderText = l["settings.modelCatalog.displayNameColumn"],
+                AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
+                FillWeight = 20,
             });
             // 只读「来源」列：标注该行来自官方远端目录还是用户自定义/手动添加。
             _grid.Columns.Add(new DataGridViewTextBoxColumn
@@ -241,21 +299,35 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
                 HeaderText = l["settings.modelCatalog.sourceColumn"],
                 ReadOnly = true,
                 AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
-                FillWeight = 14,
+                FillWeight = 12,
             });
             _grid.Columns.Add(new DataGridViewTextBoxColumn
             {
                 Name = "tokens",
                 HeaderText = l["settings.modelCatalog.contextColumn"],
                 AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
-                FillWeight = 26,
+                FillWeight = 16,
+            });
+            _grid.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                Name = "maxout",
+                HeaderText = l["settings.modelCatalog.maxOutputColumn"],
+                AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
+                FillWeight = 14,
             });
             _grid.Columns.Add(new DataGridViewCheckBoxColumn
             {
                 Name = "vision",
                 HeaderText = l["settings.modelCatalog.visionColumn"],
                 AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
-                FillWeight = 8,
+                FillWeight = 7,
+            });
+            _grid.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                Name = "effort",
+                HeaderText = l["settings.modelCatalog.effortColumn"],
+                AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
+                FillWeight = 13,
             });
             _grid.Columns.Add(new DataGridViewButtonColumn
             {
@@ -317,9 +389,35 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
                 string tokenText = row.MaxTokens > 0
                     ? ModelTokenLimitService.FormatTokenCount(row.MaxTokens)
                     : string.Empty;
-                // 来源由官方模型集合判定：命中即官方，否则视为自定义/手动添加。
+
+                // 来源由官方模型集合判定：命中即官方（元数据自动填充），否则视为自定义/手动添加。
                 string sourceText = _officialSet.Contains(row.Model) ? officialText : customText;
-                _grid.Rows.Add(row.Model, sourceText, tokenText, row.IsVision, string.Empty);
+                string displayText = row.DisplayName ?? string.Empty;
+                string maxOutputText = row.MaxOutputTokens > 0
+                    ? ModelTokenLimitService.FormatTokenCount(row.MaxOutputTokens)
+                    : string.Empty;
+                string effortText = row.EffortLevels is { Count: > 0 } levels
+                    ? string.Join(" / ", levels)
+                    : string.Empty;
+
+                int index = _grid.Rows.Add(
+                    row.Model, displayText, sourceText, tokenText, maxOutputText,
+                    row.IsVision, effortText, string.Empty);
+
+                // 官方模型的全部元数据由接口声明，整行只读，避免用户改动后与接口不一致。
+                // 自定义模型行保持可编辑，用户可自行填写展示名称/上下文/输出上限/视觉/推理档位。
+                if (row.FromMetadata)
+                {
+                    var gridRow = _grid.Rows[index];
+                    foreach (DataGridViewCell cell in gridRow.Cells)
+                    {
+                        // 删除按钮列保持可点击（点击后仍会拦截官方行）。
+                        if (cell.OwningColumn?.Name == "delete")
+                            continue;
+                        cell.ReadOnly = true;
+                        cell.Style.BackColor = SystemColors.Control;
+                    }
+                }
             }
         }
 
@@ -342,7 +440,11 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
             foreach (string model in dialog.AddedModels)
             {
                 if (existing.Add(model))
-                    _grid.Rows.Add(model, l["settings.modelCatalog.sourceCustom"], string.Empty, false, string.Empty);
+                {
+                    _grid.Rows.Add(
+                        model, string.Empty, l["settings.modelCatalog.sourceCustom"],
+                        string.Empty, string.Empty, false, string.Empty, string.Empty);
+                }
             }
         }
 
@@ -428,8 +530,41 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
                     return false;
                 }
 
+                bool isOfficial = _officialSet.Contains(model);
+                bool fromMetadata = isOfficial && _metadataSet.Contains(model);
+                string displayName =
+                    gridRow.Cells["display"].Value?.ToString()?.Trim() ?? string.Empty;
+                string maxOutputText =
+                    gridRow.Cells["maxout"].Value?.ToString()?.Trim() ?? string.Empty;
+                string effortText =
+                    gridRow.Cells["effort"].Value?.ToString()?.Trim() ?? string.Empty;
+
+                int maxOutput = 0;
+                if (maxOutputText.Length > 0 &&
+                    !ModelTokenLimitService.TryParseTokenCount(maxOutputText, out maxOutput))
+                {
+                    result = rows;
+                    errorMessage = string.Format(l["settings.modelCatalog.invalidValue"], model);
+                    return false;
+                }
+
                 bool isVision = ModelCatalogDialog.ReadCheckBox(gridRow.Cells["vision"].Value);
-                rows.Add(new ModelCatalogRow(model, maxTokens, isVision));
+                IReadOnlyList<string> effortLevels = ParseEffortLevels(effortText);
+
+                // 官方行的元数据以接口为准（整行只读，此处再取一次防止 UI 状态异常）。
+                if (fromMetadata)
+                {
+                    var metadata = OfficialModelCatalogService.TryGetMetadata(model);
+                    maxTokens = metadata?.ContextWindow ?? maxTokens;
+                    displayName = metadata?.DisplayName ?? string.Empty;
+                    maxOutput = metadata?.MaxOutputTokens ?? 0;
+                    effortLevels = metadata?.EffortLevelsOrEmpty ?? Array.Empty<string>();
+                    isVision = metadata is { HasModalityInfo: true, SupportsImageInput: true };
+                }
+
+                rows.Add(new ModelCatalogRow(
+                    model, maxTokens, isVision, isOfficial, fromMetadata,
+                    displayName, maxOutput, effortLevels));
             }
 
             result = rows;
@@ -441,8 +576,26 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
         private static bool ReadCheckBox(object? value)
             => value is bool flag && flag;
 
+        /// <summary>解析推理档位文本：支持 / | ; , 、分隔，去重保序。</summary>
+        private static IReadOnlyList<string> ParseEffortLevels(string? text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return Array.Empty<string>();
+
+            return text
+                .Split(new[] { '/', '|', ';', ',', '；', '，' },
+                    StringSplitOptions.RemoveEmptyEntries)
+                .Select(level => level.Trim())
+                .Where(level => level.Length > 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
         /// <summary>官方模型名集合（忽略大小写），用于标注来源并拦截官方行的删除。</summary>
         private readonly HashSet<string> _officialSet;
+
+        /// <summary>带接口元数据的官方模型集合；这些行的 Token/视觉单元格只读。</summary>
+        private readonly HashSet<string> _metadataSet;
 
         private readonly string? _baseUrl;
         private readonly string? _apiKey;

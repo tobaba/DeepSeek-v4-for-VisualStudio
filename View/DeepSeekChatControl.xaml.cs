@@ -50,25 +50,40 @@ namespace DeepSeek_v4_for_VisualStudio.View
             public string Model { get; }
             public EntrySource Source { get; }
 
-            private ModelListItem(string model, EntrySource source)
+            /// <summary>用户在「模型设置」里填写的展示名称；为空时回退到模型名。</summary>
+            public string DisplayName { get; }
+
+            private ModelListItem(string model, EntrySource source, string? displayName)
             {
                 Model = model;
                 Source = source;
+                DisplayName = (displayName ?? string.Empty).Trim();
             }
 
-            public static ModelListItem Official(string model) => new(model, EntrySource.Official);
+            public static ModelListItem Official(string model, string? displayName = null)
+                => new(model, EntrySource.Official, displayName);
 
-            public static ModelListItem Custom(string model) => new(model, EntrySource.Custom);
+            public static ModelListItem Custom(string model, string? displayName = null)
+                => new(model, EntrySource.Custom, displayName);
 
             /// <summary>
-            /// 下拉框显示文本：官方条目显示原始模型名，自定义条目追加后缀。
+            /// 下拉框显示文本：显示用户在设置里填写的展示名称（官方来自 /models 的 name），
+            /// 没填写展示名称时才回退到原始模型名；自定义条目追加来源后缀以区分同名模型。
             /// 后缀实时读取本地化资源（而非构造时缓存），避免语言切换后残留旧语言；
             /// 注意 DisplayMemberPath 不会自动重新求值，切换语言仍需重建 ItemsSource。
             /// </summary>
             public string Display
-                => Source == EntrySource.Custom
-                    ? Model + LocalizationService.Instance["chat.model.customSuffix"]
-                    : Model;
+            {
+                get
+                {
+                    // 填写了展示名称就只显示它，避免下拉框里堆两个名字。
+                    string label = DisplayName.Length > 0 ? DisplayName : Model;
+
+                    return Source == EntrySource.Custom
+                        ? label + LocalizationService.Instance["chat.model.customSuffix"]
+                        : label;
+                }
+            }
         }
 
         /// <summary>
@@ -550,7 +565,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
             ModelComboBox.ItemsSource = BuildModelListItems();
             ModelComboBox.SelectedIndex = 0;
 
-            EffortComboBox.ItemsSource = new[] { "low", "high", "max" };
+            // 官方模型的 effort 档位由 /models 声明，接口拉到前先用兜底列表。
+            EffortComboBox.ItemsSource = DeepSeekOptionsPage.DefaultReasoningEfforts.ToList();
             // 推理强度初始值稍后在 StartControl 中从设置恢复（此时 _options 尚未赋值）
             // 默认档位是 high，在 ItemsSource 中排第 2 位。
             EffortComboBox.SelectedIndex = 1;
@@ -1983,12 +1999,17 @@ namespace DeepSeek_v4_for_VisualStudio.View
         private System.Collections.Generic.IReadOnlyList<ModelListItem> BuildModelListItems()
         {
             var items = new System.Collections.Generic.List<ModelListItem>();
-            foreach (var model in OfficialModelCatalogService.GetModels())
-                items.Add(ModelListItem.Official(model));
+            foreach (var model in OfficialModelCatalogService.GetMetadata())
+                items.Add(ModelListItem.Official(model.Id, model.DisplayName));
 
+            var customMetadata = _options == null
+                ? null
+                : DeepSeekOptionsPage.ParseCustomModelMetadata(_options.CustomModelMetadata);
             foreach (var custom in _options?.GetCustomModels() ?? Array.Empty<string>())
             {
-                items.Add(ModelListItem.Custom(custom));
+                DeepSeekOptionsPage.ModelExtraMetadata? extra = null;
+                customMetadata?.TryGetValue(custom, out extra);
+                items.Add(ModelListItem.Custom(custom, extra?.DisplayName));
             }
             return items;
         }
@@ -2047,19 +2068,51 @@ namespace DeepSeek_v4_for_VisualStudio.View
             {
                 RefreshModelFromSettings();
                 SyncApiEndpointFromSettings();
+                // 推理档位同样来自接口声明，目录更新后需重建并按新范围收敛。
+                ExecuteWithoutCoreControlEvents(RefreshReasoningEffortFromSettings);
+                SyncThinkingToApiService();
                 ApplyContextBudgetFromSettings();
             });
         }
 
         /// <summary>
-        /// 从设置恢复推理强度下拉框选中值。
+        /// 从设置恢复推理强度下拉框：档位来自当前模型的 /models 声明，
+        /// 保存值不在声明内时回落到接口默认档位或 high。
         /// </summary>
         private void RefreshReasoningEffortFromSettings()
         {
             if (EffortComboBox == null || _options == null) return;
-            string savedEffort = _options.ReasoningEffort ?? "high";
-            // 只允许下拉框中真实存在的档位，避免设置里残留的非法值让选中项为空。
-            EffortComboBox.SelectedItem = savedEffort is "low" or "high" or "max" ? savedEffort : "high";
+            var levels = ResolveEffortLevels();
+            EffortComboBox.ItemsSource = levels;
+            EffortComboBox.SelectedItem = ResolveEffortForModel(levels);
+        }
+
+        /// <summary>当前模型可用的推理档位：官方接口声明优先，未提供时回退 low/high/max。</summary>
+        private System.Collections.Generic.IReadOnlyList<string> ResolveEffortLevels()
+        {
+            var declared = OfficialModelCatalogService.GetEffortLevels(GetEffectiveModel());
+            return declared.Count > 0 ? declared : DeepSeekOptionsPage.DefaultReasoningEfforts;
+        }
+
+        /// <summary>把设置里的 effort 收敛到当前模型声明范围内，避免请求出现非法档位。</summary>
+        private string ResolveEffortForModel(
+            System.Collections.Generic.IReadOnlyList<string>? levels = null)
+        {
+            levels ??= ResolveEffortLevels();
+            string saved = _options?.ReasoningEffort ?? string.Empty;
+            var match = levels.FirstOrDefault(
+                level => string.Equals(level, saved, StringComparison.OrdinalIgnoreCase));
+            if (match != null)
+                return match;
+
+            string? declaredDefault = OfficialModelCatalogService
+                .TryGetMetadata(GetEffectiveModel())?.DefaultEffortLevel;
+            var defaultValue = levels.FirstOrDefault(
+                level => string.Equals(level, declaredDefault, StringComparison.OrdinalIgnoreCase))
+                ?? levels.FirstOrDefault(
+                    level => string.Equals(level, "high", StringComparison.OrdinalIgnoreCase));
+
+            return defaultValue ?? levels.FirstOrDefault() ?? "high";
         }
 
         /// <summary>
@@ -2361,6 +2414,10 @@ namespace DeepSeek_v4_for_VisualStudio.View
             public long LastFlushTicks;
             /// <summary>上次刷新时的完整 Reason 长度，用于兼容全量更新调用点</summary>
             public int LastFlushedReasoningLength;
+            /// <summary>上次刷新时的整段正文长度，用于按"增长量"而非"绝对长度"节流。</summary>
+            public int LastFlushedContentLength;
+            /// <summary>整段正文替换后是否已经收到过增量，用于补段落分隔符。</summary>
+            public bool ContentDeltaStarted;
         }
 
         private readonly Dictionary<int, StreamBatchState> _streamBatchStates = new();
@@ -2428,9 +2485,23 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 {
                     state.Content.Clear();
                     state.Content.Append(content);
+                    // 整段替换（工具时间线 / 最终定稿）之后，后续增量属于"新段落"。
+                    StreamBatchContentRules.ResetAfterFullContent(
+                        ref state.ContentDeltaStarted, ref state.LastFlushedContentLength);
                 }
                 if (contentDelta != null)
-                    state.ContentDelta.Append(contentDelta);
+                {
+                    // 关键：整段正文非空（工具轮次已把时间线作为整段正文推过）时，
+                    // 增量必须同时并入整段正文。否则推送时会被整段快照挤掉、
+                    // 并随 ContentDelta 一起清空，最终回答只能等收尾定稿一次性出现——
+                    // 表现为「有工具调用时最终回答不流式、直接弹出来」。
+                    // 整段正文为空（纯问答流式）时保持原样，继续走高效的 cd 增量路径。
+                    if (!StreamBatchContentRules.TryMergeDelta(
+                            state.Content, contentDelta, ref state.ContentDeltaStarted))
+                    {
+                        state.ContentDelta.Append(contentDelta);
+                    }
+                }
                 if (reasoning != null)
                 {
                     state.Reasoning.Clear();
@@ -2447,7 +2518,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 long elapsed = now - state.LastFlushTicks;
 
                 // 仅当满足条件时实际推送：已完成 / 内容显著变化 / 思考显著变化 / 间隔达标且有任意内容
-                bool contentChanged = state.Content.Length > StreamRenderInterval;
+                // 用"自上次刷新以来的增长量"判定，避免正文变长后每次都触发整段重推。
+                bool contentChanged = StreamBatchContentRules.GrewEnough(
+                    state.Content.Length, state.LastFlushedContentLength, StreamRenderInterval);
                 bool contentDeltaChanged = state.ContentDelta.Length >= StreamRenderInterval;
                 bool reasoningChanged =
                     (state.Reasoning.Length > 0
@@ -2466,9 +2539,14 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 {
                     state.LastFlushTicks = now;
                     state.LastFlushedReasoningLength = state.Reasoning.Length;
+                    state.LastFlushedContentLength = state.Content.Length;
+
+                    // 整段正文已由增量同步维护，直接推整段（c）即可；
+                    // 不再走 cd，避免"整段快照挤掉增量"的旧问题，也省去 JS 侧增量拼接。
                     string? contentSnapshot = state.Content.Length > 0
                         ? state.Content.ToString()
                         : null;
+                    // 无整段正文时（例如纯思考先到）才退回增量路径。
                     string? contentDeltaSnapshot = contentSnapshot == null && state.ContentDelta.Length > 0
                         ? state.ContentDelta.ToString()
                         : null;

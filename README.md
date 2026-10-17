@@ -109,7 +109,7 @@ Recommended starting settings:
 | Model | Choose from the list returned by `/models` |
 | Deep Reasoning | Enabled, effort `high` |
 | Token budget | `90%` |
-| Vision models | Mark multimodal models in the Vision Models picker |
+| Vision models | Official models get vision and context window from `/models` automatically; custom endpoint models can be marked manually |
 
 | Shortcut | Action |
 |---|---|
