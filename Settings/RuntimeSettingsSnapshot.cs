@@ -12,6 +12,7 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
         string SelectedModel,
         string CustomModelName,
         string CustomVisionModels,
+        string CustomModelMetadata,
         string ActiveCustomModel,
         string ActiveModelSource,
         int TokenBudgetPercent,
@@ -43,6 +44,7 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
                 options.SelectedModel ?? string.Empty,
                 options.CustomModelName ?? string.Empty,
                 options.CustomVisionModels ?? string.Empty,
+                options.CustomModelMetadata ?? string.Empty,
                 options.ActiveCustomModel ?? string.Empty,
                 options.ActiveModelSource ?? string.Empty,
                 options.TokenBudget,
@@ -111,6 +113,7 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
                 Changed(previous.SelectedModel, current.SelectedModel) ||
                 Changed(previous.CustomModelName, current.CustomModelName) ||
                 Changed(previous.CustomVisionModels, current.CustomVisionModels) ||
+                Changed(previous.CustomModelMetadata, current.CustomModelMetadata) ||
                 Changed(previous.ActiveCustomModel, current.ActiveCustomModel) ||
                 Changed(previous.ActiveModelSource, current.ActiveModelSource);
             bool contextChanged =

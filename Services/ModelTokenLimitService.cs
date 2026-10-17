@@ -52,6 +52,13 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         public static int GetMaxTokens(string? model, string? configuration)
         {
             string normalizedModel = (model ?? string.Empty).Trim();
+
+            // 官方接口声明的 context_window 是权威值，优先于用户的历史配置与 1M 兜底。
+            int? official = OfficialModelCatalogService
+                .TryGetMetadata(normalizedModel)?.ContextWindow;
+            if (official.HasValue && official.Value > 0)
+                return official.Value;
+
             if (normalizedModel.Length > 0 &&
                 ParseLimits(configuration).TryGetValue(normalizedModel, out int configured))
             {

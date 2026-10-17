@@ -83,12 +83,14 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
     /// <summary>视觉模型勾选对话框：官方与自定义模型统一展示。</summary>
     internal sealed class VisionModelPickerDialog : Form
     {
-        private sealed record VisionModelItem(string Model, string Display);
+        private sealed record VisionModelItem(string Model, string Display, bool IsOfficial, bool FromMetadata);
 
         private readonly CheckedListBox _modelList;
 
+        /// <summary>用户勾选的自定义端点模型；官方模型由接口元数据判定，不参与落盘。</summary>
         public IReadOnlyList<string> SelectedVisionModels
             => _modelList.CheckedItems.Cast<VisionModelItem>()
+                .Where(item => !item.FromMetadata)
                 .Select(item => item.Model)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
@@ -119,7 +121,8 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
                 DisplayMember = nameof(VisionModelItem.Display),
             };
 
-            var officialModels = OfficialModelCatalogService.GetModels();
+            var officialMetadata = OfficialModelCatalogService.GetMetadata();
+            var officialModels = officialMetadata.Select(model => model.Id).ToList();
             var sources = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
             foreach (var model in officialModels)
                 sources.Add(model, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "official" });
@@ -133,6 +136,9 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
                 modelSources.Add("custom");
             }
 
+            var metadataById = officialMetadata.ToDictionary(
+                model => model.Id, StringComparer.OrdinalIgnoreCase);
+
             foreach (var pair in sources)
             {
                 var sourceText = pair.Value.Contains("official") && pair.Value.Contains("custom")
@@ -140,21 +146,54 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
                     : pair.Value.Contains("official")
                         ? l["settings.visionModels.source.official"]
                         : l["settings.visionModels.source.custom"];
-                var display = string.IsNullOrWhiteSpace(sourceText)
+
+                bool fromMetadata = metadataById.TryGetValue(pair.Key, out var metadata) &&
+                    metadata.HasModalityInfo;
+                string display = string.IsNullOrWhiteSpace(sourceText)
                     ? pair.Key
                     : $"{pair.Key} ({sourceText})";
-                _modelList.Items.Add(new VisionModelItem(pair.Key, display), false);
+                // 接口已声明模态的官方模型：标注能力并锁定勾选状态，用户无需也不能改动。
+                if (fromMetadata)
+                {
+                    display += metadata.SupportsImageInput
+                        ? " · " + l["settings.visionModels.autoImage"]
+                        : " · " + l["settings.visionModels.autoTextOnly"];
+                }
+
+                _modelList.Items.Add(
+                    new VisionModelItem(
+                        pair.Key, display, pair.Value.Contains("official"), fromMetadata),
+                    false);
             }
 
             var selected = new HashSet<string>(visionModels, StringComparer.OrdinalIgnoreCase);
             for (var i = 0; i < _modelList.Items.Count; i++)
             {
-                if (_modelList.Items[i] is VisionModelItem item &&
-                    selected.Contains(item.Model))
-                {
+                if (_modelList.Items[i] is not VisionModelItem item)
+                    continue;
+
+                // 官方模型由 input_modalities 权威判定；自定义模型沿用用户勾选。
+                bool isChecked = item.FromMetadata
+                    ? metadataById[item.Model].SupportsImageInput
+                    : selected.Contains(item.Model);
+                if (isChecked)
                     _modelList.SetItemChecked(i, true);
-                }
             }
+
+            // 元数据行不可改动：勾选动作直接被还原。
+            _modelList.ItemCheck += (_, e) =>
+            {
+                if (_modelList.Items[e.Index] is VisionModelItem item &&
+                    item.FromMetadata &&
+                    e.NewValue != (metadataById[item.Model].SupportsImageInput
+                        ? CheckState.Checked
+                        : CheckState.Unchecked))
+                {
+                    e.NewValue = metadataById[item.Model].SupportsImageInput
+                        ? CheckState.Checked
+                        : CheckState.Unchecked;
+                }
+            };
 
             var okButton = new Button
             {

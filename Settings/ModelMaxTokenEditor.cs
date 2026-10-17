@@ -58,6 +58,9 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
     {
         private readonly DataGridView _grid;
 
+        /// <summary>上下文窗口由接口声明（只读）的官方模型集合。</summary>
+        private readonly HashSet<string> _metadataModels;
+
         public string ConfigurationText { get; private set; } = string.Empty;
 
         public ModelMaxTokenDialog(
@@ -126,12 +129,31 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
 
             var officialSet = new HashSet<string>(officialModels, StringComparer.OrdinalIgnoreCase);
             var customSet = new HashSet<string>(customModels, StringComparer.OrdinalIgnoreCase);
+            _metadataModels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (string model in models)
             {
-                string text = configured.TryGetValue(model, out int maxTokens)
-                    ? ModelTokenLimitService.FormatTokenCount(maxTokens)
-                    : string.Empty;
-                _grid.Rows.Add(model, GetSourceText(model, officialSet, customSet), text);
+                var metadata = officialSet.Contains(model)
+                    ? OfficialModelCatalogService.TryGetMetadata(model)
+                    : null;
+                bool fromMetadata = metadata?.ContextWindow is int window && window > 0;
+
+                // 官方模型的上下文窗口由接口声明，只读展示；自定义模型留空由用户填写。
+                string text = fromMetadata
+                    ? ModelTokenLimitService.FormatTokenCount(metadata!.ContextWindow!.Value)
+                    : configured.TryGetValue(model, out int maxTokens)
+                        ? ModelTokenLimitService.FormatTokenCount(maxTokens)
+                        : string.Empty;
+                string sourceText = fromMetadata
+                    ? LocalizationService.Instance["settings.modelMaxTokenLimits.sourceMetadata"]
+                    : GetSourceText(model, officialSet, customSet);
+
+                int index = _grid.Rows.Add(model, sourceText, text);
+                if (fromMetadata)
+                {
+                    _metadataModels.Add(model);
+                    _grid.Rows[index].Cells["tokens"].ReadOnly = true;
+                    _grid.Rows[index].Cells["tokens"].Style.BackColor = SystemColors.Control;
+                }
             }
 
             var buttons = new FlowLayoutPanel
@@ -204,6 +226,10 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
                 string model = row.Cells["model"].Value?.ToString()?.Trim() ?? string.Empty;
                 string text = row.Cells["tokens"].Value?.ToString()?.Trim() ?? string.Empty;
                 if (model.Length == 0 || text.Length == 0)
+                    continue;
+
+                // 官方模型的上下文窗口由接口提供，不写入用户配置，避免过期副本。
+                if (_metadataModels.Contains(model))
                     continue;
 
                 if (!ModelTokenLimitService.TryParseTokenCount(text, out int maxTokens))

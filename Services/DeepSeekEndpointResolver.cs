@@ -73,9 +73,12 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                     officialModels ?? OfficialModelCatalogService.GetModels());
 
             // ── 视觉能力判断收敛点 ──
-            // 不再按模型名猜测；官方与自定义模型统一由用户手动勾选。
-            bool isVision = (visionModels ?? Array.Empty<string>())
-                .Any(v => string.Equals(v, model, StringComparison.OrdinalIgnoreCase));
+            // 官方模型以 /models 的 input_modalities 声明为权威值（接口未提供时才回退用户名单）；
+            // 自定义模型仍由用户手动勾选（端点不一定提供元数据）。
+            bool isVision = !isCustom
+                ? ResolveOfficialVision(model, visionModels)
+                : (visionModels ?? Array.Empty<string>())
+                    .Any(v => string.Equals(v, model, StringComparison.OrdinalIgnoreCase));
 
             return new DeepSeekEndpointConfig(
                 isCustom ? customApiKey : officialApiKey,
@@ -83,6 +86,21 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 isCustom ? baseUrl : null,
                 isCustom,
                 isVision);
+        }
+
+        /// <summary>
+        /// 官方模型的视觉能力：接口声明了输入模态就以它为准（用户无需手填），
+        /// 接口未提供模态信息时才回退到用户手填名单。
+        /// </summary>
+        private static bool ResolveOfficialVision(
+            string model, IReadOnlyList<string>? visionModels)
+        {
+            var metadata = OfficialModelCatalogService.TryGetMetadata(model);
+            if (metadata is { HasModalityInfo: true })
+                return metadata.SupportsImageInput;
+
+            return (visionModels ?? Array.Empty<string>())
+                .Any(v => string.Equals(v, model, StringComparison.OrdinalIgnoreCase));
         }
 
         private static string CoalesceCustomModel(string? customModels, string? activeCustomModel)

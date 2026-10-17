@@ -108,7 +108,7 @@ git clone https://github.com/zmy15/DeepSeek-for-VisualStudio.git
 | 模型 | 从 `/models` 返回的模型列表中选择 |
 | Deep Reasoning | 开启，Effort 为 `high` |
 | Token 预算 | `90%` |
-| 视觉模型 | 需要理解图片或 PDF 时，在多模态模型列表中勾选对应模型 |
+| 视觉模型 | 官方模型的视觉能力与上下文窗口由 `/models` 自动判定并展示，无需手填；自定义端点模型可手动勾选 |
 
 | 快捷键 | 作用 |
 |---|---|

@@ -1,7 +1,12 @@
 using DeepSeek_v4_for_VisualStudio.Services;
 
+using DeepSeek_v4_for_VisualStudio.Services;
+using System.Net.Http;
+using System.Text;
+
 namespace DeepSeek_v4_for_VisualStudio.Tests.Unit.Services;
 
+[Collection("OfficialModelCatalogService")]
 public class ModelTokenLimitServiceTests
 {
     [Fact]
@@ -11,6 +16,37 @@ public class ModelTokenLimitServiceTests
             .Should().Be(1_000_000);
         ModelTokenLimitService.GetMaxTokens("custom-model", string.Empty)
             .Should().Be(1_000_000);
+    }
+
+    [Fact]
+    public void GetMaxTokens_PrefersOfficialDeclaredContextWindow()
+    {
+        OfficialModelCatalogService.ResetForTests();
+        var handler = new StubHandler(
+            """{"data":[{"id":"deepseek-flash","context_window":524288}]}""");
+        OfficialModelCatalogService.RefreshAsync("sk-test", default, handler).GetAwaiter().GetResult();
+
+        // 接口声明优先于用户历史配置（旧配置 1M 已过期）。
+        ModelTokenLimitService.GetMaxTokens("deepseek-flash", "deepseek-flash=1M")
+            .Should().Be(524_288);
+        ModelTokenLimitService.CalculateBudget("deepseek-flash", 90, "deepseek-flash=1M")
+            .Should().Be((int)Math.Round(524_288 * 0.9, MidpointRounding.AwayFromZero));
+
+        OfficialModelCatalogService.ResetForTests();
+    }
+
+    private sealed class StubHandler : HttpMessageHandler
+    {
+        private readonly string _body;
+
+        public StubHandler(string body) => _body = body;
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+            => Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(_body, Encoding.UTF8, "application/json"),
+            });
     }
 
     [Fact]

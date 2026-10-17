@@ -393,9 +393,10 @@ namespace DeepSeek_v4_for_VisualStudio.View
         private void SyncThinkingToApiService()
         {
             if (_options == null) return;
+            // effort 收敛到当前模型声明的范围，避免设置里残留其他模型的档位被直接发出。
             _apiService?.ConfigureThinking(
                 _options.IsThinkingEnabled,
-                _options.ReasoningEffort ?? "high");
+                ResolveEffortForModel());
         }
 
         private void RecordRuntimeSettingsApplied()

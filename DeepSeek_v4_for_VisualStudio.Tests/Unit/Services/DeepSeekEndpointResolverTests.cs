@@ -1,4 +1,6 @@
 using DeepSeek_v4_for_VisualStudio.Services;
+using System.Net.Http;
+using System.Text;
 
 namespace DeepSeek_v4_for_VisualStudio.Tests.Unit.Services;
 
@@ -162,7 +164,8 @@ public class DeepSeekEndpointResolverTests
         config.Model.Should().Be("kimi-k3");
     }
 
-    // ── IsVision 视觉能力权威判定（官方与自定义模型统一由用户手动勾选）──
+    // ── IsVision 视觉能力权威判定 ──
+    // 官方模型以 /models 的 input_modalities 为权威值；自定义模型由用户手动勾选。
 
     [Fact]
     public void Resolve_CustomVisionList_MarksActiveModelAsVision()
@@ -233,9 +236,9 @@ public class DeepSeekEndpointResolverTests
     }
 
     [Fact]
-    public void Resolve_OfficialModel_OnlyVisionWhenUserChecked()
+    public void Resolve_OfficialModel_VisionFromUserListWhenMetadataMissing()
     {
-        // 官方模型不再按名字自动判定；只有用户勾选后才视为视觉模型
+        // 接口未提供 input_modalities（元数据缺失）时，官方模型沿用用户勾选名单
         var config = DeepSeekEndpointResolver.Resolve(
             apiBaseUrl: null,
             officialApiKey: "sk-official",
@@ -260,7 +263,7 @@ public class DeepSeekEndpointResolverTests
     [Fact]
     public void Resolve_OfficialNonVisionModel_NotVision()
     {
-        // 官方模型未在视觉名单中时按纯文本处理
+        // 官方模型未在视觉名单中、接口也无模态声明时按纯文本处理
         var config = DeepSeekEndpointResolver.Resolve(
             apiBaseUrl: null,
             officialApiKey: "sk-official",
@@ -271,6 +274,41 @@ public class DeepSeekEndpointResolverTests
 
         config.IsCustom.Should().BeFalse();
         config.IsVision.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Resolve_OfficialModel_VisionFromDeclaredModalities()
+    {
+        OfficialModelCatalogService.ResetForTests();
+        var handler = new StubHandler(
+            """
+            {"data":[
+              {"id":"deepseek-flash","input_modalities":["text","image"]},
+              {"id":"deepseek-v4-pro","input_modalities":["text"]}
+            ]}
+            """);
+        OfficialModelCatalogService.RefreshAsync("sk-test", default, handler).GetAwaiter().GetResult();
+
+        var vision = DeepSeekEndpointResolver.Resolve(
+            apiBaseUrl: null,
+            officialApiKey: "sk-official",
+            customApiKey: "sk-custom",
+            selectedModel: "deepseek-flash",
+            customModels: "",
+            visionModels: null);
+        vision.IsVision.Should().BeTrue();
+
+        // 用户名单与接口声明冲突时，以接口为准（无需用户手填）。
+        var textOnly = DeepSeekEndpointResolver.Resolve(
+            apiBaseUrl: null,
+            officialApiKey: "sk-official",
+            customApiKey: "sk-custom",
+            selectedModel: "deepseek-v4-pro",
+            customModels: "",
+            visionModels: new[] { "deepseek-v4-pro" });
+        textOnly.IsVision.Should().BeFalse();
+
+        OfficialModelCatalogService.ResetForTests();
     }
 
     [Fact]
@@ -334,5 +372,19 @@ public class DeepSeekEndpointResolverTests
             officialModels: new[] { "deepseek-v4-current" });
 
         config.Model.Should().Be("deepseek-v4-current");
+    }
+
+    private sealed class StubHandler : HttpMessageHandler
+    {
+        private readonly string _body;
+
+        public StubHandler(string body) => _body = body;
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+            => Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(_body, Encoding.UTF8, "application/json"),
+            });
     }
 }
