@@ -143,6 +143,58 @@ public class WebSearchServiceTests
     }
 
     [Fact]
+    public void ParseDeepSeekSearchResponse_ParsesSiteNameAuthorityAndScore()
+    {
+        const string json = """
+        {
+          "results": [
+            {
+              "title": "DeepSeek V4 模型发布",
+              "url": "https://example.com/deepseek-v4",
+              "snippet": "短摘要",
+              "summary": "长摘要",
+              "date": "2026-06-01T00:00:00+00:00",
+              "site_name": "Example News",
+              "site_icon": "https://example.com/favicon.ico",
+              "authority": 3,
+              "rerank_score": 2.4
+            }
+          ]
+        }
+        """;
+
+        var r = WebSearchService.ParseDeepSeekSearchResponse(json)[0];
+
+        r.SiteName.Should().Be("Example News");
+        r.Authority.Should().Be(3);
+        r.RerankScore.Should().Be(2.4);
+    }
+
+    [Fact]
+    public void ParseDeepSeekSearchResponse_MissingOptionalFields_UseUnknownSentinels()
+    {
+        const string json = "{\"results\":[{\"title\":\"T\",\"url\":\"https://example.com/a\"}]}";
+
+        var r = WebSearchService.ParseDeepSeekSearchResponse(json)[0];
+
+        r.SiteName.Should().BeEmpty();
+        r.Authority.Should().Be(WebSearchResult.UnknownAuthority);
+        r.RerankScore.Should().Be(WebSearchResult.UnknownScore);
+    }
+
+    [Fact]
+    public void ParseDeepSeekSearchResponse_NullSiteName_IsTreatedAsEmpty()
+    {
+        const string json =
+            "{\"results\":[{\"title\":\"T\",\"url\":\"https://example.com/a\",\"site_name\":null,\"authority\":-1}]}";
+
+        var r = WebSearchService.ParseDeepSeekSearchResponse(json)[0];
+
+        r.SiteName.Should().BeEmpty();
+        r.Authority.Should().Be(-1);
+    }
+
+    [Fact]
     public void ParseDeepSeekSearchResponse_FallsBackToSnippet()
     {
         const string json =

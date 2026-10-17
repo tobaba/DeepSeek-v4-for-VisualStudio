@@ -2944,6 +2944,10 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             // ── 2. 内置工具（回退）──
             if (BuiltInTools != null && BuiltInToolService.IsBuiltInTool(toolName))
             {
+                // 注入当前轮用户原始问题（AsyncLocal）：web_search 会把它作为
+                // 官方 Search 的 ori_question，帮助引擎理解搜索意图。
+                BuiltInToolBase.CurrentUserQuestion = Context?.CurrentUserContent;
+
                 string? result = await BuiltInTools.ExecuteBuiltInToolAsync(toolName, argumentsJson, workspaceRoot, ct);
                 if (result != null)
                     return result;

@@ -119,3 +119,51 @@ public class CurrentAgentTypeAsyncLocalIsolationTests
         GitTool.CurrentAgentType.Should().BeNull();
     }
 }
+
+/// <summary>
+/// web_search 通过 BuiltInToolBase.CurrentUserQuestion 读取当前轮用户原始问题
+/// （作为官方 Search 的 ori_question）。该值必须按异步流隔离，
+/// 否则并发 Agent 的搜索请求会互相带上对方的用户问题。
+/// </summary>
+public class CurrentUserQuestionAsyncLocalIsolationTests
+{
+    [Fact]
+    public async Task ConcurrentFlows_DoNotSeeEachOthersQuestion()
+    {
+        var first = string.Empty;
+        var second = string.Empty;
+
+        var t1 = Task.Run(async () =>
+        {
+            BuiltInToolBase.CurrentUserQuestion = "第一个问题";
+            await Task.Yield();
+            first = BuiltInToolBase.CurrentUserQuestion ?? "null";
+        });
+
+        var t2 = Task.Run(async () =>
+        {
+            BuiltInToolBase.CurrentUserQuestion = "第二个问题";
+            await Task.Yield();
+            second = BuiltInToolBase.CurrentUserQuestion ?? "null";
+        });
+
+        await Task.WhenAll(t1, t2);
+
+        first.Should().Be("第一个问题");
+        second.Should().Be("第二个问题");
+    }
+
+    [Fact]
+    public async Task ChildFlowSetting_DoesNotLeakBackToParent()
+    {
+        BuiltInToolBase.CurrentUserQuestion = null;
+
+        await Task.Run(async () =>
+        {
+            BuiltInToolBase.CurrentUserQuestion = "子问题";
+            await Task.Yield();
+        });
+
+        BuiltInToolBase.CurrentUserQuestion.Should().BeNull("子流设置不应泄漏回父流");
+    }
+}

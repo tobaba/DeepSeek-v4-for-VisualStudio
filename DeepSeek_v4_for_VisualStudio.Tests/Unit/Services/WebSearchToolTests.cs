@@ -25,6 +25,21 @@ public class WebSearchToolTests
         def.Function.Description.Should().NotBeNullOrWhiteSpace();
     }
 
+    /// <summary>
+    /// 官方 Search 支持 count（1~50），工具 schema 必须把它暴露给模型。
+    /// </summary>
+    [Fact]
+    public void Definition_ExposesQueryRecencyAndCount()
+    {
+        var def = new WebSearchTool().GetDefinition();
+
+        string parametersJson = JsonSerializer.Serialize(def.Function.Parameters);
+
+        parametersJson.Should().Contain("\"query\"");
+        parametersJson.Should().Contain("\"recency\"");
+        parametersJson.Should().Contain("\"count\"");
+    }
+
     [Fact]
     public void GetDisplayText_IncludesQuery()
     {

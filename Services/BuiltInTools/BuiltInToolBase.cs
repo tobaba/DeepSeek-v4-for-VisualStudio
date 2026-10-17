@@ -40,6 +40,20 @@ namespace DeepSeek_v4_for_VisualStudio.Services.BuiltInTools
         /// </summary>
         public CancellationToken CancellationToken { get; set; } = CancellationToken.None;
 
+        /// <summary>
+        /// 当前轮次的用户原始问题（AsyncLocal，按异步流隔离，避免并发 Agent 互相覆盖）。
+        /// 由 BuiltInToolService 在执行前注入；供需要"原始意图"的工具使用
+        /// （例如 web_search 把它作为官方 Search 的 ori_question）。
+        /// </summary>
+        private static readonly AsyncLocal<string?> CurrentUserQuestionAsyncLocal = new();
+
+        /// <summary>当前轮次的用户原始问题；未注入时为 null。</summary>
+        public static string? CurrentUserQuestion
+        {
+            get => CurrentUserQuestionAsyncLocal.Value;
+            set => CurrentUserQuestionAsyncLocal.Value = value;
+        }
+
         #region Shared Helpers
 
         /// <summary>

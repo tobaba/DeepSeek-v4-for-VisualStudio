@@ -276,8 +276,15 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// <param name="query">搜索关键词</param>
         /// <param name="cancellationToken">取消令牌</param>
         /// <param name="searchRecency">时效过滤（可选）：week/month/semiyear/year</param>
+        /// <param name="count">期望返回条数（可选）：1～50；为空使用各引擎默认值</param>
+        /// <param name="originalQuestion">触发搜索的用户原始问题（可选，仅官方 Search 使用）</param>
         /// <returns>搜索结果列表（标题、URL、摘要）</returns>
-        public async Task<List<WebSearchResult>> SearchAsync(string query, CancellationToken cancellationToken = default, string? searchRecency = null)
+        public async Task<List<WebSearchResult>> SearchAsync(
+            string query,
+            CancellationToken cancellationToken = default,
+            string? searchRecency = null,
+            int? count = null,
+            string? originalQuestion = null)
         {
             if (string.IsNullOrWhiteSpace(query))
                 return new List<WebSearchResult>();
@@ -291,7 +298,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 // ── DeepSeek 官方 Search 接口（仅官方 API 来源启用）──
                 if (IsDeepSeekSearchEnabled)
                 {
-                    var results = await SearchDeepSeekAsync(query, ct, searchRecency);
+                    var results = await SearchDeepSeekAsync(query, ct, searchRecency, count, originalQuestion);
                     if (results.Count > 0)
                         return results;
 
@@ -972,7 +979,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// 鉴权与 DeepSeek API 相同（Bearer）。失败时返回空列表，由调用方回退到其它搜索引擎。
         /// </summary>
         private async Task<List<WebSearchResult>> SearchDeepSeekAsync(
-            string query, CancellationToken ct, string? searchRecency = null)
+            string query, CancellationToken ct, string? searchRecency = null,
+            int? count = null, string? originalQuestion = null)
         {
             if (!IsDeepSeekSearchEnabled)
                 return new List<WebSearchResult>();
@@ -982,12 +990,22 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 // 官方 Search 接口没有独立的时效过滤字段，改用 query 语法表达。
                 string effectiveQuery = AppendRecencySyntax(query, searchRecency);
 
+                // count：官方允许 1～50，超出范围一律夹到边界，避免 400。
+                // net472 没有 Math.Clamp，这里手动夹逼。
+                int effectiveCount = count ?? MaxSearchResults;
+                if (effectiveCount < 1) effectiveCount = 1;
+                else if (effectiveCount > 50) effectiveCount = 50;
+
                 var requestBody = new Dictionary<string, object>
                 {
                     ["query"] = TruncateQueryChars(effectiveQuery, 128),
-                    ["count"] = MaxSearchResults,
+                    ["count"] = effectiveCount,
                     ["need_content"] = false,
                 };
+
+                // ori_question：帮助官方引擎理解搜索意图，仅在非空且未超长时携带。
+                if (!string.IsNullOrWhiteSpace(originalQuestion))
+                    requestBody["ori_question"] = TruncateQueryChars(originalQuestion.Trim(), 128);
 
                 var jsonContent = JsonSerializer.Serialize(requestBody);
                 using var request = new HttpRequestMessage(HttpMethod.Post, DeepSeekSearchApiUrl)
@@ -1068,6 +1086,9 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                         Url = GetStringProperty(item, "url"),
                         Snippet = NormalizeSnippet(summary),
                         Date = GetStringProperty(item, "date"),
+                        SiteName = GetStringProperty(item, "site_name"),
+                        Authority = GetIntProperty(item, "authority", WebSearchResult.UnknownAuthority),
+                        RerankScore = GetDoubleProperty(item, "rerank_score", WebSearchResult.UnknownScore),
                     });
                 }
             }
@@ -1143,6 +1164,20 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             => element.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.String
                 ? value.GetString() ?? string.Empty
                 : string.Empty;
+
+        /// <summary>读取 JSON 整数属性，缺失或类型不符时返回 <paramref name="fallback"/>。</summary>
+        private static int GetIntProperty(JsonElement element, string propertyName, int fallback)
+            => element.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.Number
+                && value.TryGetInt32(out int result)
+                ? result
+                : fallback;
+
+        /// <summary>读取 JSON 数字属性，缺失或类型不符时返回 <paramref name="fallback"/>。</summary>
+        private static double GetDoubleProperty(JsonElement element, string propertyName, double fallback)
+            => element.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.Number
+                && value.TryGetDouble(out double result)
+                ? result
+                : fallback;
 
         /// <summary>日志中截断过长的响应体，避免刷屏。</summary>
         private static string TruncateForLog(string text)
@@ -1686,6 +1721,27 @@ namespace DeepSeek_v4_for_VisualStudio.Services
 
         /// <summary>发布日期（百度 API 返回，DuckDuckGo 可能为空）</summary>
         public string Date { get; set; } = string.Empty;
+
+        /// <summary>
+        /// 站点名称（DeepSeek 官方 Search 返回；其它引擎为空）。
+        /// </summary>
+        public string SiteName { get; set; } = string.Empty;
+
+        /// <summary>
+        /// 网页权威性 0～4（DeepSeek 官方 Search），-1 表示未知；其它引擎为 <see cref="UnknownAuthority"/>。
+        /// </summary>
+        public int Authority { get; set; } = UnknownAuthority;
+
+        /// <summary>
+        /// 排序分数 0～3（DeepSeek 官方 Search），综合考虑相关性/权威性/时效性；其它引擎为 <see cref="UnknownScore"/>。
+        /// </summary>
+        public double RerankScore { get; set; } = UnknownScore;
+
+        /// <summary>权威性未知（非官方引擎或接口未返回）。</summary>
+        public const int UnknownAuthority = -1;
+
+        /// <summary>排序分数未知（非官方引擎或接口未返回）。</summary>
+        public const double UnknownScore = -1d;
     }
 
     /// <summary>

@@ -39,7 +39,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services.BuiltInTools
                         properties = new
                         {
                             query = new { type = "string", description = LocalizationService.Instance["tool.webSearch.param.query"] },
-                            recency = new { type = "string", description = LocalizationService.Instance["tool.webSearch.param.recency"] }
+                            recency = new { type = "string", description = LocalizationService.Instance["tool.webSearch.param.recency"] },
+                            count = new { type = "integer", description = LocalizationService.Instance["tool.webSearch.param.count"] }
                         },
                         required = new[] { "query" }
                     }
@@ -114,6 +115,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.BuiltInTools
         {
             string query = GetStringArg(args, "query");
             string recency = GetStringArg(args, "recency");
+            int count = GetIntArg(args, "count", 0);
 
             if (string.IsNullOrWhiteSpace(query))
                 return LocalizationService.Instance["tool.webSearch.missingQuery"];
@@ -128,10 +130,17 @@ namespace DeepSeek_v4_for_VisualStudio.Services.BuiltInTools
                 _ => null,
             };
 
+            // count 只接受 1～50；未提供（<=0）时传 null，由各引擎使用自己的默认值。
+            int? searchCount = count is >= 1 and <= 50 ? count : null;
+
             try
             {
-                Logger.Info($"[web_search] Searching: \"{query}\"" + (searchRecency != null ? $", recency={searchRecency}" : string.Empty));
-                var results = await _webSearchService.SearchAsync(query, CancellationToken, searchRecency);
+                Logger.Info($"[web_search] Searching: \"{query}\""
+                    + (searchRecency != null ? $", recency={searchRecency}" : string.Empty)
+                    + (searchCount != null ? $", count={searchCount}" : string.Empty));
+                // 当前轮用户原始问题随搜索结果一起交给官方引擎，用于更好地理解搜索意图。
+                var results = await _webSearchService.SearchAsync(
+                    query, CancellationToken, searchRecency, searchCount, CurrentUserQuestion);
                 if (results.Count == 0)
                 {
                     Logger.Info($"[web_search] No results: \"{query}\"");
@@ -174,6 +183,14 @@ namespace DeepSeek_v4_for_VisualStudio.Services.BuiltInTools
                 sb.AppendLine($"{i + 1}. {r.Title}");
                 if (!string.IsNullOrWhiteSpace(r.Url))
                     sb.AppendLine($"   URL: {r.Url}");
+                if (!string.IsNullOrWhiteSpace(r.SiteName))
+                {
+                    // 官方 Search 给出网页权威性（0～4，>=3 为极权威）；标注以帮助模型判断可信度。
+                    string siteLine = r.Authority >= 3
+                        ? L.Format("tool.webSearch.siteNameAuthoritative", r.SiteName)
+                        : L.Format("tool.webSearch.siteName", r.SiteName);
+                    sb.AppendLine($"   {siteLine}");
+                }
                 if (!string.IsNullOrWhiteSpace(r.Date))
                     sb.AppendLine($"   {r.Date}");
                 if (!string.IsNullOrWhiteSpace(r.Snippet))
