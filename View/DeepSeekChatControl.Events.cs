@@ -1733,6 +1733,13 @@ namespace DeepSeek_v4_for_VisualStudio.View
         #region Event Handlers - Web Search
 
         /// <summary>
+        /// 鼠标悬停到会话消耗标签时刷新 ToolTip，确保显示的是最新调用次数与费用。
+        /// 计费说明涉及官方 Search / Fetch 的按次计费口径，悬停时才计算可避免无谓刷新。
+        /// </summary>
+        private void BalanceLabel_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
+            => UpdateSessionConsumptionToolTip();
+
+        /// <summary>
         /// 联网搜索开关按钮点击：切换开启/关闭。
         /// 开关只决定 web_search 工具是否加入工具集，开启后由模型按需调用，不再固定每轮搜索。
         /// </summary>

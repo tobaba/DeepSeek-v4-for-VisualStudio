@@ -1,3 +1,5 @@
+using DeepSeek_v4_for_VisualStudio.Models;
+
 namespace DeepSeek_v4_for_VisualStudio.Tests.Unit.Services;
 
 /// <summary>
@@ -412,6 +414,75 @@ public class WebSearchServiceTests
         service.OfficialFetchSuccessCount.Should().Be(0);
         service.OfficialToolCostYuan.Should().Be(0);
         service.OfficialToolCostUsd.Should().Be(0);
+    }
+
+    [Fact]
+    public void RestoreOfficialToolStats_SetsAbsoluteCountsAndCost()
+    {
+        using var service = new WebSearchService();
+
+        service.RestoreOfficialToolStats(searchCount: 12, fetchCount: 4);
+
+        service.OfficialSearchSuccessCount.Should().Be(12);
+        service.OfficialFetchSuccessCount.Should().Be(4);
+        // 16 次成功请求 = 16/1000 × 5 元 = ¥0.08；美元同口径 16/1000 × 0.75 = $0.012
+        service.OfficialToolCostYuan.Should().BeApproximately(0.08, 1e-9);
+        service.OfficialToolCostUsd.Should().BeApproximately(0.012, 1e-9);
+    }
+
+    [Fact]
+    public void RestoreOfficialToolStats_OverwritesInsteadOfAccumulating()
+    {
+        using var service = new WebSearchService();
+
+        // 先恢复一次，再恢复另一组值：必须是覆盖语义（切会话场景），而不是叠加。
+        service.RestoreOfficialToolStats(searchCount: 5, fetchCount: 5);
+        service.RestoreOfficialToolStats(searchCount: 2, fetchCount: 1);
+
+        service.OfficialSearchSuccessCount.Should().Be(2);
+        service.OfficialFetchSuccessCount.Should().Be(1);
+    }
+
+    [Fact]
+    public void RestoreOfficialToolStats_NegativeValues_AreClampedToZero()
+    {
+        using var service = new WebSearchService();
+
+        // 旧版本会话缺少该字段时反序列化为 0；异常负值也不能让费用变成负数。
+        service.RestoreOfficialToolStats(searchCount: -3, fetchCount: -1);
+
+        service.OfficialSearchSuccessCount.Should().Be(0);
+        service.OfficialFetchSuccessCount.Should().Be(0);
+        service.OfficialToolCostYuan.Should().Be(0);
+    }
+
+    #endregion
+
+    #region 会话持久化字段
+
+    [Fact]
+    public void ChatSession_HasPersistedOfficialToolCounts()
+    {
+        var session = new ChatSession();
+        session.CumulativeOfficialSearchCount = 7;
+        session.CumulativeOfficialFetchCount = 3;
+
+        var propSearch = typeof(ChatSession).GetProperty(
+            nameof(ChatSession.CumulativeOfficialSearchCount));
+        var propFetch = typeof(ChatSession).GetProperty(
+            nameof(ChatSession.CumulativeOfficialFetchCount));
+
+        propSearch.Should().NotBeNull();
+        propFetch.Should().NotBeNull();
+
+        // DataMember 缺失会导致重启后计数值丢失
+        propSearch!.GetCustomAttributes(typeof(System.Runtime.Serialization.DataMemberAttribute), true)
+            .Should().NotBeEmpty("Search 调用次数必须可序列化才能在重启后恢复");
+        propFetch!.GetCustomAttributes(typeof(System.Runtime.Serialization.DataMemberAttribute), true)
+            .Should().NotBeEmpty("Fetch 调用次数必须可序列化才能在重启后恢复");
+
+        session.CumulativeOfficialSearchCount.Should().Be(7);
+        session.CumulativeOfficialFetchCount.Should().Be(3);
     }
 
     #endregion

@@ -2026,6 +2026,19 @@ namespace DeepSeek_v4_for_VisualStudio.View
             {
                 Logger.Warn($"[Cache] 恢复统计失败: {ex.Message}");
             }
+
+            // ── 恢复官方 Search / Fetch 调用次数（与 token 统计同一时机）──
+            try
+            {
+                _webSearchService?.RestoreOfficialToolStats(
+                    _activeSession.CumulativeOfficialSearchCount,
+                    _activeSession.CumulativeOfficialFetchCount);
+                Logger.Info($"[Search] 从会话恢复官方工具调用次数: search={_activeSession.CumulativeOfficialSearchCount}, fetch={_activeSession.CumulativeOfficialFetchCount}");
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"[Search] 恢复官方工具调用次数失败: {ex.Message}");
+            }
         }
 
         /// <summary>

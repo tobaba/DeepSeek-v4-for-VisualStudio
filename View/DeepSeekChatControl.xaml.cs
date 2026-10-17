@@ -1305,13 +1305,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
             double officialToolCost = 0;
             if (IsOfficialSource && _webSearchService != null)
             {
-                string c = (
-                    (_lastBalance != null && _lastBalance.BalanceInfos.Count > 0
-                        ? _lastBalance.BalanceInfos[0].Currency
-                        : null)
-                    ?? _apiService.AccountCurrency
-                    ?? string.Empty).ToUpperInvariant();
-                officialToolCost = c == "USD"
+                officialToolCost = ResolveAccountCurrency() == "USD"
                     ? _webSearchService.OfficialToolCostUsd
                     : _webSearchService.OfficialToolCostYuan;
             }
@@ -1339,14 +1333,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 else
                 {
                     // ── 币种判定：余额 API 缓存优先，其次 ApiService 捕获值，默认 CNY（国内价）──
-                    string currency =
-                        (_lastBalance != null && _lastBalance.BalanceInfos.Count > 0
-                            ? _lastBalance.BalanceInfos[0].Currency
-                            : null)
-                        ?? _apiService.AccountCurrency;
-                    if (string.IsNullOrWhiteSpace(currency))
-                        currency = "CNY";
-                    currency = currency.ToUpperInvariant();
+                    string currency = ResolveAccountCurrency();
                     bool isUsd = currency == "USD";
                     string symbol = GetCurrencySymbol(currency);
 
@@ -1453,10 +1440,42 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 return;
             }
 
+            int searchCount = _webSearchService.OfficialSearchSuccessCount;
+            int fetchCount = _webSearchService.OfficialFetchSuccessCount;
+
+            // 两类调用都没发生时不必显示计费说明，避免悬停出现无信息量的提示。
+            if (searchCount == 0 && fetchCount == 0)
+            {
+                balanceLabel.ToolTip = null;
+                return;
+            }
+
+            string currency = ResolveAccountCurrency();
+            string symbol = GetCurrencySymbol(currency);
+            double cost = currency == "USD"
+                ? _webSearchService.OfficialToolCostUsd
+                : _webSearchService.OfficialToolCostYuan;
+            string costStr = cost >= 0.01 ? $"{symbol}{cost:F2}" : $"{symbol}{cost:F4}";
+
             balanceLabel.ToolTip = LocalizationService.Instance.Format(
                 "status.toolBilling.tooltip",
-                _webSearchService.OfficialSearchSuccessCount,
-                _webSearchService.OfficialFetchSuccessCount);
+                searchCount,
+                fetchCount,
+                costStr);
+        }
+
+        /// <summary>
+        /// 判定账户币种：余额 API 缓存优先，其次 ApiService 捕获值，默认 CNY（国内价）。
+        /// 会话消耗显示与官方工具计费说明共用同一判定，避免两处口径不一致。
+        /// </summary>
+        private string ResolveAccountCurrency()
+        {
+            string? currency = (_lastBalance != null && _lastBalance.BalanceInfos.Count > 0
+                    ? _lastBalance.BalanceInfos[0].Currency
+                    : null)
+                ?? _apiService?.AccountCurrency;
+
+            return string.IsNullOrWhiteSpace(currency) ? "CNY" : currency.ToUpperInvariant();
         }
 
         /// <summary>

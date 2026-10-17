@@ -910,6 +910,14 @@ namespace DeepSeek_v4_for_VisualStudio.Models
         /// <summary>累计费用（美元，国际价目）。与人民币双轨累计，显示时按账户币种取用</summary>
         [DataMember]
         public double CumulativeCostUsd { get; set; }
+
+        /// <summary>累计官方 Search 成功调用次数（跨会话持久化，重启后恢复显示）</summary>
+        [DataMember]
+        public int CumulativeOfficialSearchCount { get; set; }
+
+        /// <summary>累计官方 Fetch 成功调用次数（跨会话持久化，重启后恢复显示）</summary>
+        [DataMember]
+        public int CumulativeOfficialFetchCount { get; set; }
     }
 
     /// <summary>

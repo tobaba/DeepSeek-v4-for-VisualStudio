@@ -1104,7 +1104,8 @@
                                Foreground="#888888"
                                HorizontalAlignment="Right"
                                VerticalAlignment="Center"
-                               TextTrimming="CharacterEllipsis" />
+                               TextTrimming="CharacterEllipsis"
+                               MouseEnter="BalanceLabel_MouseEnter" />
                 </Border>
             </Grid>
         </Border>

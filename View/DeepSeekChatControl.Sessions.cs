@@ -130,6 +130,13 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 _activeSession.CumulativeCostUsd = _apiService.TotalSessionCostUsd;
             }
 
+            // ── 持久化官方 Search / Fetch 调用次数（按会话，重启后恢复显示）──
+            if (_webSearchService != null)
+            {
+                _activeSession.CumulativeOfficialSearchCount = _webSearchService.OfficialSearchSuccessCount;
+                _activeSession.CumulativeOfficialFetchCount = _webSearchService.OfficialFetchSuccessCount;
+            }
+
             _sessionsContainer.ActiveSessionId = _activeSession.Id;
             ChatPersistenceService.SaveSessions(_solutionPath, _sessionsContainer);
         }
@@ -878,6 +885,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 RefreshAppendQueuePanel();
                 // ── 重置累计 Token / 费用计数器 ──
                 _apiService?.ResetAccumulatedStats();
+                // 官方 Search / Fetch 调用次数同属本会话累计，清空消息时一并归零
+                _webSearchService?.ResetOfficialToolStats();
 
                 // ── 聊天区即将重建：清空审批显示队列，移除残留审批卡片 ──
                 ResetApprovalQueue();

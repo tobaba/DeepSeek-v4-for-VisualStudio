@@ -187,6 +187,18 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         }
 
         /// <summary>
+        /// 从会话恢复官方 Search / Fetch 调用次数（重启 VS / 切换会话时调用）。
+        /// 采用绝对值覆盖语义，避免与内存中的当前累计值叠加；负值按 0 处理。
+        /// </summary>
+        /// <param name="searchCount">官方 Search 成功次数</param>
+        /// <param name="fetchCount">官方 Fetch 成功次数</param>
+        public void RestoreOfficialToolStats(int searchCount, int fetchCount)
+        {
+            Interlocked.Exchange(ref _officialSearchSuccessCount, searchCount > 0 ? searchCount : 0);
+            Interlocked.Exchange(ref _officialFetchSuccessCount, fetchCount > 0 ? fetchCount : 0);
+        }
+
+        /// <summary>
         /// 记录一次成功的官方工具请求。仅"HTTP 200 且产生结果"的请求会计费
         /// （Search 的 results 非空、Fetch 返回正文），失败/空结果/超时不计。
         /// </summary>
