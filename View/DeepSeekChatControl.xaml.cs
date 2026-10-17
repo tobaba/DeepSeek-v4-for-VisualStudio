@@ -2414,6 +2414,10 @@ namespace DeepSeek_v4_for_VisualStudio.View
             public long LastFlushTicks;
             /// <summary>上次刷新时的完整 Reason 长度，用于兼容全量更新调用点</summary>
             public int LastFlushedReasoningLength;
+            /// <summary>上次刷新时的整段正文长度，用于按"增长量"而非"绝对长度"节流。</summary>
+            public int LastFlushedContentLength;
+            /// <summary>整段正文替换后是否已经收到过增量，用于补段落分隔符。</summary>
+            public bool ContentDeltaStarted;
         }
 
         private readonly Dictionary<int, StreamBatchState> _streamBatchStates = new();
@@ -2481,9 +2485,23 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 {
                     state.Content.Clear();
                     state.Content.Append(content);
+                    // 整段替换（工具时间线 / 最终定稿）之后，后续增量属于"新段落"。
+                    StreamBatchContentRules.ResetAfterFullContent(
+                        ref state.ContentDeltaStarted, ref state.LastFlushedContentLength);
                 }
                 if (contentDelta != null)
-                    state.ContentDelta.Append(contentDelta);
+                {
+                    // 关键：整段正文非空（工具轮次已把时间线作为整段正文推过）时，
+                    // 增量必须同时并入整段正文。否则推送时会被整段快照挤掉、
+                    // 并随 ContentDelta 一起清空，最终回答只能等收尾定稿一次性出现——
+                    // 表现为「有工具调用时最终回答不流式、直接弹出来」。
+                    // 整段正文为空（纯问答流式）时保持原样，继续走高效的 cd 增量路径。
+                    if (!StreamBatchContentRules.TryMergeDelta(
+                            state.Content, contentDelta, ref state.ContentDeltaStarted))
+                    {
+                        state.ContentDelta.Append(contentDelta);
+                    }
+                }
                 if (reasoning != null)
                 {
                     state.Reasoning.Clear();
@@ -2500,7 +2518,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 long elapsed = now - state.LastFlushTicks;
 
                 // 仅当满足条件时实际推送：已完成 / 内容显著变化 / 思考显著变化 / 间隔达标且有任意内容
-                bool contentChanged = state.Content.Length > StreamRenderInterval;
+                // 用"自上次刷新以来的增长量"判定，避免正文变长后每次都触发整段重推。
+                bool contentChanged = StreamBatchContentRules.GrewEnough(
+                    state.Content.Length, state.LastFlushedContentLength, StreamRenderInterval);
                 bool contentDeltaChanged = state.ContentDelta.Length >= StreamRenderInterval;
                 bool reasoningChanged =
                     (state.Reasoning.Length > 0
@@ -2519,9 +2539,14 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 {
                     state.LastFlushTicks = now;
                     state.LastFlushedReasoningLength = state.Reasoning.Length;
+                    state.LastFlushedContentLength = state.Content.Length;
+
+                    // 整段正文已由增量同步维护，直接推整段（c）即可；
+                    // 不再走 cd，避免"整段快照挤掉增量"的旧问题，也省去 JS 侧增量拼接。
                     string? contentSnapshot = state.Content.Length > 0
                         ? state.Content.ToString()
                         : null;
+                    // 无整段正文时（例如纯思考先到）才退回增量路径。
                     string? contentDeltaSnapshot = contentSnapshot == null && state.ContentDelta.Length > 0
                         ? state.ContentDelta.ToString()
                         : null;
