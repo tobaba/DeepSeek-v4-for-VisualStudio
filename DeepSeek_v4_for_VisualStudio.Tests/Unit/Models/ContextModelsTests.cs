@@ -21,7 +21,6 @@ public class ContextModelsTests
         stats.SystemPromptTokens.Should().Be(0);
         stats.ToolResultTokens.Should().Be(0);
         stats.CompressedSummaryTokens.Should().Be(0);
-        stats.SearchContextTokens.Should().Be(0);
     }
 
     [Fact]

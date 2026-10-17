@@ -1717,7 +1717,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
         #region Event Handlers - Web Search
 
         /// <summary>
-        /// 联网搜索开关按钮点击：切换开启/关闭，联动下拉框可见性。
+        /// 联网搜索开关按钮点击：切换开启/关闭。
+        /// 开关只决定 web_search 工具是否加入工具集，开启后由模型按需调用，不再固定每轮搜索。
         /// </summary>
         private void WebSearchToggleButton_Click(object sender, RoutedEventArgs e)
         {
@@ -1758,6 +1759,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 }
 
                 ApplyWebSearchConfig();
+                RefreshWebSearchToolRegistration();
                 Logger.Info($"联网搜索状态切换为: {_webSearchEngine}");
                 UpdateWebSearchToggleAppearance();
 

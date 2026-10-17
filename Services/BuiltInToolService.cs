@@ -134,6 +134,29 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         private readonly Dictionary<string, BuiltInToolBase> _tools = new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
+        /// 联网搜索工具是否可用。由 UI 的联网搜索开关驱动：
+        /// 开启时把 web_search 注册进工具集，所有 Agent 都能按需调用；
+        /// 关闭时从工具集移除，模型看不到该工具。
+        /// 变更后需调用 AgentFactory.InvalidateFullToolSetCache() 让工具定义缓存刷新。
+        /// </summary>
+        private bool _webSearchEnabled;
+
+        public bool WebSearchEnabled
+        {
+            get => _webSearchEnabled;
+            set
+            {
+                if (_webSearchEnabled == value) return;
+                _webSearchEnabled = value;
+                if (value)
+                    Register(new WebSearchTool(_webSearchService));
+                else
+                    _tools.Remove("web_search");
+                Logger.Info($"[BuiltInTool] 联网搜索工具已{(value ? "启用" : "禁用")}");
+            }
+        }
+
+        /// <summary>
         /// RunSubagent 工具的处理委托（由 BaseAgent 在执行前注入）。
         /// 桥接 BuiltInToolService 和 Agent 的 ExploreAgent 引用。
         /// </summary>
@@ -288,6 +311,9 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             Register(new ReadSkillResourceTool(_skillService));
             Register(new GetErrorsTool(_buildService));
             Register(new FetchWebpageTool(_webSearchService));
+            // 联网搜索工具：仅当开关开启时注册（默认开启，由 UI 初始化后覆盖）。
+            if (_webSearchEnabled)
+                Register(new WebSearchTool(_webSearchService));
             Register(new CaptureWindowTool());
             Register(new CaptureWebpageTool());
 
@@ -442,6 +468,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 new ReadSkillResourceTool(SkillService.Instance),
                 new GetErrorsTool(),
                 new FetchWebpageTool(),
+                new WebSearchTool(),
                 new CaptureWindowTool(),
                 new CaptureWebpageTool(),
                 new BuildSolutionTool(),
@@ -558,6 +585,13 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         {
             try
             {
+                // 联网搜索开关关闭时工具不在注册表中；给出明确提示而不是退回「未知工具」。
+                if (!_webSearchEnabled &&
+                    string.Equals(toolName, "web_search", StringComparison.OrdinalIgnoreCase))
+                {
+                    return LocalizationService.Instance["tool.webSearch.disabled"];
+                }
+
                 if (!_tools.TryGetValue(toolName, out var tool))
                     return null; // 不是内置工具，交由 MCP 处理
 
@@ -585,7 +619,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             return toolName switch
             {
                 "list_dir" or "read_file" or "file_search" or "grep_search" or "symbol_search" or "get_file_symbols" or "get_errors"
-                    or "fetch_webpage" or "capture_window" or "capture_webpage" or "build_solution"
+                    or "fetch_webpage" or "web_search" or "capture_window" or "capture_webpage" or "build_solution"
                     or "replace_string_in_file" or "multi_replace_string_in_file" or "create_file" or "delete_file"
                     or "apply_patch" or "create_directory"
                     or "load_skill" or "read_skill_resource"

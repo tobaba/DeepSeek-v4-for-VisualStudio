@@ -99,48 +99,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
 
         #endregion
 
-        #region Search Optimization Prompts
-
-        /// <summary>
-        /// 百度搜索优化 - 系统提示词。
-        /// </summary>
-        public static string SearchOptimizationSystem_Baidu => L["system.searchOptimizationSystemBaidu"];
-
-        /// <summary>
-        /// 百度搜索优化 - 用户提示词模板。
-        /// {0} = 对话上下文 + 用户问题
-        /// </summary>
-        public static string SearchOptimizationUser_Baidu => L["system.searchOptimizationUserBaidu"];
-
-        /// <summary>
-        /// DuckDuckGo 搜索优化 - 系统提示词。
-        /// </summary>
-        public static string SearchOptimizationSystem_DuckDuckGo => L["system.searchOptimizationSystemDuckDuckGo"];
-
-        /// <summary>
-        /// DuckDuckGo 搜索优化 - 用户提示词模板。
-        /// {0} = 对话上下文 + 用户问题
-        /// </summary>
-        public static string SearchOptimizationUser_DuckDuckGo => L["system.searchOptimizationUserDuckDuckGo"];
-
-        #endregion
-
-        #region File Extraction Prompts
-
-        /// <summary>
-        /// 附件关键信息提取 - 系统提示词。
-        /// </summary>
-        public static string FileExtractionSystem => L["system.fileExtractionSystem"];
-
-        /// <summary>
-        /// 附件关键信息提取 - 用户提示词模板。
-        /// {0} = 用户问题
-        /// {1} = 文件内容
-        /// </summary>
-        public static string FileExtractionUser => L["system.fileExtractionUser"];
-
-        #endregion
-
         #region Multi-Agent Prompts
 
         /// <summary>
@@ -236,12 +194,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
 
         /// <summary>步骤自动拆分 — 系统提示词。{0}=maxFiles, {1}=maxLines, {2}=userMessage</summary>
         public static string AutoSplitSystemPrompt => L["system.aiPrompt.autoSplitSystem"];
-
-        /// <summary>联网搜索上下文指令</summary>
-        public static string WebSearchContextInstruction => L["system.aiPrompt.webSearchContext"];
-
-        /// <summary>网页抓取上下文指令</summary>
-        public static string WebFetchContextInstruction => L["system.aiPrompt.webFetchContext"];
 
         /// <summary>项目外路径拒绝警告。{0}=targetPath, {1}=workspaceRoot</summary>
         public static string OutOfWorkspaceWarning => L["system.aiPrompt.outOfWorkspaceWarning"];
@@ -370,42 +322,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         #endregion
 
         #region Helper Methods
-
-        /// <summary>
-        /// 构建搜索优化提示词（用户消息部分）。
-        /// </summary>
-        /// <param name="contextLine">包含上下文摘要和用户问题的字符串。</param>
-        /// <param name="isBaiduSearch">true=百度 JSON 格式，false=DuckDuckGo 纯文本格式。</param>
-        /// <returns>优化后的用户提示词。</returns>
-        public static string BuildSearchOptimizationPrompt(string contextLine, bool isBaiduSearch)
-        {
-            string template = isBaiduSearch
-                ? SearchOptimizationUser_Baidu
-                : SearchOptimizationUser_DuckDuckGo;
-
-            return string.Format(template, contextLine);
-        }
-
-        /// <summary>
-        /// 获取搜索优化对应的系统提示词。
-        /// </summary>
-        public static string GetSearchOptimizationSystemPrompt(bool isBaiduSearch)
-        {
-            return isBaiduSearch
-                ? SearchOptimizationSystem_Baidu
-                : SearchOptimizationSystem_DuckDuckGo;
-        }
-
-        /// <summary>
-        /// 构建文件提取提示词（用户消息部分）。
-        /// </summary>
-        /// <param name="userQuestion">用户原始问题。</param>
-        /// <param name="fileContent">从附件提取的文件内容。</param>
-        /// <returns>文件提取用户提示词。</returns>
-        public static string BuildFileExtractionPrompt(string userQuestion, string fileContent)
-        {
-            return string.Format(FileExtractionUser, userQuestion, fileContent);
-        }
 
         /// <summary>
         /// 获取格式化的 Skill 路由用户提示词。

@@ -42,9 +42,6 @@ namespace DeepSeek_v4_for_VisualStudio.Models
         /// <summary>压缩摘要 Token 数</summary>
         public int CompressedSummaryTokens { get; set; }
 
-        /// <summary>搜索上下文 Token 数</summary>
-        public int SearchContextTokens { get; set; }
-
         /// <summary>获取详细统计信息字符串</summary>
         public string GetDetailedReport()
         {
@@ -54,8 +51,7 @@ namespace DeepSeek_v4_for_VisualStudio.Models
                    $"工具调用次数: {ToolCallCount}\n" +
                    $"系统提示词: {SystemPromptTokens:N0} tokens\n" +
                    $"工具结果: {ToolResultTokens:N0} tokens\n" +
-                   $"压缩摘要: {CompressedSummaryTokens:N0} tokens\n" +
-                   $"搜索上下文: {SearchContextTokens:N0} tokens";
+                   $"压缩摘要: {CompressedSummaryTokens:N0} tokens";
         }
     }
 

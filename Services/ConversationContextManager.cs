@@ -44,9 +44,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// </summary>
         private string? _fixedSystemPrompt;
 
-        /// <summary>搜索结果上下文（独立存储，注入为 system 消息）</summary>
-        private string? _searchContext;
-
         /// <summary>IDE 实时态上下文（P1-A：活动文件/光标/选区/符号/诊断摘要，注入 volatile 块最前）</summary>
         private string? _ideContext;
 
@@ -303,14 +300,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         }
 
         /// <summary>
-        /// 设置搜索上下文（注入为 system 消息）。
-        /// </summary>
-        public void SetSearchContext(string? searchContext)
-        {
-            _searchContext = searchContext;
-        }
-
-        /// <summary>
         /// 设置 IDE 实时态上下文（P1-A）。
         /// 由 View 在每次用户消息发送前捕获快照并格式化后传入；传 null 表示禁用或清空。
         /// Token 记账与 RAG 上下文一致。
@@ -346,10 +335,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         }
 
         // ── Context Debugger 只读探针（P2，序号 20 数据面）──
-
-        /// <summary>本轮是否注入了联网搜索上下文</summary>
-        [JsonIgnore]
-        public bool HasSearchContext => !string.IsNullOrEmpty(_searchContext);
 
         /// <summary>本轮是否注入了 RAG 检索上下文</summary>
         [JsonIgnore]
@@ -1277,10 +1262,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                     parts.Add(activeFileSummary);
             }
 
-            // ── 联网搜索结果（与 RAG 一起放在 user 前，避免干扰 [0..1] 稳定前缀）──
-            if (!string.IsNullOrWhiteSpace(_searchContext))
-                parts.Add(_searchContext!);
-
             // ── RAG 检索上下文 ──
             if (!string.IsNullOrWhiteSpace(_ragContext))
                 parts.Add(_ragContext!);
@@ -1987,7 +1968,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 TurnCount = TurnCount,
                 ToolCallCount = ToolCallCount,
                 SystemPromptTokens = EstimateTokens(_systemPrompt),
-                SearchContextTokens = EstimateTokens(_searchContext),
                 CompressedTurns = _compressor?.CompressedSummaries.Count ?? 0,
                 CompressedSummaryTokens = _compressor?.TotalCompressedTokens ?? 0,
             };
@@ -2155,7 +2135,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             _estimatedTokens = 0;
             _systemPrompt = null;
             _fixedSystemPrompt = null;
-            _searchContext = null;
             _ideContext = null;
             _solutionContext = null;
             _skillContext = null;
@@ -2203,7 +2182,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             sb.AppendLine($"轮次数: {TurnCount}");
             sb.AppendLine($"估算 Token: {_estimatedTokens:N0}/{TokenBudget:N0} ({UsagePercent:F1}%)");
             sb.AppendLine($"系统提示词: {(_systemPrompt != null ? $"{_systemPrompt.Length} 字符 ({stats.SystemPromptTokens} tokens)" : "无")}");
-            sb.AppendLine($"搜索上下文: {(_searchContext != null ? $"{_searchContext.Length} 字符 ({stats.SearchContextTokens} tokens)" : "无")}");
             sb.AppendLine($"Skill 上下文: {(_skillContext != null ? $"{_skillContext.Length} 字符" : "无")}");
             sb.AppendLine($"始终注入 Skill: {(_alwaysInjectSkillsContext != null ? $"{_alwaysInjectSkillsContext.Length} 字符" : "无")}");
             sb.AppendLine($"RAG 上下文: {(_ragContext != null ? $"{_ragContext.Length} 字符" : "无")}");

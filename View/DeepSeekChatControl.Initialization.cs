@@ -70,6 +70,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
             _builtInToolService = new BuiltInToolService(_mcpManager, _webSearchService, buildService, _memoryService);
             _builtInToolService.CurrentSolutionPath = _solutionPath;
             _builtInToolService.ApiService = _apiService; // 注入 API 服务以启用 apply_patch Healing
+            // 联网搜索开关只决定 web_search 工具是否加入工具集，此处按当前开关状态同步。
+            _builtInToolService.WebSearchEnabled = _webSearchEngine != "Off";
 
             _agentFactory = new AgentFactory(_apiService, _builtInToolService, _mcpManager, _memoryService);
             // 默认活跃 Agent 为 AskAgent
@@ -564,7 +566,24 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
             _webSearchEngine = _options?.EnableWebSearch == true ? resolvedEngine : "Off";
             ApplyWebSearchConfig();
+            RefreshWebSearchToolRegistration();
             UpdateWebSearchToggleAppearance();
+        }
+
+        /// <summary>
+        /// 把联网搜索开关同步到内置工具集：开启时注册 web_search 工具，关闭时移除。
+        /// 工具集变化后需要让各 Agent 的完整工具集缓存失效。
+        /// </summary>
+        private void RefreshWebSearchToolRegistration()
+        {
+            if (_builtInToolService == null) return;
+
+            bool enabled = _webSearchEngine != "Off";
+            if (_builtInToolService.WebSearchEnabled == enabled) return;
+
+            _builtInToolService.WebSearchEnabled = enabled;
+            _agentFactory?.InvalidateFullToolSetCache();
+            Logger.Info($"联网搜索工具已{(enabled ? "加入" : "移出")}工具集");
         }
 
         private void ApplyWebSearchConfig()

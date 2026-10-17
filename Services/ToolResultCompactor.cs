@@ -160,6 +160,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 "run_tests" => true,
                 "run_verifiers" => true,
                 "web_search" => true,
+                "fetch_webpage" => true,
                 "web_fetch" => true,
                 "multi_tool_use.parallel" => true,
                 "semantic_search" => true,

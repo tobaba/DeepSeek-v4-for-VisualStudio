@@ -122,6 +122,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             "list_dir",         // 列出目录内容
             "get_errors",       // 获取编译错误
             "fetch_webpage",    // 获取网页内容
+            "web_search",       // 联网搜索（需在设置中开启）
             "memory",           // 记忆管理
             "git",              // Git 版本控制（仅 status/diff/log 只读操作）
             "run_in_terminal",  // 终端只读命令

@@ -53,7 +53,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             "VisualStudio_askQuestions",  // 向用户提问澄清
             // ── 委派与联网 ──
             "runSubagent",        // 深度探索任务委派给 ExploreAgent
-            "fetch_webpage",      // 联网搜索（无需代码库访问）
+            "web_search",         // 联网搜索（需在设置中开启）
+            "fetch_webpage",      // 抓取指定网页内容
             "capture_window",     // 捕获指定窗口截图（视觉模型直接查看）
             "capture_webpage",    // 离屏渲染指定 URL 并截图（视觉模型直接查看）
             "request_handoff",    // 移交任务给其他 Agent
