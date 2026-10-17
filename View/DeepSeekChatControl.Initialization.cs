@@ -333,13 +333,18 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 Logger.Info($"[Settings] OCR 热切换完成 → {OcrService.CurrentEngine}");
             }
 
-            if (changes.WebSearchChanged)
+            // 端点来源切换会改变 DeepSeek 官方工具的可用性，需与联网搜索设置一起热更新。
+            if (changes.EndpointChanged || changes.WebSearchChanged)
             {
                 RefreshWebSearchFromSettings();
-                string resolvedEngine = ResolveWebSearchEngineFromOptions();
-                StatusLabel.Text = _webSearchEngine == "Off"
-                    ? string.Format(LocalizationService.Instance["status.settings.updated.default"], resolvedEngine)
-                    : string.Format(LocalizationService.Instance["status.settings.updated"], _webSearchEngine);
+
+                if (changes.WebSearchChanged)
+                {
+                    string resolvedEngine = ResolveWebSearchEngineFromOptions();
+                    StatusLabel.Text = _webSearchEngine == "Off"
+                        ? string.Format(LocalizationService.Instance["status.settings.updated.default"], resolvedEngine)
+                        : string.Format(LocalizationService.Instance["status.settings.updated"], _webSearchEngine);
+                }
             }
         }
 
@@ -546,8 +551,11 @@ namespace DeepSeek_v4_for_VisualStudio.View
         /// </summary>
         private string ResolveWebSearchEngineFromOptions()
         {
-            return (_options?.SearchProvider ?? "DuckDuckGo") switch
+            // DeepSeek 官方 Search/Fetch 只在官方 API 来源下可用；
+            // 自定义端点（或来源切换后残留 DeepSeek 偏好）一律退回默认引擎，行为与之前一致。
+            return (_options?.SearchProvider ?? "DeepSeek") switch
             {
+                "DeepSeek" => IsOfficialSource ? "DeepSeek" : "DuckDuckGo",
                 "Baidu" => "Baidu",
                 "Bing" => "Bing",
                 _ => "DuckDuckGo",
@@ -557,14 +565,17 @@ namespace DeepSeek_v4_for_VisualStudio.View
         private void RefreshWebSearchFromSettings()
         {
             string resolvedEngine = ResolveWebSearchEngineFromOptions();
-            WebSearchEngineComboBox.SelectedIndex = resolvedEngine switch
-            {
-                "Baidu" => 0,
-                "Bing" => 1,
-                _ => 2,
-            };
-
             _webSearchEngine = _options?.EnableWebSearch == true ? resolvedEngine : "Off";
+
+            // 重建下拉项（端点来源可能已切换），再按引擎 Id 选中，避免索引错位。
+            ExecuteWithoutCoreControlEvents(() =>
+            {
+                RefreshSearchEngineItems();
+                int index = IndexOfSearchEngine(resolvedEngine);
+                if (index >= 0)
+                    WebSearchEngineComboBox.SelectedIndex = index;
+            });
+
             ApplyWebSearchConfig();
             RefreshWebSearchToolRegistration();
             UpdateWebSearchToggleAppearance();
@@ -590,8 +601,31 @@ namespace DeepSeek_v4_for_VisualStudio.View
         {
             if (_webSearchService == null) return;
 
+            // ── 官方 API 来源与官方 Key：官方 Search 与 Fetch 共用的判定依据 ──
+            string? officialKey = IsOfficialSource
+                ? DeepSeekEndpointResolver.Resolve(_options).ApiKey
+                : null;
+
+            // fetch_webpage：正文获取方式由独立设置决定（官方 API / 本地解析），
+            // 与搜索提供商解耦；仅官方 API 来源才允许使用官方 Fetch。
+            _webSearchService.ConfigureWebFetchMode(ResolveWebFetchModeFromOptions());
+            _webSearchService.ConfigureOfficialApi(officialKey);
+
             switch (_webSearchEngine)
             {
+                case "DeepSeek":
+                    // 官方 API 来源才成立；否则 ConfigureDeepSeekSearch 内部回退 DuckDuckGo。
+                    _webSearchService.ConfigureDeepSeekSearch();
+                    if (!string.IsNullOrWhiteSpace(officialKey))
+                    {
+                        Logger.Info("联网搜索热重载: DeepSeek 官方 Search");
+                    }
+                    else
+                    {
+                        Logger.Info("联网搜索热重载: DuckDuckGo (DeepSeek 官方 Key 不可用)");
+                    }
+                    break;
+
                 case "Baidu":
                     if (_options != null && !string.IsNullOrWhiteSpace(_options.BaiduApiKey))
                     {
@@ -619,11 +653,21 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     break;
 
                 default:
-                    _webSearchService.ConfigureBaiduSearch(null!);
+                    // DuckDuckGo：免费备用路径；不影响官方 Fetch 的可用性。
+                    _webSearchService.ConfigureDuckDuckGo();
                     Logger.Info($"联网搜索热重载: DuckDuckGo (用户选择 {_webSearchEngine})");
                     break;
             }
         }
+
+        /// <summary>读取设置中的网页抓取方式；非法值回退默认（官方 API）。</summary>
+        private static WebFetchMode ResolveWebFetchModeFromOptions(DeepSeekOptionsPage? options)
+            => string.Equals(options?.WebFetchMode, "local", StringComparison.OrdinalIgnoreCase)
+                ? WebFetchMode.Local
+                : WebFetchMode.Official;
+
+        private WebFetchMode ResolveWebFetchModeFromOptions()
+            => ResolveWebFetchModeFromOptions(_options);
 
         /// <summary>
         /// 后台异步校验所有已配置的 API Key 是否有效。

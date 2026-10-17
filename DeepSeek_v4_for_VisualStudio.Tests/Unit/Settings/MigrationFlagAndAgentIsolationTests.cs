@@ -27,6 +27,34 @@ public class LegacySettingsMigratedPersistenceTests
         attr.Should().NotBeNull("必须声明 DesignerSerializationVisibility 才能被 DialogPage 序列化");
         attr!.Visibility.Should().Be(DesignerSerializationVisibility.Visible);
     }
+
+    /// <summary>
+    /// 旧版默认值 DuckDuckGo → DeepSeek 的迁移标志同样必须被序列化，
+    /// 否则每次启动都会重置搜索偏好，覆盖用户后来的选择。
+    /// </summary>
+    [Fact]
+    public void WebSearchDefaultMigrated_HasDesignerSerializationVisibilityVisible()
+    {
+        var prop = typeof(DeepSeekOptionsPage).GetProperty(nameof(DeepSeekOptionsPage.WebSearchDefaultMigrated));
+
+        prop.Should().NotBeNull();
+
+        var attr = prop!.GetCustomAttributes(typeof(DesignerSerializationVisibilityAttribute), inherit: true)
+            .Cast<DesignerSerializationVisibilityAttribute>()
+            .SingleOrDefault();
+
+        attr.Should().NotBeNull("必须声明 DesignerSerializationVisibility 才能被 DialogPage 序列化");
+        attr!.Visibility.Should().Be(DesignerSerializationVisibility.Visible);
+    }
+
+    [Fact]
+    public void DefaultConstants_MatchNewOfficialFirstBehaviour()
+    {
+        // 新装默认：官方 API 来源使用 DeepSeek 官方搜索 + 官方 Fetch 抓取。
+        // 自定义端点仍由运行时回退 DuckDuckGo 与本地解析。
+        DeepSeekOptionsPage.DefaultSearchProvider.Should().Be("DeepSeek");
+        DeepSeekOptionsPage.DefaultWebFetchMode.Should().Be("official");
+    }
 }
 
 /// <summary>

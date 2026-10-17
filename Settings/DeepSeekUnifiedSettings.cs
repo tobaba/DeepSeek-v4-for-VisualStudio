@@ -190,13 +190,30 @@ namespace DeepSeek_v4_for_VisualStudio
                 GeneralCategory,
                 new[]
                 {
+                    new EnumSettingEntry("DeepSeek", "DeepSeek"),
                     new EnumSettingEntry("Baidu", "Baidu"),
                     new EnumSettingEntry("Bing", "Bing"),
                     new EnumSettingEntry("DuckDuckGo", "%DeepSeek.Chat.websearch.searchEngine.duckduckgo%"),
                 },
-                defaultValue: "DuckDuckGo")
+                defaultValue: "DeepSeek")
             {
                 Description = "%DeepSeek.Chat.settings.searchProvider.description%",
+            };
+
+        [VisualStudioContribution]
+        internal static Setting.Enum WebFetchMode { get; } =
+            new(
+                "deepseekWebFetchMode",
+                "%DeepSeek.Chat.settings.webFetchMode.displayName%",
+                GeneralCategory,
+                new[]
+                {
+                    new EnumSettingEntry("official", "%DeepSeek.Chat.webFetchMode.official%"),
+                    new EnumSettingEntry("local", "%DeepSeek.Chat.webFetchMode.local%"),
+                },
+                defaultValue: "official")
+            {
+                Description = "%DeepSeek.Chat.settings.webFetchMode.description%",
             };
 
         [VisualStudioContribution]

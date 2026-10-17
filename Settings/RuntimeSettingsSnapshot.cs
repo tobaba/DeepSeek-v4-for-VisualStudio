@@ -22,6 +22,7 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
         bool EnableWebSearch,
         string SearchProvider,
         string BaiduApiKey,
+        string WebFetchMode,
         string BingApiKey,
         string ApprovalMode,
         bool EnableAutoSkillRouting,
@@ -52,6 +53,7 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
                 options.EnableWebSearch,
                 options.SearchProvider ?? string.Empty,
                 options.BaiduApiKey ?? string.Empty,
+                options.WebFetchMode ?? DeepSeekOptionsPage.DefaultWebFetchMode,
                 options.BingApiKey ?? string.Empty,
                 options.ApprovalMode ?? string.Empty,
                 options.EnableAutoSkillRouting,
@@ -134,6 +136,7 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
                 WebSearchChanged:
                     previous.EnableWebSearch != current.EnableWebSearch ||
                     Changed(previous.SearchProvider, current.SearchProvider) ||
+                    Changed(previous.WebFetchMode, current.WebFetchMode) ||
                     Changed(previous.BaiduApiKey, current.BaiduApiKey) ||
                     Changed(previous.BingApiKey, current.BingApiKey),
                 LayoutChanged:

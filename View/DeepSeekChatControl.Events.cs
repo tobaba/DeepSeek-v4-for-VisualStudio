@@ -1626,6 +1626,22 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     // 模型/来源切换影响 capture_window 等工具可见性 → 使 Agent 完整工具集缓存失效
                     _agentFactory?.InvalidateFullToolSetCache();
                     Logger.Info($"模型端点切换为: source={targetSource}, baseUrl={_apiService.BaseUrl}, model={config.Model}");
+
+                    // 官方 ↔ 自定义来源切换会改变联网搜索的下拉项（DeepSeek 官方仅在官方来源提供）
+                    // 与官方 Search / Fetch 的可用性，必须重新按新来源刷新搜索配置。
+                    if (sourceChanged)
+                    {
+                        RefreshWebSearchFromSettings();
+
+                        // 用户此前在自定义端点下偏好过 DeepSeek 引擎时，列表里没有对应项，
+                        // 这里把偏好纠正为官方默认引擎，避免保存值与实际显示长期不一致。
+                        if (_options != null && !string.Equals(_options.SearchProvider, _webSearchEngine, StringComparison.Ordinal))
+                        {
+                            _options.SearchProvider = _webSearchEngine;
+                            try { _options.SaveSettingsToStorage(); } catch { /* 非关键路径 */ }
+                            UnifiedSettingsSync.PushFromPage(_options);
+                        }
+                    }
                 }
                 Logger.Info($"模型切换为: {item.Display}");
                 RecordRuntimeSettingsApplied();
@@ -1727,24 +1743,14 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 bool enable = _webSearchEngine == "Off";
                 if (_webSearchEngine == "Off")
                 {
-                    // 使用 ComboBox 当前选择的搜索引擎，而非硬编码 DuckDuckGo
-                    string? selected = WebSearchEngineComboBox.SelectedItem as string;
-                    string newEngine = selected switch
-                    {
-                        string s when s.Contains("百度") || s.Contains("Baidu") => "Baidu",
-                        string s when s.Contains("Bing") => "Bing",
-                        _ => "DuckDuckGo"
-                    };
+                    // 使用 ComboBox 当前选择的引擎 Id，而非硬编码 DuckDuckGo。
+                    // 下拉项在端点来源切换后会重建，只有 Id 与显示文本解耦才不会错位。
+                    string newEngine = GetSelectedSearchEngineId() ?? "DuckDuckGo";
                     _webSearchEngine = newEngine;
                     // 同步 ComboBox 选中项到当前引擎（确保 UI 一致）
-                    int idx = newEngine switch
-                    {
-                        "Baidu" => 0,
-                        "Bing" => 1,
-                        "DuckDuckGo" => 2,
-                        _ => 2
-                    };
-                    WebSearchEngineComboBox.SelectedIndex = idx;
+                    int idx = IndexOfSearchEngine(newEngine);
+                    if (idx >= 0)
+                        WebSearchEngineComboBox.SelectedIndex = idx;
                 }
                 else
                 {
@@ -1885,13 +1891,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 // 搜索关闭时，ComboBox 仅作为偏好存储，不切换引擎
                 if (_webSearchEngine == "Off") return;
 
-                string? selected = WebSearchEngineComboBox.SelectedItem as string;
-                string newEngine = selected switch
-                {
-                    string s when s.Contains("百度") || s.Contains("Baidu") => "Baidu",
-                    string s when s.Contains("Bing") => "Bing",
-                    _ => "DuckDuckGo"
-                };
+                string? newEngine = GetSelectedSearchEngineId();
+                if (newEngine == null) return;
 
                 if (_webSearchEngine == newEngine) return; // 避免循环触发
 

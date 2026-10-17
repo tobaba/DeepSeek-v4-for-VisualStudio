@@ -300,7 +300,9 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
             {
                 base.LoadSettingsFromStorage();
                 LoadApiKeysFromCredentialStore();
-                if (UpgradeLegacyDefaultSystemPrompts())
+                bool promptsUpgraded = UpgradeLegacyDefaultSystemPrompts();
+                bool searchDefaultMigrated = MigrateLegacyWebSearchDefault();
+                if (promptsUpgraded || searchDefaultMigrated)
                 {
                     SaveSettingsToStorage();
                     UnifiedSettingsSync.PushFromPage(this);
@@ -310,6 +312,28 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
             {
                 Logger.Warn($"[Settings] LoadSettingsFromStorage 失败（VS 版本兼容性）: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// 旧版本「搜索引擎」默认值是 DuckDuckGo，它同样会被 DialogPage 持久化，
+        /// 无法与用户显式选择区分。首次升级时把该旧默认值迁移为 DeepSeek：
+        /// 官方 API 来源默认使用官方搜索接口，自定义端点仍会自动回退 DuckDuckGo。
+        /// 迁移只执行一次；此后用户在界面上的任何选择都会被长期尊重。
+        /// </summary>
+        private bool MigrateLegacyWebSearchDefault()
+        {
+            if (WebSearchDefaultMigrated)
+                return false;
+
+            // 先置标记：迁移只发生一次，标记本身也需要被持久化。
+            WebSearchDefaultMigrated = true;
+
+            if (!string.Equals(SearchProvider, "DuckDuckGo", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            SearchProvider = DefaultSearchProvider;
+            Logger.Info("[Settings] 搜索引擎默认值由 DuckDuckGo 迁移为 DeepSeek（官方 API 使用官方搜索，自定义端点仍回退 DuckDuckGo）");
+            return true;
         }
 
         /// <summary>
@@ -689,7 +713,8 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
             IsThinkingEnabled = true;
             ReasoningEffort = "high";
             EnableWebSearch = true;
-            SearchProvider = "DuckDuckGo";
+            SearchProvider = DefaultSearchProvider;
+            WebFetchMode = DefaultWebFetchMode;
             ShowDiffMarkersInEditor = true;
             OcrEngine = "Windows Built-in";
             AutoCompleteEnabled = false;
@@ -778,7 +803,35 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
         [LocalizedDescription("settings.searchProvider.description")]
         [TypeConverter(typeof(SearchProviderConverter))]
         [DesignerSerializationVisibility(DesignerSerializationVisibility.Visible)]
-        public string SearchProvider { get; set; } = "DuckDuckGo";
+        public string SearchProvider { get; set; } = DefaultSearchProvider;
+
+        /// <summary>默认搜索引擎：官方 API 来源用 DeepSeek 官方搜索，自定义端点自动回退 DuckDuckGo。</summary>
+        public const string DefaultSearchProvider = "DeepSeek";
+
+        /// <summary>
+        /// 网页抓取（fetch_webpage）的正文获取方式（两个选项）：
+        ///   official — DeepSeek 官方 Fetch 接口（默认；仅官方 API 来源可用，自定义端点自动回退本地）
+        ///   local    — 本地抓取 HTML 并自行解析
+        /// </summary>
+        [LocalizedCategory("settings.category.webSearch")]
+        [LocalizedDisplayName("settings.webFetchMode.displayName")]
+        [LocalizedDescription("settings.webFetchMode.description")]
+        [TypeConverter(typeof(WebFetchModeConverter))]
+        [DesignerSerializationVisibility(DesignerSerializationVisibility.Visible)]
+        public string WebFetchMode { get; set; } = DefaultWebFetchMode;
+
+        /// <summary>网页抓取方式默认值：官方 Fetch 接口（自定义端点自动回退本地解析）。</summary>
+        public const string DefaultWebFetchMode = "official";
+
+        /// <summary>
+        /// 搜索引擎默认值一次性迁移标记（旧默认值 DuckDuckGo → DeepSeek）。
+        /// DialogPage 会把默认值一并持久化，因此旧版的 "DuckDuckGo" 无法与用户显式选择区分；
+        /// 升级后按「官方 API 来源默认使用官方搜索」迁移一次，之后用户的选择不再被覆盖。
+        /// 必须加 DesignerSerializationVisibility(Visible) 才会被 DialogPage 序列化。
+        /// </summary>
+        [Browsable(false)]
+        [DesignerSerializationVisibility(DesignerSerializationVisibility.Visible)]
+        public bool WebSearchDefaultMigrated { get; set; } = false;
 
         [LocalizedCategory("settings.category.webSearch")]
         [LocalizedDisplayName("settings.baiduApiKey.displayName")]
@@ -1137,7 +1190,17 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
     {
         public override bool GetStandardValuesSupported(ITypeDescriptorContext? context) => true;
         public override StandardValuesCollection GetStandardValues(ITypeDescriptorContext? context)
-            => new(new[] { "Baidu", "Bing", "DuckDuckGo" });
+            => new(new[] { "DeepSeek", "Baidu", "Bing", "DuckDuckGo" });
+    }
+
+    /// <summary>
+    /// 网页抓取方式（fetch_webpage）：官方 API 接口 / 本地自行解析。
+    /// </summary>
+    internal class WebFetchModeConverter : StringConverter
+    {
+        public override bool GetStandardValuesSupported(ITypeDescriptorContext? context) => true;
+        public override StandardValuesCollection GetStandardValues(ITypeDescriptorContext? context)
+            => new(new[] { "official", "local" });
     }
 
     /// <summary>

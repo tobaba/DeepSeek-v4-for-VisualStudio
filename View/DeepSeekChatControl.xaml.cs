@@ -203,7 +203,11 @@ namespace DeepSeek_v4_for_VisualStudio.View
         /// <summary>程序化填充会话下拉时抑制 SelectionChanged（P2 交互修复）。</summary>
         private bool _suppressSessionSelection;
         private bool _isRefreshingCoreControls;
-        private string _webSearchEngine = "Off"; // "Off" | "Baidu" | "DuckDuckGo"
+        private string _webSearchEngine = "Off"; // "Off" | "DeepSeek" | "Baidu" | "Bing" | "DuckDuckGo"
+
+        /// <summary>联网搜索下拉框各项对应的引擎 Id，与 <see cref="WebSearchEngineComboBox"/> 的显示文本一一对应。
+        /// 官方 API 来源时首项为 DeepSeek（官方 Search/Fetch），自定义端点时不提供该项。</summary>
+        private string[] _searchEngineIds = Array.Empty<string>();
 
         // ── 文件上传 ──
         private readonly List<string> _attachedFilePaths = new(); // 已选文件路径列表
@@ -558,7 +562,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
             // 联网搜索: 默认关闭
             RefreshSearchEngineItems();
-            WebSearchEngineComboBox.SelectedIndex = 0; // 默认百度
+            // 首次构建时还没有 _options，_searchEngineIds 不含 DeepSeek 项，默认落到第一个引擎。
+            if (WebSearchEngineComboBox.SelectedIndex < 0 && WebSearchEngineComboBox.Items.Count > 0)
+                WebSearchEngineComboBox.SelectedIndex = 0;
 
             _webSearchEngine = "Off";
             UpdateWebSearchToggleAppearance();
@@ -1694,23 +1700,50 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 if (WebSearchEngineComboBox == null) return;
 
                 var L = LocalizationService.Instance;
-                int previousIndex = WebSearchEngineComboBox.SelectedIndex;
+                string? previousEngine = GetSelectedSearchEngineId();
 
-                WebSearchEngineComboBox.ItemsSource = new[] {
-                    " " + L["websearch.searchEngine.baidu"],
-                    " " + L["websearch.searchEngine.bing"],
-                    " " + L["websearch.searchEngine.duckduckgo"]
-                };
+                var ids = new List<string>();
+                var items = new List<string>();
 
-                // 首次构建时 SelectedIndex 为 -1，交由调用方决定默认值
-                if (previousIndex >= 0 && previousIndex < WebSearchEngineComboBox.Items.Count)
-                    WebSearchEngineComboBox.SelectedIndex = previousIndex;
+                // DeepSeek 官方 Search/Fetch 仅在官方 API 来源下提供，且为首选默认项。
+                if (IsOfficialSource)
+                {
+                    ids.Add("DeepSeek");
+                    items.Add(" " + L["websearch.searchEngine.deepseek"]);
+                }
+                ids.Add("Baidu");
+                items.Add(" " + L["websearch.searchEngine.baidu"]);
+                ids.Add("Bing");
+                items.Add(" " + L["websearch.searchEngine.bing"]);
+                ids.Add("DuckDuckGo");
+                items.Add(" " + L["websearch.searchEngine.duckduckgo"]);
+
+                _searchEngineIds = ids.ToArray();
+                WebSearchEngineComboBox.ItemsSource = items;
+
+                // 按引擎 Id（而非索引）恢复选中项：端点来源变化导致列表长度改变时也不会错位。
+                int restoreIndex = previousEngine == null
+                    ? -1
+                    : Array.IndexOf(_searchEngineIds, previousEngine);
+                if (restoreIndex >= 0)
+                    WebSearchEngineComboBox.SelectedIndex = restoreIndex;
             }
             catch (Exception ex)
             {
                 Logger.Warn($"[i18n] 重建搜索引擎下拉项失败: {ex.Message}");
             }
         }
+
+        /// <summary>当前下拉框选中项对应的引擎 Id；无选中项时返回 null。</summary>
+        private string? GetSelectedSearchEngineId()
+        {
+            int index = WebSearchEngineComboBox?.SelectedIndex ?? -1;
+            return index >= 0 && index < _searchEngineIds.Length ? _searchEngineIds[index] : null;
+        }
+
+        /// <summary>引擎 Id 在当前下拉项中的索引；不存在时返回 -1。</summary>
+        private int IndexOfSearchEngine(string engineId)
+            => Array.IndexOf(_searchEngineIds, engineId);
 
         /// <summary>
         /// 更新所有按钮的 ToolTip 和文本（跟随 i18n 语言设置）。
