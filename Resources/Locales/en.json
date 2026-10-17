@@ -1780,7 +1780,7 @@
     "tool.deleteFile.param.explanation": "Brief explanation of why the file is being deleted",
     "tool.fetchWebpage.param.url": "URL of the webpage to fetch content from (must be a full HTTP or HTTPS URL)",
     "tool.fetchWebpage.param.maxDepth": "Maximum recursion depth for fetching (default 1, i.e. current page only). Set to 2 to additionally fetch links on the page, and so on. Max 3.",
-    "tool.fetchWebpage.param.maxContentLength": "Maximum character count of returned content (default 3000). Content beyond this is truncated and noted.",
+    "tool.fetchWebpage.param.maxContentLength": "Maximum character count of the returned content. Default 0 means no truncation (full text); pass a positive value only when you explicitly need to limit the length.",
  "tool.fetchWebpage.fetching": "Fetching webpage",
  "tool.fetchWebpage.fetchingUrl": "Fetching webpage `{0}`",
     "tool.captureWindow.param.windowTitle": "Title of the window to capture (substring match, case-insensitive). Leave empty to capture the current foreground window, e.g. Visual Studio itself.",
