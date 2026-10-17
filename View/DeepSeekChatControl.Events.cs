@@ -1926,68 +1926,101 @@ namespace DeepSeek_v4_for_VisualStudio.View
         #region Event Handlers - WebView2
 
         /// <summary>
-        /// WebView2 新窗口请求事件：拦截 target='_blank' 链接，在系统默认浏览器中打开。
-        /// 使搜索结果卡片中的 URL 可以点击跳转。
+        /// WebView2 新窗口请求事件：拦截 target='_blank' / window.open 链接，
+        /// 一律在系统默认浏览器中打开，不在 WebView2 内新建窗口。
         /// </summary>
         private void CoreWebView2_NewWindowRequested(object? sender, CoreWebView2NewWindowRequestedEventArgs e)
         {
             e.Handled = true; // 阻止 WebView2 内部打开
-            try
-            {
-                Process.Start(new ProcessStartInfo
-                {
-                    FileName = e.Uri,
-                    UseShellExecute = true,
-                });
-                Logger.Info($"在外部浏览器打开: {e.Uri}");
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"打开外部浏览器失败 ({e.Uri}): {ex.Message}", ex);
-            }
+            OpenUriInSystemBrowser(e.Uri);
         }
 
         /// <summary>
-        /// WebView2 导航请求拦截：处理 vs-navigate:// 自定义协议链接。
-        /// 文件名和符号名在 Markdown 渲染时被转为 vs-navigate://file?name=... 或 vs-navigate://symbol?name=... 链接。
+        /// WebView2 导航请求拦截：
+        /// - vs-navigate:// 自定义协议：文件名/符号名跳转，交宿主处理；
+        /// - 用户点击的网页链接：取消 WebView2 内导航，改用系统默认浏览器打开，
+        ///   避免点击回答里的引用链接后整个聊天页面被导航走；
+        /// - 其它真实导航（页面重建等）：放行，并屏蔽缩放持久化以便完成后恢复缩放。
         /// </summary>
         private void CoreWebView2_NavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
         {
             if (string.IsNullOrEmpty(e.Uri)) return;
 
-            // ── 真实导航会重置用户缩放，先屏蔽持久化事件，导航完成后恢复保存的比例 ──
-            if (!e.Uri.StartsWith("vs-navigate://", StringComparison.OrdinalIgnoreCase))
+            // ── 只拦截 vs-navigate:// 自定义协议 ──
+            if (e.Uri.StartsWith("vs-navigate://", StringComparison.OrdinalIgnoreCase))
             {
-                _suppressWebViewZoomPersistence = true;
+                _suppressWebViewZoomPersistence = false;
+                e.Cancel = true; // 阻止 WebView2 导航
+
+                try
+                {
+                    Uri uri = new Uri(e.Uri);
+                    var queryParams = System.Web.HttpUtility.ParseQueryString(uri.Query);
+                    string? name = System.Net.WebUtility.UrlDecode(queryParams["name"]);
+                    string? line = System.Net.WebUtility.UrlDecode(queryParams["line"]);
+
+                    if (string.IsNullOrEmpty(name)) return;
+
+                    if (uri.Host == "file")
+                    {
+                        _ = NavigateToFileAsync(name, line);
+                    }
+                    else if (uri.Host == "symbol")
+                    {
+                        _ = NavigateToSymbolAsync(name);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"[Nav] vs-navigate 拦截失败 ({e.Uri}): {ex.Message}", ex);
+                }
+
                 return;
             }
 
-            // ── 只拦截 vs-navigate:// 自定义协议 ──
-            _suppressWebViewZoomPersistence = false;
+            // ── 用户点击的网页链接：不在 WebView2 内导航，交给系统默认浏览器 ──
+            if (e.IsUserInitiated && IsExternalLinkUri(e.Uri))
+            {
+                e.Cancel = true;
+                OpenUriInSystemBrowser(e.Uri);
+                return;
+            }
 
-            e.Cancel = true; // 阻止 WebView2 导航
+            // ── 真实导航会重置用户缩放，先屏蔽持久化事件，导航完成后恢复保存的比例 ──
+            _suppressWebViewZoomPersistence = true;
+        }
 
+        /// <summary>
+        /// 判断是否为应交给系统默认程序打开的网页链接（http/https/mailto）。
+        /// 内部协议（vs-navigate://、about:、data:、file:）与页内锚点都不算外部链接。
+        /// </summary>
+        internal static bool IsExternalLinkUri(string? uri)
+        {
+            if (string.IsNullOrWhiteSpace(uri)) return false;
+            if (!Uri.TryCreate(uri, UriKind.Absolute, out var parsed)) return false;
+
+            return parsed.Scheme switch
+            {
+                "http" or "https" or "mailto" => true,
+                _ => false,
+            };
+        }
+
+        /// <summary>用系统默认浏览器/程序打开指定 URI。</summary>
+        private static void OpenUriInSystemBrowser(string uri)
+        {
             try
             {
-                Uri uri = new Uri(e.Uri);
-                var queryParams = System.Web.HttpUtility.ParseQueryString(uri.Query);
-                string? name = System.Net.WebUtility.UrlDecode(queryParams["name"]);
-                string? line = System.Net.WebUtility.UrlDecode(queryParams["line"]);
-
-                if (string.IsNullOrEmpty(name)) return;
-
-                if (uri.Host == "file")
+                Process.Start(new ProcessStartInfo
                 {
-                    _ = NavigateToFileAsync(name, line);
-                }
-                else if (uri.Host == "symbol")
-                {
-                    _ = NavigateToSymbolAsync(name);
-                }
+                    FileName = uri,
+                    UseShellExecute = true,
+                });
+                Logger.Info($"在外部浏览器打开: {uri}");
             }
             catch (Exception ex)
             {
-                Logger.Error($"[Nav] vs-navigate 拦截失败 ({e.Uri}): {ex.Message}", ex);
+                Logger.Error($"打开外部浏览器失败 ({uri}): {ex.Message}", ex);
             }
         }
 
