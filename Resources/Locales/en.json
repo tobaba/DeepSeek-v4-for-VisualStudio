@@ -666,6 +666,7 @@
     "status.pricingPeriod.offPeak": "Off-peak now",
     "status.pricingPeriod.peak": "Peak now",
     "status.pricingPeriod.tooltip": "Beijing time pricing: peak on weekdays 09:00–12:00 and 14:00–18:00; off-peak all day on all weekends (including adjusted working weekends) and Chinese public holidays (including adjusted rest days).",
+    "status.toolBilling.tooltip": "Official Search / Fetch are billed per successful request (¥5 / $0.75 per 1,000), not by tokens or returned results; failed requests, empty results and timeouts are not billed. Effective 2026-11-01 00:00 Beijing time.\nThis session: Search {0} succeeded ({1} billed), Fetch {2} succeeded ({3} billed).",
     "status.appendMessage.queue": "Queued. It will be sent automatically after the current task finishes.",
     "status.appendMessage.guidance": "Guidance added. It will be inserted after the current thinking and tool-call loop.",
     "status.appendMessage.autoSending": "Sending queued message automatically (model: {0})",

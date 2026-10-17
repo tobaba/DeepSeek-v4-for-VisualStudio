@@ -688,6 +688,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
             // 重置搜索额度状态（新会话可能额度已恢复）
             _webSearchService?.ResetQuotaState();
+            // 重置官方 Search / Fetch 的按次计费用量统计
+            _webSearchService?.ResetOfficialToolStats();
 
             // 清空附件列表
             ClearAttachedFiles();

@@ -1300,7 +1300,23 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
             // ── API 消耗 + 费用部分 ──
             string apiPart;
-            if (totalTokens == 0)
+            // 官方 Search / Fetch 按次计费与本会话 token 费用合并展示：
+            // 即使 token 为 0（例如只调用了 web_search 就被停止），也要显示这部分费用。
+            double officialToolCost = 0;
+            if (IsOfficialSource && _webSearchService != null)
+            {
+                string c = (
+                    (_lastBalance != null && _lastBalance.BalanceInfos.Count > 0
+                        ? _lastBalance.BalanceInfos[0].Currency
+                        : null)
+                    ?? _apiService.AccountCurrency
+                    ?? string.Empty).ToUpperInvariant();
+                officialToolCost = c == "USD"
+                    ? _webSearchService.OfficialToolCostUsd
+                    : _webSearchService.OfficialToolCostYuan;
+            }
+
+            if (totalTokens == 0 && officialToolCost <= 0)
             {
                 apiPart = "";
             }
@@ -1345,6 +1361,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
                                   + cacheHitTokens / 1_000_000.0 * hitPrice
                                   + completionTokens / 1_000_000.0 * outputPrice;
                     }
+
+                    // 叠加官方 Search / Fetch 的按次计费
+                    totalCost += officialToolCost;
 
                     string costStr = totalCost >= 0.01
                         ? $"{symbol}{totalCost:F2}"
@@ -1414,6 +1433,32 @@ namespace DeepSeek_v4_for_VisualStudio.View
             {
                 ShowConsumptionFallback();
             }
+
+            UpdateSessionConsumptionToolTip();
+        }
+
+        /// <summary>
+        /// 刷新会话消耗标签的 ToolTip：说明官方 Search / Fetch 的按次计费口径
+        /// （成功请求才计费、北京时间 2026-11-01 00:00 起生效）与本会话实际用量。
+        /// 非官方来源（不产生官方计费）时清除 ToolTip。
+        /// </summary>
+        private void UpdateSessionConsumptionToolTip()
+        {
+            var balanceLabel = BalanceLabel;
+            if (balanceLabel == null) return;
+
+            if (_webSearchService == null || !IsOfficialSource)
+            {
+                balanceLabel.ToolTip = null;
+                return;
+            }
+
+            balanceLabel.ToolTip = LocalizationService.Instance.Format(
+                "status.toolBilling.tooltip",
+                _webSearchService.OfficialSearchSuccessCount,
+                _webSearchService.BillableSearchCount,
+                _webSearchService.OfficialFetchSuccessCount,
+                _webSearchService.BillableFetchCount);
         }
 
         /// <summary>

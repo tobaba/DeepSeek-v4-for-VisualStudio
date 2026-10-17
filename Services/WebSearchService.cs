@@ -61,6 +61,25 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// <summary>DeepSeek 官方 Search/Fetch 请求超时（秒）。Fetch 需等待下游抓取，比通用搜索更宽松。</summary>
         private const int DeepSeekRequestTimeoutSeconds = 40;
 
+        /// <summary>DeepSeek Search 接口单价（元 / 每 1000 次成功请求）。</summary>
+        public const double SearchPriceCnyPer1K = 5.0;
+
+        /// <summary>DeepSeek Fetch 接口单价（元 / 每 1000 次成功请求）。</summary>
+        public const double FetchPriceCnyPer1K = 5.0;
+
+        /// <summary>DeepSeek Search 接口单价（美元 / 每 1000 次成功请求）。</summary>
+        public const double SearchPriceUsdPer1K = 0.75;
+
+        /// <summary>DeepSeek Fetch 接口单价（美元 / 每 1000 次成功请求）。</summary>
+        public const double FetchPriceUsdPer1K = 0.75;
+
+        /// <summary>
+        /// Search / Fetch 开始按次计费的时间点（北京时间 2026-11-01 00:00）。
+        /// 在此之前调用不计费；仅"成功且产生结果"的请求计入。
+        /// </summary>
+        public static readonly DateTimeOffset SearchFetchBillingStart =
+            new DateTimeOffset(2026, 11, 1, 0, 0, 0, TimeSpan.FromHours(8));
+
         /// <summary>请求超时（秒）</summary>
         private const int RequestTimeoutSeconds = 15;
 
@@ -109,6 +128,12 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         private SearchProvider _activeProvider;
         private bool _isBaiduQuotaExhausted;
 
+        // ── 官方 Search / Fetch 按次计费统计（每次成功且产生结果的请求计数）──
+        private int _officialSearchSuccessCount;
+        private int _officialFetchSuccessCount;
+        private int _billableSearchCount;
+        private int _billableFetchCount;
+
         /// <summary>
         /// 获取当前正在使用的搜索提供商。
         /// </summary>
@@ -138,6 +163,64 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// </summary>
         public bool UseOfficialWebFetch
             => _webFetchMode == WebFetchMode.Official && HasOfficialApiKey;
+
+        // ── 官方 Search / Fetch 用量与计费（按次，见官方计费说明）──
+
+        /// <summary>本会话官方 Search 成功（HTTP 200 且 results 非空）的请求次数。</summary>
+        public int OfficialSearchSuccessCount => Volatile.Read(ref _officialSearchSuccessCount);
+
+        /// <summary>本会话官方 Fetch 成功（HTTP 200 且返回正文）的请求次数。</summary>
+        public int OfficialFetchSuccessCount => Volatile.Read(ref _officialFetchSuccessCount);
+
+        /// <summary>本会话计入计费的 Search 次数（计费生效日之前的成功请求不计费）。</summary>
+        public int BillableSearchCount => Volatile.Read(ref _billableSearchCount);
+
+        /// <summary>本会话计入计费的 Fetch 次数（计费生效日之前的成功请求不计费）。</summary>
+        public int BillableFetchCount => Volatile.Read(ref _billableFetchCount);
+
+        /// <summary>本会话官方 Search / Fetch 计费金额（人民币）。</summary>
+        public double OfficialToolCostYuan =>
+            BillableSearchCount / 1000.0 * SearchPriceCnyPer1K +
+            BillableFetchCount / 1000.0 * FetchPriceCnyPer1K;
+
+        /// <summary>本会话官方 Search / Fetch 计费金额（美元）。</summary>
+        public double OfficialToolCostUsd =>
+            BillableSearchCount / 1000.0 * SearchPriceUsdPer1K +
+            BillableFetchCount / 1000.0 * FetchPriceUsdPer1K;
+
+        /// <summary>判断指定时刻是否已进入官方 Search / Fetch 按次计费期。</summary>
+        public static bool IsSearchFetchBillingActive(DateTimeOffset now)
+            => now >= SearchFetchBillingStart;
+
+        /// <summary>重置官方 Search / Fetch 用量与计费统计（新会话开始时调用）。</summary>
+        public void ResetOfficialToolStats()
+        {
+            Interlocked.Exchange(ref _officialSearchSuccessCount, 0);
+            Interlocked.Exchange(ref _officialFetchSuccessCount, 0);
+            Interlocked.Exchange(ref _billableSearchCount, 0);
+            Interlocked.Exchange(ref _billableFetchCount, 0);
+        }
+
+        /// <summary>
+        /// 记录一次成功的官方工具请求。仅"HTTP 200 且产生结果"的请求会计费
+        /// （Search 的 results 非空、Fetch 返回正文），失败/空结果/超时不计。
+        /// </summary>
+        /// <param name="isSearch">true 表示 Search，false 表示 Fetch</param>
+        private void RecordOfficialToolSuccess(bool isSearch)
+        {
+            if (isSearch)
+                Interlocked.Increment(ref _officialSearchSuccessCount);
+            else
+                Interlocked.Increment(ref _officialFetchSuccessCount);
+
+            if (!IsSearchFetchBillingActive(DateTimeOffset.UtcNow))
+                return; // 计费生效日之前免费
+
+            if (isSearch)
+                Interlocked.Increment(ref _billableSearchCount);
+            else
+                Interlocked.Increment(ref _billableFetchCount);
+        }
 
         #endregion
 
@@ -1024,6 +1107,9 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 }
 
                 var results = ParseDeepSeekSearchResponse(responseJson);
+                // 只有 results 非空才算"成功请求"（官方计费口径）；空结果不计费。
+                if (results.Count > 0)
+                    RecordOfficialToolSuccess(isSearch: true);
                 Logger.Info($"DeepSeek 官方搜索完成，获取 {results.Count} 条结果");
                 return results;
             }
@@ -1133,6 +1219,9 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 string content = GetStringProperty(doc.RootElement, "content");
                 if (string.IsNullOrWhiteSpace(content))
                     return null;
+
+                // 只有返回正文才算"成功请求"（官方计费口径）；空正文不计费。
+                RecordOfficialToolSuccess(isSearch: false);
 
                 string text = string.IsNullOrWhiteSpace(title)
                     ? content.Trim()

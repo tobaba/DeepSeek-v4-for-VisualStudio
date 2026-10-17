@@ -565,6 +565,7 @@
     "status.pricingPeriod.offPeak": "当前空闲",
     "status.pricingPeriod.peak": "当前高峰",
     "status.pricingPeriod.tooltip": "北京时间计价时段：工作日 09:00–12:00、14:00–18:00 为高峰；所有周末（含调休上班周末）及中国法定节假日（含调休放假日）全天为空闲。",
+    "status.toolBilling.tooltip": "官方 Search / Fetch 按成功请求次数计费（每 1000 次 5 元 / $0.75），不按 token 或返回条数计费；失败、无结果与超时不计费。北京时间 2026-11-01 00:00 起生效。\n本会话：Search 成功 {0} 次（已计费 {1} 次），Fetch 成功 {2} 次（已计费 {3} 次）。",
     "status.appendMessage.queue": "已加入排队，将在当前任务完成后自动发送",
     "status.appendMessage.guidance": "已加入引导，将在当前思考与工具调用循环结束后插入",
     "status.appendMessage.autoSending": "正在自动发送排队消息（模型: {0}）",
