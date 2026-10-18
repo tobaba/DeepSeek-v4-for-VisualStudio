@@ -857,7 +857,12 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             if (_isCompressing)
                 return 0;
 
-            int entryLimit = _cacheSnapshotEntryIndex ?? _entries.Count;
+            // ── 匹配范围必须覆盖全部条目 ──
+            //     不能用 _cacheSnapshotEntryIndex 截断：缓存边界快照只约束"本次渲染哪些条目"，
+            //     而 Handoff 分支恰好会在快照之后把身份边界提示等写入 _entries。
+            //     若用快照下标当上界，刚写下的那条就落在窗口外、匹配不到，
+            //     于是被判为"脱节内容"再补一份 —— 这正是 152 号请求 [48][49] 相邻重复的成因。
+            int entryLimit = _entries.Count;
             int appended = 0;
             int cursor = 0;      // _entries 扫描游标：已匹配到的条目下标
 
@@ -942,9 +947,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                     Replay: !isTailSystem));
 
                 cursor = _entries.Count;
-                if (_cacheSnapshotEntryIndex.HasValue)
-                    entryLimit = Math.Max(entryLimit, _entries.Count);
-
                 appended++;
             }
 
