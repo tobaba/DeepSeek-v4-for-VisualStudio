@@ -1,4 +1,4 @@
-using DeepSeek_v4_for_VisualStudio.Models;
+﻿using DeepSeek_v4_for_VisualStudio.Models;
 using DeepSeek_v4_for_VisualStudio.Services;
 using DeepSeek_v4_for_VisualStudio.Services.BuiltInTools;
 using DeepSeek_v4_for_VisualStudio.Utils;
@@ -559,6 +559,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                 else if (IsContentChunk(chunk))
                     sb.Append(chunk);
             }
+            // ── 本次调用为单次无工具调用（路由/分类/子任务），尾部提示属脚手架，不参与重放 ──
+            SyncSentMessagesToHistory(replayNewMessages: false);
             LogCacheHitRate();
             return sb.ToString().Trim();
         }
@@ -619,6 +621,48 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                 return null;
 
             return CloneApiMessages(sent);
+        }
+
+        /// <summary>
+        /// 把本次实际发出的消息与内部历史对账，补齐「发出但未落库」的内容。
+        ///
+        /// 背景：请求构建器会在消息副本上临时追加几类内容（Agent 行为指令、未固化的
+        /// volatile 块、路由边界指令、Handoff 分支的身份/任务提示），它们此前从不写回
+        /// <c>_entries</c>。这会导致两条链路看到不同历史：从 <c>_entries</c> 重建的请求
+        /// （记忆提取、总结润色等子任务）与持久化恢复都会缺这些消息，既丢上下文，
+        /// 也让前缀缓存从缺失点断裂。
+        ///
+        /// 这里以 Provider 记录的「实际发送快照」为基准做对账，保证发出过的内容全部可追溯。
+        /// </summary>
+        /// <param name="replayNewMessages">
+        /// 补写条目的「历史脚手架」类别是否参与后续请求重放。
+        /// 主对话传 true；子任务尾提示（记忆判断、总结润色）传 false。
+        /// </param>
+        /// <param name="sentMessages">
+        /// 显式指定的发送快照；传 null 时取 <see cref="CaptureLastSentMessagesForCache"/>。
+        /// 工具循环内应传入本地 messages（含当轮新插入的 assistant/tool），
+        /// 因为 Provider 的 LastSentMessages 只反映最近一次 HTTP 调用。
+        /// </param>
+        protected int SyncSentMessagesToHistory(bool replayNewMessages = true, List<ChatApiMessage>? sentMessages = null)
+        {
+            var ctxManager = Context?.ContextManager;
+            if (ctxManager == null)
+                return 0;
+
+            var sent = sentMessages ?? CaptureLastSentMessagesForCache();
+            if (sent == null || sent.Count == 0)
+                return 0;
+
+            try
+            {
+                return ctxManager.SyncSentMessagesToHistory(sent, replayNewMessages);
+            }
+            catch (Exception ex)
+            {
+                // 对账失败不能影响主流程：历史补齐是增强，不是必需路径
+                Logger.Warn($"[Agent:{Definition.Name}] 发送内容对账失败: {ex.Message}");
+                return 0;
+            }
         }
 
         /// <summary>
@@ -900,8 +944,14 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             if (ctxManager != null && !volatilePersisted)
             {
                 string? volatileBlock = ctxManager.BuildVolatileContextBlock();
-                if (!string.IsNullOrWhiteSpace(volatileBlock))
+                // ── 去重：本轮已有一份内容完全相同的 volatile 快照（固化或对账补写）时不再注入 ──
+                //   否则同一轮内的多次请求（如 Edit 多步骤推进）会把同一份易变块重复叠加，
+                //   既浪费 token，也让从 _entries 重建的链路与线上请求在这一点上前缀分叉。
+                if (!string.IsNullOrWhiteSpace(volatileBlock)
+                    && !ctxManager.HasVolatileSnapshotInCurrentTurn(volatileBlock))
+                {
                     messages.Add(new ChatApiMessage { Role = "system", Content = volatileBlock });
+                }
             }
 
             // ── 第5层：当前用户消息 ──
@@ -1392,6 +1442,14 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                         {
                             Logger.Info($"[Agent:{Definition.Name}] 流断点续传成功 (尝试 {streamAttempt + 1}/{maxStreamAttempts})");
                         }
+
+                        // ── 发送内容对账 ──
+                        //   把本次真正发出去的消息（含临时注入的 volatile 块、Agent 行为指令、
+                        //   Handoff 身份/任务提示）补齐进 _entries，保证任何发出过的内容
+                        //   都能被后续子任务与持久化看到，不会出现"历史缺了几条"。
+                        //   user/assistant/tool 补写条目参与重放（如 Edit 步骤提示就是真实会话内容），
+                        //   system 类补写条目只登记不重放（每次请求都会重新生成）。
+                        SyncSentMessagesToHistory(replayNewMessages: true, sentMessages: messages);
                     }
                     catch (HttpRequestException ex) when (streamAttempt < maxStreamAttempts - 1)
                     {

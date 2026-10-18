@@ -1,4 +1,4 @@
-using DeepSeek_v4_for_VisualStudio.Models;
+﻿using DeepSeek_v4_for_VisualStudio.Models;
 using System.Collections.Generic;
 
 namespace DeepSeek_v4_for_VisualStudio.Services
@@ -53,13 +53,27 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         void AddUserMessage(string content, List<ChatContentPart>? multimodalContent);
         void AddAssistantMessage(string? content, string? reasoningContent = null, List<ToolCall>? toolCalls = null);
         void AddToolResult(string toolCallId, string toolName, string result);
-        void AddCustomMessage(string role, string content);
+        void AddCustomMessage(string role, string content, int turnIndex = -1);
 
         // ── 上下文获取 ──
         List<ChatApiMessage> BuildApiMessages();
         List<ChatApiMessage> BuildContextPrefix();
         List<ChatApiMessage> BuildApiMessagesRecentTurns(int maxTurns);
         string GetDebugSummary();
+
+        /// <summary>
+        /// 将「本次实际发出的消息列表」与内部历史对账，把脱节消息补写进 <c>_entries</c>。
+        /// 保证任何发出过的内容都能被后续请求（含记忆提取、总结等子任务）与持久化看到。
+        /// </summary>
+        /// <param name="sentMessages">实际发送给 API 的消息列表（清洗后的最终版本）。</param>
+        /// <param name="replayNewMessages">补写的 user/assistant/tool 条目是否参与后续请求重放。</param>
+        /// <returns>补写的条目数。</returns>
+        int SyncSentMessagesToHistory(IReadOnlyList<ChatApiMessage> sentMessages, bool replayNewMessages = true);
+
+        /// <summary>
+        /// 判断当前轮次是否已存在内容相同的 volatile 快照（供请求构建器去重，避免同轮重复注入）。
+        /// </summary>
+        bool HasVolatileSnapshotInCurrentTurn(string? volatileBlock);
 
         /// <summary>
         /// 构建易变上下文块（Working Set + RAG）。
