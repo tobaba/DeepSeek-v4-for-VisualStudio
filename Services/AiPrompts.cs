@@ -116,11 +116,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         #region Explore Agent Prompts
 
         /// <summary>
-        /// 搜索关键词专家 — 系统提示词。
-        /// </summary>
-        public static string SearchKeywordsExpertSystemPrompt => L["system.searchKeywordsExpertSystemPrompt"];
-
-        /// <summary>
         /// Explore Agent 搜索指令 — 注入到探索任务的末尾，指导 AI 如何系统性地搜索代码库。
         /// </summary>
         public static string ExploreAgentInstructions => L["system.exploreAgentInstructions"];

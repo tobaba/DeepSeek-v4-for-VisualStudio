@@ -227,28 +227,6 @@ public class ExploreAgentTests
 
     #endregion
 
-    #region GenerateSearchKeywordsViaAi
-
-    [Fact]
-    public async Task GenerateSearchKeywordsViaAi_WithoutBuiltInTools_ReturnsEmpty()
-    {
-        var agent = new ExploreAgent(_apiService);
-        var cts = new CancellationTokenSource();
-
-        // No BuiltInTools set, so CallAiShortAsync would fail — but it will try to call API
-        // which will throw because no mock. We catch gracefully.
-        // Since we can't easily mock the API stream, we test the fallback path:
-        // When AI call fails, the method returns empty set.
-
-        // This tests that the method handles errors gracefully
-        var result = await GenerateSearchKeywordsViaAiPublic(agent, "test query", null, cts.Token);
-
-        // Should return empty set when AI call fails (no mock)
-        result.Should().BeEmpty();
-    }
-
-    #endregion
-
     #region SourceFileExtensions
 
     [Fact]
@@ -296,15 +274,6 @@ public class ExploreAgentTests
         var method = typeof(ExploreAgent).GetMethod("BuildExplorePrompt",
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
         return (string)method!.Invoke(null, new object[] { userMessage, context })!;
-    }
-
-    private static async Task<HashSet<string>> GenerateSearchKeywordsViaAiPublic(
-        ExploreAgent agent, string userQuery, string? context, CancellationToken ct)
-    {
-        var method = typeof(ExploreAgent).GetMethod("GenerateSearchKeywordsViaAiAsync",
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        var task = (Task<HashSet<string>>)method!.Invoke(agent, new object?[] { userQuery, context, ct })!;
-        return await task;
     }
 
     private static HashSet<string> GetSourceFileExtensionsPublic()
