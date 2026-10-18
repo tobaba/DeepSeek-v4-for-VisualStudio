@@ -1,4 +1,4 @@
-﻿using DeepSeek_v4_for_VisualStudio.Models;
+using DeepSeek_v4_for_VisualStudio.Models;
 using DeepSeek_v4_for_VisualStudio.Services;
 using DeepSeek_v4_for_VisualStudio.Services.BuiltInTools;
 using DeepSeek_v4_for_VisualStudio.Utils;
@@ -554,8 +554,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                 else if (IsContentChunk(chunk))
                     sb.Append(chunk);
             }
-            // ── 本次调用为单次无工具调用（路由/分类/子任务），尾部提示属脚手架，不参与重放 ──
-            SyncSentMessagesToHistory(replayNewMessages: false);
+            // ── 单次工具无关调用（路由/分类等）：不属于主流程对话内容，不写历史 ──
             LogCacheHitRate();
             return sb.ToString().Trim();
         }
@@ -573,12 +572,18 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         /// <param name="reminderAfterFirstToolRound">首次工具调用后追加的"禁止继续调用工具"提示</param>
         /// <param name="responseFormat">响应格式（例如 json_object）</param>
         /// <param name="temperature">采样温度</param>
+        /// <param name="persistToHistory">
+        /// 是否把本轮 assistant/tool 消息与对账结果写入历史。
+        /// 主流程调用保持默认 true；记忆判定、总结润色等一次性子任务必须传 false，
+        /// 否则子任务的提示词与返回结果会进入 <c>_entries</c> 并污染下一轮请求。
+        /// </param>
         public async Task<string> CallAiWithReadOnlyToolLoopAsync(
             List<ChatApiMessage> messages,
             CancellationToken ct,
             string? reminderAfterFirstToolRound = null,
             string? responseFormat = null,
-            double? temperature = null)
+            double? temperature = null,
+            bool persistToHistory = true)
         {
             return await CallAiWithToolLoopAsync(
                 messages,
@@ -588,7 +593,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                 toolChoiceOverride: "auto",
                 responseFormat: responseFormat,
                 temperature: temperature,
-                noToolsReminderAfterFirstToolRound: reminderAfterFirstToolRound);
+                noToolsReminderAfterFirstToolRound: reminderAfterFirstToolRound,
+                persistToHistory: persistToHistory);
         }
 
         /// <summary>
@@ -619,26 +625,21 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         }
 
         /// <summary>
-        /// 把本次实际发出的消息与内部历史对账，补齐「发出但未落库」的内容。
+        /// 把本次实际发出的消息与内部历史对账，补齐主流程「发出但未落库」的内容。
         ///
-        /// 背景：请求构建器会在消息副本上临时追加几类内容（Agent 行为指令、未固化的
-        /// volatile 块、路由边界指令、Handoff 分支的身份/任务提示），它们此前从不写回
-        /// <c>_entries</c>。这会导致两条链路看到不同历史：从 <c>_entries</c> 重建的请求
-        /// （记忆提取、总结润色等子任务）与持久化恢复都会缺这些消息，既丢上下文，
-        /// 也让前缀缓存从缺失点断裂。
+        /// 背景：请求构建器会在消息副本上临时追加几类**主流程**内容（Handoff 的 volatile 块与
+        /// 任务提示、路由边界指令、Agent 行为指令），它们此前从不写回 <c>_entries</c>。
+        /// 这会让从 <c>_entries</c> 重建的历史「缺了几条」，既丢上下文，也让前缀缓存从缺失点断裂。
         ///
-        /// 这里以 Provider 记录的「实际发送快照」为基准做对账，保证发出过的内容全部可追溯。
+        /// <b>仅主流程可调用</b>：一次性子任务（记忆判定、总结润色）的提示词与返回结果
+        /// 不属于主流程，绝不能落库，否则会污染下一轮主对话请求。
         /// </summary>
-        /// <param name="replayNewMessages">
-        /// 补写条目的「历史脚手架」类别是否参与后续请求重放。
-        /// 主对话传 true；子任务尾提示（记忆判断、总结润色）传 false。
-        /// </param>
         /// <param name="sentMessages">
         /// 显式指定的发送快照；传 null 时取 <see cref="CaptureLastSentMessagesForCache"/>。
         /// 工具循环内应传入本地 messages（含当轮新插入的 assistant/tool），
         /// 因为 Provider 的 LastSentMessages 只反映最近一次 HTTP 调用。
         /// </param>
-        protected int SyncSentMessagesToHistory(bool replayNewMessages = true, List<ChatApiMessage>? sentMessages = null)
+        protected int SyncSentMessagesToHistory(List<ChatApiMessage>? sentMessages = null)
         {
             var ctxManager = Context?.ContextManager;
             if (ctxManager == null)
@@ -650,7 +651,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
 
             try
             {
-                return ctxManager.SyncSentMessagesToHistory(sent, replayNewMessages);
+                return ctxManager.SyncSentMessagesToHistory(sent);
             }
             catch (Exception ex)
             {
@@ -1127,6 +1128,12 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         /// <param name="temperature">采样温度</param>
         /// <param name="toolChoiceOverride">覆盖本轮工具选择策略（例如 auto / none）</param>
         /// <param name="noToolsReminderAfterFirstToolRound">首次完成工具调用后追加的“禁止继续调用工具”提示</param>
+        /// <param name="persistToHistory">
+        /// 是否把本轮的 assistant / tool / 对账结果写入 <c>_entries</c>。
+        /// 主流程（Ask/Plan/Edit/Build 的对话推进）传 true；
+        /// 一次性子任务（记忆判定、总结润色等）必须传 false —— 它们的提示词与返回结果
+        /// 不属于主流程对话，落库会污染下一轮请求（模型会把「记忆管理助手」的问答当成本轮内容）。
+        /// </param>
         /// <returns>AI 最终生成的文本内容</returns>
         protected async Task<string> CallAiWithToolLoopAsync(
             List<ChatApiMessage> messages,
@@ -1141,7 +1148,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             string? responseFormat = null,
             double? temperature = null,
             string? toolChoiceOverride = null,
-            string? noToolsReminderAfterFirstToolRound = null)
+            string? noToolsReminderAfterFirstToolRound = null,
+            bool persistToHistory = true)
         {
             string? originalUserQuestion = messages
                 .LastOrDefault(m => string.Equals(m.Role, "user", StringComparison.OrdinalIgnoreCase))
@@ -1417,13 +1425,12 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                             Logger.Info($"[Agent:{Definition.Name}] 流断点续传成功 (尝试 {streamAttempt + 1}/{maxStreamAttempts})");
                         }
 
-                        // ── 发送内容对账 ──
-                        //   把本次真正发出去的消息（含临时注入的 volatile 块、Agent 行为指令、
-                        //   Handoff 身份/任务提示）补齐进 _entries，保证任何发出过的内容
-                        //   都能被后续子任务与持久化看到，不会出现"历史缺了几条"。
-                        //   user/assistant/tool 补写条目参与重放（如 Edit 步骤提示就是真实会话内容），
-                        //   system 类补写条目只登记不重放（每次请求都会重新生成）。
-                        SyncSentMessagesToHistory(replayNewMessages: true, sentMessages: messages);
+                        // ── 主流程发送内容对账 ──
+                        //   把本次真正发出去的主流程消息（Handoff 的 volatile 块与任务提示、
+                        //   路由边界指令、Agent 行为指令）补齐进 _entries，保证重建历史不缺消息。
+                        //   子任务调用（persistToHistory=false）不走这里。
+                        if (persistToHistory)
+                            SyncSentMessagesToHistory(sentMessages: messages);
                     }
                     catch (HttpRequestException ex) when (streamAttempt < maxStreamAttempts - 1)
                     {
@@ -1707,9 +1714,12 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                             ReasoningContent = string.IsNullOrWhiteSpace(interimReasoning) ? null : interimReasoning,
                         });
                         toolInsertPos++;
-                        Context?.ContextManager?.AddAssistantMessage(
-                            string.IsNullOrWhiteSpace(interimContent) ? null : interimContent,
-                            string.IsNullOrWhiteSpace(interimReasoning) ? null : interimReasoning);
+                        if (persistToHistory)
+                        {
+                            Context?.ContextManager?.AddAssistantMessage(
+                                string.IsNullOrWhiteSpace(interimContent) ? null : interimContent,
+                                string.IsNullOrWhiteSpace(interimReasoning) ? null : interimReasoning);
+                        }
                     }
 
                     int newToolInsertPos = await ApplyPendingGuidanceMessageAsync(
@@ -1881,7 +1891,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                     toolInsertPos++;
 
                     // ── 同步 assistant 消息（含 tool_calls）到全局 ContextManager，确保重启后可恢复完整对话 ──
-                    if (Context?.ContextManager != null)
+                    //     子任务（persistToHistory=false）不落库：其提示词/返回结果不属于主流程对话。
+                    if (persistToHistory && Context?.ContextManager != null)
                     {
                         Context.ContextManager.AddAssistantMessage(
                             contentBuilder.Length > 0 ? contentBuilder.ToString() : null,
@@ -2019,7 +2030,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                         }
 
                         // ── 同步 tool 结果到全局 ContextManager，确保重启后可恢复完整对话 ──
-                        if (Context?.ContextManager != null)
+                        //     子任务（persistToHistory=false）不落库。
+                        if (persistToHistory && Context?.ContextManager != null)
                         {
                             Context.ContextManager.AddToolResult(tc.Id, tc.Function.Name, contextResult);
                         }

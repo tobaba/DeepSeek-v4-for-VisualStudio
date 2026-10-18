@@ -1,4 +1,4 @@
-﻿using DeepSeek_v4_for_VisualStudio.Models;
+using DeepSeek_v4_for_VisualStudio.Models;
 using DeepSeek_v4_for_VisualStudio.Utils;
 using System;
 using System.Collections.Generic;
@@ -793,9 +793,10 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// <param name="systemPrompt">子任务 system 指令；替换或追加到消息数组最末。</param>
         /// <returns>新构建的消息列表；不修改内部历史条目对象，也不影响后续主对话请求。</returns>
         /// <remarks>
-        /// 子任务尾提示会以「只登记不重放」的方式记入 <c>_entries</c>：
-        /// 保证「发出过的内容都能在 _entries 中查到」这一不变量成立，
-        /// 同时因为它们是一次性脚手架，<c>Replay = false</c> 使其不会污染后续主对话请求。
+        /// <b>子任务尾提示一律不落库</b>：记忆判定、总结润色等属于主流程之外的一次性脚手架，
+        /// 其提示词与返回结果都不应进入 <c>_entries</c>，否则会污染下一轮主对话历史
+        /// （模型会把「记忆管理助手」的问答当成本轮对话的一部分）。
+        /// 因此本方法只构建请求，绝不写历史。
         /// </remarks>
         public List<ChatApiMessage> BuildApiMessagesWithSubTaskPrompt(string userPrompt, string systemPrompt)
         {
@@ -818,46 +819,36 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 messages.Add(new ChatApiMessage { Role = "system", Content = systemPrompt });
             }
 
-            // ── 子任务尾提示登记进 _entries（只登记不重放）──
-            //   它们是真实发出的内容，必须可追溯；但属于一次性脚手架，
-            //   参与重放会把「记忆管理助手」之类的指令带进后续主对话。
-            SyncSentMessagesToHistory(messages, replayNewMessages: false);
-
             return messages;
         }
 
         /// <summary>
-        /// 将「本次实际发出的消息列表」与内部历史对账，把脱节消息补写进 <c>_entries</c>。
+        /// 将「本次实际发出的消息列表」与内部历史对账，把**主流程**脱节消息补写进 <c>_entries</c>。
+        ///
+        /// ── 不变量 ──
+        /// <c>_entries</c> 必须完整包含主流程发出过的每一条消息（任何一条都不能缺），
+        /// 且必须**完全不含**一次性子任务（记忆判定、总结润色、路由）的提示词与返回结果。
         ///
         /// ── 为什么需要它 ──
-        /// 正常情况下请求由 <see cref="BuildApiMessages"/> 从 <c>_entries</c> 重建，
-        /// 但有几类内容**只存在于请求体、从不落库**：
-        ///   1. Agent 专属行为指令（末尾 system，如 Edit 步骤提示、子任务指令）；
-        ///   2. 未固化的 volatile 上下文块（当前解决方案 / Git / IDE 快照）；
+        /// 正常请求由 <see cref="BuildApiMessages"/> 从 <c>_entries</c> 重建，但有几类主流程内容
+        /// 只在请求副本上临时存在、从不落库：
+        ///   1. Handoff 分支插入的 volatile 上下文块（当前解决方案 / Git / IDE 快照）；
+        ///   2. Handoff 目标 Agent 的任务提示（「[当前任务目标] 你是一个 Edit Agent…」）；
         ///   3. 显式 @Agent 路由的 doNotHandoff 边界指令；
-        ///   4. Handoff 分支临时插入的身份边界提示与任务提示。
-        /// 这些内容一旦不入库，后续从 <c>_entries</c> 重建历史的链路（记忆提取、总结等子任务）
-        /// 以及会话持久化/重启恢复都会看到一份「缺了几条」的历史，
-        /// 既可能丢失上下文，也会让前缀缓存从缺失点断裂。
+        ///   4. Agent 专属行为指令（末尾 system）。
+        /// 这些一旦不入库，从 <c>_entries</c> 重建历史的链路（子任务、会话持久化、重启恢复）
+        /// 就会看到一份「缺了几条」的历史：既丢上下文，也让前缀缓存从缺失点断裂。
         ///
         /// ── 对账算法 ──
         /// 以「角色 + 内容（assistant 另比 tool_calls id 集合、tool 另比 tool_call_id）」做
-        /// 贪心顺序匹配：从上次对账位置起扫描 <c>_entries</c>，为每条已发出消息找到匹配条目即前移；
-        /// 找不到匹配的即为脱节消息，按其在请求中的相对位置补写为新条目（沿用当前轮次，不新增轮次）。
+        /// 贪心顺序匹配：为每条已发出消息找到匹配条目即前移；找不到匹配的即为脱节消息，补写为新条目。
         /// 结构性前缀（稳定 system / 动态块）不参与条目匹配，天然被跳过。
         ///
         /// 幂等：同一条消息重复对账不会重复写入（第二次会匹配到已补写的条目）。
         /// </summary>
         /// <param name="sentMessages">实际发送给 API 的消息列表（清洗后的最终版本）。</param>
-        /// <param name="replayNewMessages">
-        /// 补写的 user/assistant/tool 条目是否参与后续请求重放。
-        /// 主对话传 true（当前 user / assistant / tool 是真实会话内容，必须重放）；
-        /// 子任务尾提示（记忆判断、总结润色）传 false —— 它们是一次性脚手架，只登记不重放。
-        /// 无论取何值，system 角色的补写条目一律只登记不重放：
-        /// 这类消息（Agent 行为指令、路由边界、volatile 快照）每次请求都会重新生成。
-        /// </param>
         /// <returns>补写的条目数。</returns>
-        public int SyncSentMessagesToHistory(IReadOnlyList<ChatApiMessage>? sentMessages, bool replayNewMessages = true)
+        public int SyncSentMessagesToHistory(IReadOnlyList<ChatApiMessage>? sentMessages)
         {
             if (sentMessages == null || sentMessages.Count == 0)
                 return 0;
@@ -892,6 +883,19 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             // 当前轮次：补写条目归属最近一条真实 user 的轮次，避免凭空造轮
             int currentTurn = CurrentTurnIndex;
 
+            // 最后一条 user 的位置：用于区分「历史内容」与「请求尾部提示」。
+            // 尾部 system（Agent 行为指令、路由边界）在每次请求都会重新生成，
+            // 若参与重放会随请求数无限累积，故只登记不重放。
+            int lastUserSentIndex = -1;
+            for (int i = sentMessages.Count - 1; i >= 0; i--)
+            {
+                if (string.Equals(sentMessages[i]?.Role, "user", StringComparison.Ordinal))
+                {
+                    lastUserSentIndex = i;
+                    break;
+                }
+            }
+
             for (int i = structuralSkip; i < sentMessages.Count; i++)
             {
                 var msg = sentMessages[i];
@@ -914,10 +918,15 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                     continue;
                 }
 
-                // ── 未匹配 → 该消息是「发出但未落库」的脱节内容，补写 ──
-                //     user（如 Handoff 任务提示、Edit 步骤提示）归属当前轮次，不新开轮次；
-                //     system 标为不重放：它们由请求构建器按需重新生成，重放会重复叠加。
-                bool replay = replayNewMessages && msg.Role != "system";
+                // ── 未匹配 → 主流程脱节内容，补写（不变量：主流程消息一条都不能缺）──
+                //     · user（Handoff 任务提示、Edit 步骤提示）归属当前轮次，不新开轮次；
+                //     · volatile 快照（当前解决方案 + Git/IDE）参与重放，并标记 IsVolatileSnapshot，
+                //       使 PersistCurrentVolatileSnapshot 的同轮幂等判断能识别它、不再重复固化；
+                //     · 尾部 system（Agent 行为指令、路由边界）只登记不重放：
+                //       它们每次请求都会在尾部重新生成，重放会随请求数无限累积。
+                bool isTailSystem = string.Equals(msg.Role, "system", StringComparison.Ordinal)
+                    && i > lastUserSentIndex;
+                bool isVolatile = IsVolatileSnapshotContent(msg.Content);
 
                 _entries.Add(CreateEntry(
                     Role: msg.Role,
@@ -928,8 +937,9 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                     HasToolCalls: msg.ToolCalls is { Count: > 0 },
                     ToolCallId: msg.ToolCallId,
                     Name: msg.Name,
-                    TurnIndex: msg.Role == "user" ? currentTurn : currentTurn,
-                    Replay: replay));
+                    TurnIndex: currentTurn,
+                    IsVolatileSnapshot: isVolatile,
+                    Replay: !isTailSystem));
 
                 cursor = _entries.Count;
                 if (_cacheSnapshotEntryIndex.HasValue)
@@ -941,10 +951,30 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             if (appended > 0)
             {
                 _estimatedTokens = RecalculateEstimatedTokens();
-                Logger.Info($"[ContextManager] 发送内容对账：补写 {appended} 条脱节消息进 _entries（当前 {MessageCount} 条 / {TurnCount} 轮）");
+                Logger.Info($"[ContextManager] 主流程对账：补写 {appended} 条脱节消息进 _entries（当前 {MessageCount} 条 / {TurnCount} 轮）");
             }
 
             return appended;
+        }
+
+        /// <summary>
+        /// 判断给定文本是否为「volatile 上下文快照」（当前解决方案 + IDE/Git 等易变块）。
+        /// 这类内容每轮由 <see cref="PersistCurrentVolatileSnapshot"/> 重新固化，
+        /// 若把已固化的那份再参与重放，同一块会在历史里叠成两份。
+        /// </summary>
+        private static bool IsVolatileSnapshotContent(string? content)
+        {
+            if (string.IsNullOrWhiteSpace(content))
+                return false;
+
+            // 易变块以「[当前解决方案: 」或「[Git Context]」开头（见 BuildVolatileContextBlock 的拼装顺序）
+            string solutionLabel = LocalizationService.Instance["system.contextSolutionLabel"];
+            string prefix = string.IsNullOrWhiteSpace(solutionLabel)
+                ? "[当前解决方案"
+                : solutionLabel.Split('{')[0];
+
+            return (!string.IsNullOrEmpty(prefix) && content.StartsWith(prefix, StringComparison.Ordinal))
+                || content.StartsWith("[Git Context]", StringComparison.Ordinal);
         }
 
         /// <summary>

@@ -1668,10 +1668,13 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 // toolChoice:"auto" + 只读白名单：与主对话保持同一 tool_choice，避免因该字段变化
                 // 击穿 DeepSeek Prefix Cache。完整上下文含工具调用记录，模型可能模仿历史发起工具
                 // 调用；此处走只读工具循环而非单次调用，误调用可在白名单内正常收尾，而非静默返回空。
+                // 子任务：persistToHistory=false —— 记忆判定的提示词与返回结果都不属于主流程对话，
+                // 绝不能进入 _entries，否则下一轮请求会把「记忆管理助手」的问答当成本轮内容。
                 var rawResponse = await _activeAgent.CallAiWithReadOnlyToolLoopAsync(
                     messages, CancellationToken.None,
                     reminderAfterFirstToolRound: LocalizationService.Instance["agent.memoryAutoRecordNoMoreToolsAfterToolRound"],
-                    responseFormat: "json_object", temperature: 0.0);
+                    responseFormat: "json_object", temperature: 0.0,
+                    persistToHistory: false);
 
                 if (string.IsNullOrWhiteSpace(rawResponse))
                 {
