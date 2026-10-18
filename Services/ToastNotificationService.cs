@@ -75,16 +75,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         }
 
         /// <summary>
-        /// 异步发送 Toast 通知。
-        /// </summary>
-        /// <param name="title">通知标题</param>
-        /// <param name="message">通知正文</param>
-        public Task ShowAsync(string title, string message)
-        {
-            return Task.Run(() => Show(title, message));
-        }
-
-        /// <summary>
         /// 同步发送 Toast 通知（在 UI 线程调用）。
         /// </summary>
         public void Show(string title, string message)
@@ -149,57 +139,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             lock (_activeToasts)
             {
                 _activeToasts.Remove(sender);
-            }
-        }
-
-        /// <summary>
-        /// 发送带进度条的 Toast 通知（用于长时间操作）。
-        /// </summary>
-        public void ShowProgress(string title, string message, string progressStatus, double progressValue)
-        {
-            if (!_initialized)
-                Initialize();
-
-            if (!_supported)
-                return;
-
-            try
-            {
-                var template = Windows.UI.Notifications.ToastNotificationManager.GetTemplateContent(
-                    Windows.UI.Notifications.ToastTemplateType.ToastText03);
-
-                var textNodes = template.GetElementsByTagName("text");
-                textNodes[0].AppendChild(template.CreateTextNode(title ?? ""));
-                textNodes[1].AppendChild(template.CreateTextNode(message ?? ""));
-                textNodes[2].AppendChild(template.CreateTextNode(progressStatus ?? ""));
-
-                // 添加进度条
-                var toastElement = template.DocumentElement;
-                var progressNode = template.CreateElement("progress");
-                progressNode.SetAttribute("title", progressStatus ?? "进度");
-                progressNode.SetAttribute("value", progressValue.ToString("F2"));
-                progressNode.SetAttribute("status", progressStatus ?? "");
-                toastElement.AppendChild(progressNode);
-
-                var toast = new Windows.UI.Notifications.ToastNotification(template);
-
-                // ── 点击通知时触发回调 ──
-                toast.Activated += OnToastActivated;
-                toast.Dismissed += OnToastDismissed;
-
-                lock (_activeToasts)
-                {
-                    _activeToasts.Add(toast);
-                }
-
-                var notifier = Windows.UI.Notifications.ToastNotificationManager.CreateToastNotifier(AppId);
-                notifier.Show(toast);
-
-                Logger.Debug($"[Toast] 进度通知已发送: {title} ({progressValue:P0})");
-            }
-            catch (Exception ex)
-            {
-                Logger.Warn($"[Toast] 发送进度通知失败: {ex.Message}");
             }
         }
 

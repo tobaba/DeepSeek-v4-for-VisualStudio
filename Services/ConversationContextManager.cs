@@ -115,9 +115,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// <summary>当前使用的模型标识（用于裁剪器的大上下文模型检测）</summary>
         public string CurrentModel { get; set; } = "deepseek-v4";
 
-        /// <summary>完整工具结果存储（按 tool_call_id 索引，保留原始结果备查）</summary>
-        private readonly Dictionary<string, string> _fullToolResultStore = new();
-
         /// <summary>Token 预算上限（默认 900K，DeepSeek 上下文窗口为 1M，留 100K 给输出）</summary>
         public int TokenBudget { get; set; } = 900_000;
 
@@ -220,53 +217,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
 
         /// <summary>获取当前上下文中 assistant 消息携带的工具调用总次数</summary>
         public int ToolCallCount => _entries.Sum(e => e.ToolCalls?.Count ?? 0);
-
-        /// <summary>
-        /// 从指定起始索引开始，将 _entries 转换为 ChatApiMessage 列表（不含 SP/FP/DB 前缀）。
-        /// 用于子代理（Explore）执行后将内部工具循环消息回注到父代理消息列表。
-        /// </summary>
-        /// <param name="startIndex">起始索引（含）</param>
-        /// <param name="endIndex">结束索引（不含），默认到末尾</param>
-        public List<ChatApiMessage> GetEntryMessages(int startIndex, int endIndex = -1)
-        {
-            int end = endIndex < 0 ? _entries.Count : Math.Min(endIndex, _entries.Count);
-            var result = new List<ChatApiMessage>();
-            for (int i = startIndex; i < end; i++)
-            {
-                var entry = _entries[i];
-                if (string.IsNullOrEmpty(entry.Content)
-                    && (entry.ToolCalls == null || entry.ToolCalls.Count == 0)
-                    && (entry.MultimodalContent == null || entry.MultimodalContent.Count == 0))
-                    continue;
-
-                var apiMsg = new ChatApiMessage
-                {
-                    Role = entry.Role,
-                    Content = entry.Content,
-                    MultimodalContent = CloneContentParts(entry.MultimodalContent),
-                };
-
-                //  序列化保真度：原样复制 ReasoningContent（null 保持 null），
-                //     不使用 ?? string.Empty 兜底。JsonIgnoreCondition.WhenWritingNull
-                //     会省略 null 但序列化 "" → JSON 字节不同 → 前缀缓存断裂。
-                if (entry.Role == "assistant" && entry.HasToolCalls)
-                    apiMsg.ReasoningContent = ReasoningTextPolicy.ClampStored(entry.ReasoningContent);
-
-                if (entry.Role == "assistant" && entry.ToolCalls != null && entry.ToolCalls.Count > 0)
-                    apiMsg.ToolCalls = entry.ToolCalls;
-
-                if (entry.Role == "tool")
-                {
-                    if (!string.IsNullOrEmpty(entry.ToolCallId))
-                        apiMsg.ToolCallId = entry.ToolCallId;
-                    if (!string.IsNullOrEmpty(entry.Name))
-                        apiMsg.Name = entry.Name;
-                }
-
-                result.Add(apiMsg);
-            }
-            return result;
-        }
 
         /// <summary>获取校准后的估算 Token 数（= 原始估算 × 校准系数）</summary>
         public int EstimatedTokens => (int)(_estimatedTokens * _calibrationFactor);
@@ -586,15 +536,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         }
 
         /// <summary>
-        /// 获取完整未裁剪的工具结果（按 tool_call_id）。
-        /// </summary>
-        public string? GetFullToolResult(string toolCallId)
-        {
-            _fullToolResultStore.TryGetValue(toolCallId, out string? result);
-            return result;
-        }
-
-        /// <summary>
         /// 冻结系统提示词为不可变前缀。
         /// 应在会话初始化时调用一次。冻结后整个会话期间不应再调用 SetSystemPrompt()。
         /// 
@@ -781,15 +722,9 @@ namespace DeepSeek_v4_for_VisualStudio.Services
 
         /// <summary>
         /// 添加工具调用结果（tool 角色消息）。
-        /// 自动裁剪过长结果以保护上下文窗口。
-        /// 完整结果保留在独立存储中备查。
         /// </summary>
         public void AddToolResult(string toolCallId, string toolName, string result)
         {
-            // 保存原始完整结果
-            if (!string.IsNullOrEmpty(toolCallId) && !string.IsNullOrEmpty(result))
-                _fullToolResultStore[toolCallId] = result;
-
             _entries.Add(CreateEntry(
                 Role: "tool",
                 Content: result,
@@ -1082,21 +1017,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// 克隆工具调用列表，避免调用方（Provider 侧快照）与内部历史共享可变对象。
         /// </summary>
         private static List<ToolCall>? CloneToolCalls(List<ToolCall>? toolCalls)
-        {
-            if (toolCalls == null || toolCalls.Count == 0)
-                return null;
-
-            return toolCalls.Select(tc => new ToolCall
-            {
-                Id = tc.Id,
-                Type = tc.Type,
-                Function = new ToolCallFunction
-                {
-                    Name = tc.Function?.Name,
-                    Arguments = tc.Function?.Arguments,
-                }
-            }).ToList();
-        }
+            => ChatMessageCloner.CloneToolCalls(toolCalls);
 
         /// <summary>
         /// 判断当前轮次（最近一条真实 user 所在轮）是否已存在内容与 <paramref name="volatileBlock"/>
@@ -2188,27 +2109,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         }
 
         private static List<ChatContentPart>? CloneContentParts(List<ChatContentPart>? parts)
-        {
-            if (parts == null || parts.Count == 0)
-                return null;
-
-            return parts.Select(p => new ChatContentPart
-            {
-                Type = p.Type,
-                Text = p.Text,
-                ImageUrl = p.ImageUrl == null
-                    ? null
-                    : new ChatImageUrl { Url = p.ImageUrl.Url, Detail = p.ImageUrl.Detail },
-                File = p.File == null
-                    ? null
-                    : new ChatFilePart
-                    {
-                        FileId = p.File.FileId,
-                        FileData = p.File.FileData,
-                        Filename = p.File.Filename,
-                    },
-            }).ToList();
-        }
+            => ChatMessageCloner.CloneContentParts(parts);
 
         /// <summary>
         /// 当估算 Token 超过预算时，自动修剪最旧的轮次（旧行为，无压缩服务时使用）。
@@ -2329,15 +2230,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                         $"newFactor={_calibrationFactor:F3}");
         }
 
-        /// <summary>
-        /// 重置校准去重标记。会话切换/清空上下文后调用，避免新会话的首个
-        /// usage 与上一会话末次值相同而被误判为重复上报。
-        /// </summary>
-        internal void ResetCalibrationDedup()
-        {
-            _lastCalibratedPromptTokens = 0;
-        }
-
         #endregion
 
         #region Core API — 查询与序列化
@@ -2383,16 +2275,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                     Content = e.Content,
                     MultimodalContent = CloneContentParts(e.MultimodalContent),
                     ReasoningContent = ReasoningTextPolicy.ClampStored(e.ReasoningContent),
-                    ToolCalls = e.ToolCalls?.Select(tc => new ToolCall
-                    {
-                        Id = tc.Id,
-                        Type = tc.Type,
-                        Function = new ToolCallFunction
-                        {
-                            Name = tc.Function.Name,
-                            Arguments = tc.Function.Arguments,
-                        }
-                    }).ToList(),
+                    ToolCalls = CloneToolCalls(e.ToolCalls),
                     ToolCallId = e.ToolCallId,
                     Name = e.Name,
                 })
@@ -2491,7 +2374,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         {
             _entries.Clear();
             _estimatedTokens = 0;
-            _fullToolResultStore.Clear();
             _compressor?.Clear();
             _pendingCompressedSummaries.Clear();
             _cacheSnapshotEntryIndex = null;

@@ -176,19 +176,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         }
 
         /// <summary>
-        /// 清除 RAG 结果缓存。在会话切换或用户显式要求刷新时调用。
-        /// </summary>
-        public void InvalidateCache()
-        {
-            if (_lastQuery != null)
-            {
-                Logger.Info("[RagService]  RAG 缓存已清除");
-                _lastQuery = null;
-                _lastContext = null;
-            }
-        }
-
-        /// <summary>
         /// 计算两个查询的词汇相似度（基于字符 3-gram 的 Jaccard 系数）。
         /// 对于相同话题的连续追问（如 "这段代码有什么问题？" → "那个变量呢？"），
         /// 相似度可能较低；但对于同一文件的重读等场景，查询高度重叠。

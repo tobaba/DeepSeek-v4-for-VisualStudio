@@ -173,26 +173,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         }
 
         /// <summary>
-        /// 注册待处理 Proposal（文件不在编辑器中打开时）。
-        /// 当用户稍后打开文件时，通过 <see cref="TryActivatePending"/> 自动激活。
-        /// </summary>
-        public void RegisterPending(PreparedChangeSet change)
-        {
-            if (change == null) throw new ArgumentNullException(nameof(change));
-            if (string.IsNullOrWhiteSpace(change.FilePath)) return;
-
-            var normalizedPath = Path.GetFullPath(change.FilePath);
-
-            lock (_lock)
-            {
-                _pendingByPath[normalizedPath] = change;
-            }
-
-            SessionCountChanged?.Invoke(this, EventArgs.Empty);
-            Logger.Info($"[SessionManager] 待处理 Proposal 已注册: {Path.GetFileName(normalizedPath)}");
-        }
-
-        /// <summary>
         /// 当文件在编辑器中打开时，检查是否有待处理 Proposal 并激活。
         /// </summary>
         public bool TryActivatePending(IWpfTextView textView)

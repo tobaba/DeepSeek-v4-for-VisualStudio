@@ -204,24 +204,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             }
         }
 
-        /// <summary>
-        /// 刷新所有服务器的工具列表
-        /// </summary>
-        public async Task RefreshAllToolsAsync(CancellationToken cancellationToken = default)
-        {
-            foreach (var client in _clients)
-            {
-                try
-                {
-                    await client.RefreshToolsAsync(cancellationToken);
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error($"[MCP] 刷新 '{client.ServerName}' 工具列表失败: {ex.Message}");
-                }
-            }
-        }
-
         #region 格式转换帮助方法
 
         /// <summary>

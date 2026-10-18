@@ -493,9 +493,6 @@ namespace DeepSeek_v4_for_VisualStudio.View
         /// <summary>最近一次 Agent 执行的 Handoff（用于 UI 渲染"开始实现"按钮）</summary>
         private Models.AgentHandoff? _pendingHandoff;
 
-        // ── Agent 流式日志面板 ID（会话级，不依赖 PlanId）──
-        private string _agentLogPanelId = "session";
-
         // ── 已创建的计划 ID 集合（防止重复创建计划消息）──
         private readonly HashSet<string> _createdPlanIds = new();
         private readonly HashSet<string> _presentedQuestionRequests = new();

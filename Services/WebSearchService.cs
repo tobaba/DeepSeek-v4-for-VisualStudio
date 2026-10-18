@@ -466,20 +466,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         }
 
         /// <summary>
-        /// 从指定 URL 抓取网页内容并提取纯文本。
-        /// 用于增强搜索结果的上下文信息。
-        /// 这是"尽力而为"的操作，失败时返回 null 不影响主流程。
-        /// </summary>
-        /// <param name="url">网页 URL</param>
-        /// <param name="ct">取消令牌</param>
-        /// <returns>提取的纯文本内容，失败返回 null</returns>
-        public async Task<string?> FetchWebPageContentAsync(string url, CancellationToken ct = default)
-        {
-            var page = await FetchWebPageContentWithImagesAsync(url, ct);
-            return page?.Text;
-        }
-
-        /// <summary>
         /// 从指定 URL 抓取网页内容，同时提取纯文本、该页内图片与子链接的绝对 URL。
         /// 图片 URL 供视觉模型直读（只传 http(s) 链接，不下载、不转 base64），
         /// 子链接供 fetch_webpage 递归抓取。

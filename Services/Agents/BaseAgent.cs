@@ -344,11 +344,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             return AiPrompts.SharedImmutablePrefix;
         }
 
-        /// <summary>
-        /// 兼容旧代码：首次访问时返回当前语言的前缀。
-        /// </summary>
-        protected static string CommonSystemPromptPrefix => GetCommonSystemPromptPrefix();
-
         /// <summary>Agent 元数据定义</summary>
         public AgentDefinition Definition { get; protected set; }
 
@@ -757,28 +752,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         /// 深拷贝 ChatApiMessage 列表，避免 Handoff 后目标 Agent 修改复制列表时影响源快照。
         /// </summary>
         protected static List<ChatApiMessage> CloneApiMessages(IEnumerable<ChatApiMessage> messages)
-        {
-            return messages.Select(m => new ChatApiMessage
-            {
-                Role = m.Role,
-                Content = m.Content,
-                MultimodalContent = m.MultimodalContent,
-                ReasoningContent = m.ReasoningContent,
-                ToolCalls = m.ToolCalls?
-                    .Select(tc => new ToolCall
-                    {
-                        Id = tc.Id,
-                        Type = tc.Type,
-                        Function = new ToolCallFunction
-                        {
-                            Name = tc.Function?.Name,
-                            Arguments = tc.Function?.Arguments,
-                        }
-                    }).ToList(),
-                ToolCallId = m.ToolCallId,
-                Name = m.Name,
-            }).ToList();
-        }
+            => ChatMessageCloner.CloneAll(messages);
 
         /// <summary>
         /// 构建上下文感知的消息列表，将 Agent 的 system prompt 与对话历史合并。
@@ -3060,58 +3034,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         }
 
         /// <summary>
-        /// 从对话历史中提取 runSubagent 工具调用结果，用于 Handoff 时传递给目标 Agent。
-        /// 去重并按内容截断（~8KB），避免目标 Agent 因 maxRecentTurns 限制丢失探索上下文。
-        /// </summary>
-        private static string ExtractRunSubagentResults(List<ChatApiMessage> conversationHistory)
-        {
-            if (conversationHistory == null || conversationHistory.Count == 0)
-                return string.Empty;
-
-            var seenHashes = new HashSet<string>();
-            var sb = new StringBuilder();
-            const int maxBytes = 8192;
-
-            foreach (var msg in conversationHistory)
-            {
-                if (msg.Role == "tool"
-                    && string.Equals(msg.Name, "runSubagent", StringComparison.OrdinalIgnoreCase)
-                    && !string.IsNullOrWhiteSpace(msg.Content))
-                {
-                    // 去重：相同内容的 tool 结果只保留一份
-                    string hash = ComputeSimpleHash(msg.Content!);
-                    if (!seenHashes.Add(hash))
-                        continue;
-
-                    if (sb.Length > 0)
-                        sb.AppendLine("\n---\n");
-                    sb.AppendLine(msg.Content!.Truncate(2048));
-
-                    // 截断保护
-                    if (sb.Length > maxBytes)
-                    {
-                        sb.AppendLine(LocalizationService.Instance["agent.exploreResultTruncated"]);
-                        break;
-                    }
-                }
-            }
-
-            return sb.ToString().Trim();
-        }
-
-        /// <summary>
-        /// 简单哈希：用于 runSubagent 结果去重（不要求密码学强度）。
-        /// </summary>
-        private static string ComputeSimpleHash(string text)
-        {
-            if (string.IsNullOrEmpty(text)) return string.Empty;
-            int hash = 17;
-            foreach (char c in text)
-                hash = hash * 31 + c;
-            return hash.ToString("X8");
-        }
-
-        /// <summary>
         /// 将 HandoffRequest（AI 通过 request_handoff 工具发起的 JSON 移交）
         /// 转换为 AgentHandoff（供 UI 层使用的移交格式）。
         /// </summary>
@@ -3255,51 +3177,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         }
 
         /// <summary>
-        /// 按 Markdown 章节边界截断 plan.md，在 ~maxChars 附近最近的 ## 标题前干净切断。
-        /// 避免在段落中间截断导致内容不完整。
-        /// </summary>
-        private static string TruncatePlanMdBySection(string planMd, int maxChars)
-        {
-            if (planMd.Length <= maxChars)
-                return planMd;
-
-            // 收集所有 ## 标题的位置（行首 ## ，前无更高级别 #）
-            var sectionStarts = new List<int>();
-            var lines = planMd.Split('\n');
-            int charPos = 0;
-            foreach (var line in lines)
-            {
-                string trimmed = line.TrimStart();
-                // 匹配 ## 或 ### 标题（但不匹配 # 一级标题，保留它）
-                if (trimmed.StartsWith("##") && !trimmed.StartsWith("###"))
-                {
-                    sectionStarts.Add(charPos);
-                }
-                charPos += line.Length + 1; // +1 for \n
-            }
-
-            // 从后往前找第一个在 maxChars 之前的 ## 边界
-            int cutPos = maxChars;
-            for (int i = sectionStarts.Count - 1; i >= 0; i--)
-            {
-                if (sectionStarts[i] < maxChars)
-                {
-                    cutPos = sectionStarts[i];
-                    break;
-                }
-            }
-
-            // 如果第一个 ## 都在 maxChars 之后，就用纯字符截断（只有开头概述，没有章节标题）
-            string truncated = planMd.Substring(0, cutPos).TrimEnd();
-            int keptSections = sectionStarts.Count(s => s < cutPos);
-            string note = keptSections > 0
-                ? $"\n\n... (已截断，保留了前 {keptSections} 个章节。后续步骤详情请参阅上方结构化步骤列表)"
-                : "\n\n... (已截断。各步骤详情请参阅上方结构化步骤列表)";
-
-            return truncated + note;
-        }
-
-        /// <summary>
         /// 清理消息列表中不完整的工具调用链。
         /// 与 ChatStreamAsync Rule 5 使用相同算法：对每个 assistant(tool_calls)，
         /// 向前扫描匹配的 tool 结果；遇到非 tool 消息停止。
@@ -3311,16 +3188,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         internal static List<ChatApiMessage> CleanIncompleteToolChains(List<ChatApiMessage> messages)
         {
             // 浅克隆避免修改原始消息（与 ChatStreamAsync 保持一致）
-            var result = messages.Select(m => new ChatApiMessage
-            {
-                Role = m.Role,
-                Content = m.Content,
-                MultimodalContent = m.MultimodalContent,
-                ReasoningContent = m.ReasoningContent,
-                ToolCalls = m.ToolCalls,
-                ToolCallId = m.ToolCallId,
-                Name = m.Name,
-            }).ToList();
+            var result = ChatMessageCloner.CloneAll(messages);
 
             int strippedCount = 0;
             for (int i = 0; i < result.Count; i++)
@@ -4610,59 +4478,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                 BriefDescription = System.IO.Path.GetFileName(filePath)
                     + (System.IO.File.Exists(filePath) ? " (修改)" : " (新建)"),
             });
-        }
-
-        /// <summary>
-        /// 从 AI 返回结果中解析待删除的文件（delete: 格式）。
-        /// 支持格式:
-        ///   delete: path/to/file.cs
-        ///   delete_file: path/to/file.cs
-        ///   ```delete: path/to/file.cs```
-        /// </summary>
-        protected static List<string> ParseFileDeletionsFromResult(string aiResult)
-        {
-            var deletions = new List<string>();
-            if (string.IsNullOrWhiteSpace(aiResult)) return deletions;
-
-            // 严格匹配：仅匹配行首的 delete: 或 delete_file: 格式
-            // 要求路径包含文件扩展名（如 .cs/.cpp），排除代码块内的 delete 关键字误匹配
-            var regex = new System.Text.RegularExpressions.Regex(
-                @"(?<=^|\n)\s*(?:delete|delete_file)\s*:\s*(?<path>[^\r\n`]+?\.[a-zA-Z0-9]+)\b",
-                System.Text.RegularExpressions.RegexOptions.Multiline | System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-
-            var matches = regex.Matches(aiResult);
-            foreach (System.Text.RegularExpressions.Match match in matches)
-            {
-                string filePath = match.Groups["path"].Value.Trim();
-                // 过滤：路径不能以 ``` 结尾（排除代码块标记）
-                if (string.IsNullOrWhiteSpace(filePath) || filePath.EndsWith("`"))
-                    continue;
-
-                // 过滤：路径不能在代码块内部
-                int matchPos = match.Index;
-                string textBefore = aiResult.Substring(0, Math.Min(matchPos, aiResult.Length));
-                int openFences = CountSubstring(textBefore, "```");
-                if (openFences % 2 != 0)
-                    continue;
-
-                deletions.Add(filePath);
-            }
-
-            return deletions;
-        }
-
-        /// <summary>
-        /// 统计子串出现次数。
-        /// </summary>
-        private static int CountSubstring(string text, string substring)
-        {
-            int count = 0, idx = 0;
-            while ((idx = text.IndexOf(substring, idx, StringComparison.Ordinal)) >= 0)
-            {
-                count++;
-                idx += substring.Length;
-            }
-            return count;
         }
 
         /// <summary>
