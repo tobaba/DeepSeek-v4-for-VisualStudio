@@ -885,6 +885,18 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 structuralSkip++;
             }
 
+            // ── 兜底：前缀已漂移时，跳过「起始处未匹配的 system」──
+            //     动态块内容在本轮内可能被重建（记忆刷新、语言守卫、压缩摘要、新用户消息落库），
+            //     于是发送列表里的那份与当前字段不再逐字相等。若把它当成脱节内容补写，
+            //     游标会跳到 _entries 末尾，导致其后所有历史消息都匹配不到而被整段复制
+            //     （线上 26/27：Ask 阶段 [3..15] 与 [21..33] 逐字节重复）。
+            //     system 前缀永远由字段重建，绝不作为历史补写。
+            while (structuralSkip < sentMessages.Count
+                && string.Equals(sentMessages[structuralSkip]?.Role, "system", StringComparison.Ordinal))
+            {
+                structuralSkip++;
+            }
+
             // 当前轮次：补写条目归属最近一条真实 user 的轮次，避免凭空造轮
             int currentTurn = CurrentTurnIndex;
 
