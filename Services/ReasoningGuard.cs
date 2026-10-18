@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using DeepSeek_v4_for_VisualStudio.Utils;
 
 namespace DeepSeek_v4_for_VisualStudio.Services
 {
@@ -250,27 +251,36 @@ namespace DeepSeek_v4_for_VisualStudio.Services
     }
 
     /// <summary>
-    /// Centralized bounds for reasoning text that is retained by the context, UI,
-    /// persistence, compression and retry paths.
+    /// Centralized bounds for reasoning text that is retained by the compression path.
     /// </summary>
+    /// <remarks>
+    /// 重要：<b>回传给 API 的 reasoning_content 绝不可截断</b>。
+    /// 官方文档（思考模式 / 工具调用）规定：携带 <c>tools</c> 的请求，后续所有请求必须
+    /// <b>完整回传</b> <c>reasoning_content</c>——即使该轮未实际进行工具调用；未正确回传会返回 400。
+    /// 因此存储与回传路径一律原样保留，<see cref="Clamp"/> 只服务于压缩摘要/重试这类
+    /// 本地用途，其插入的截断标记也绝不能出现在回传内容中。
+    /// </remarks>
     public static class ReasoningTextPolicy
     {
-        public const int StoredReasoningMaxChars = 32_000;
-        public const int HistoricalToolCallMaxChars = 4_000;
+        /// <summary>仅用于告警观测：超过该长度会记录一条警告，但不裁剪。</summary>
+        public const int OversizedWarnThreshold = 32_000;
+
         public const int CompressionReasoningMaxChars = 2_000;
-        public const int RetryReasoningMaxChars = 2_000;
 
-        public static string? ClampStored(string? text)
-            => Clamp(text, StoredReasoningMaxChars);
-
-        public static string? ClampHistoricalToolCall(string? text)
-            => Clamp(text, HistoricalToolCallMaxChars);
+        /// <summary>
+        /// 超长告警（不裁剪）。用于观察实际体量，避免悄悄改变回传内容。
+        /// </summary>
+        public static void WarnIfOversized(string? text)
+        {
+            if (!string.IsNullOrEmpty(text) && text.Length > OversizedWarnThreshold)
+            {
+                Logger.Warn($"[Reasoning] reasoning_content 长度 {text.Length} 超过告警阈值 " +
+                    $"{OversizedWarnThreshold}；为保证 API 完整回传不做裁剪。");
+            }
+        }
 
         public static string? ClampForCompression(string? text)
             => Clamp(text, CompressionReasoningMaxChars);
-
-        public static string? ClampForRetry(string? text)
-            => Clamp(text, RetryReasoningMaxChars);
 
         public static string? Clamp(string? text, int maxChars)
         {

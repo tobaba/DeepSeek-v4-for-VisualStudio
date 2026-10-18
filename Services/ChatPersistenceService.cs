@@ -103,7 +103,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                             Logger.Info($"[清理] 已移除 {removed} 个冗余空会话 ← {Path.GetFileName(filePath)}");
                     }
 
-                    NormalizeReasoningHistory(container);
                     MigrateLegacyDefaultTitles(container);
                     Logger.Info($"已加载 {container.Sessions.Count} 个会话 ← {Path.GetFileName(filePath)}");
                     return container;
@@ -351,31 +350,11 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         }
 
         /// <summary>
-        /// Applies current reasoning bounds to sessions written by older versions.
+        /// （已移除）历史版本曾在此按 <c>ReasoningTextPolicy</c> 的旧上限裁剪已落盘的
+        /// <c>reasoning_content</c>。该行为会破坏官方要求的「完整回传」：
+        /// 携带 tools 的请求在后续所有请求中必须完整回传 reasoning_content，否则 API 返回 400。
+        /// 因此加载时不再对已持久化的思考内容做任何裁剪。
         /// </summary>
-        private static void NormalizeReasoningHistory(SessionsContainer container)
-        {
-            if (container.Sessions == null)
-            {
-                container.Sessions = new List<ChatSession>();
-                return;
-            }
-
-            foreach (var session in container.Sessions)
-            {
-                if (session?.ApiHistory == null)
-                    continue;
-
-                foreach (var message in session.ApiHistory)
-                {
-                    if (message.Role != "assistant" || string.IsNullOrEmpty(message.ReasoningContent))
-                        continue;
-
-                    message.ReasoningContent = ReasoningTextPolicy.ClampStored(message.ReasoningContent);
-                }
-            }
-        }
-
         #endregion
     }
 }

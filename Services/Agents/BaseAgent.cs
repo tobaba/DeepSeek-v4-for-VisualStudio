@@ -1443,7 +1443,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
 
                         streamAttempt++;
                         savedPartialContent = contentBuilder.ToString();
-                        savedPartialReasoning = ReasoningTextPolicy.ClampForRetry(reasoningBuilder.ToString()) ?? string.Empty;
+                        savedPartialReasoning = reasoningBuilder.ToString();
                         double backoffSec = Math.Pow(2, streamAttempt);
                         Logger.Warn($"[Agent:{Definition.Name}] 流中断 (尝试 {streamAttempt}/{maxStreamAttempts})，已收到 {savedPartialContent.Length} 字符，{backoffSec}s 后恢复…");
                         metrics?.RecordStreamRetry();
@@ -1457,7 +1457,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                         // 超时（非用户取消）
                         streamAttempt++;
                         savedPartialContent = contentBuilder.ToString();
-                        savedPartialReasoning = ReasoningTextPolicy.ClampForRetry(reasoningBuilder.ToString()) ?? string.Empty;
+                        savedPartialReasoning = reasoningBuilder.ToString();
                         double backoffSec = Math.Pow(2, streamAttempt);
                         Logger.Warn($"[Agent:{Definition.Name}] 流超时 (尝试 {streamAttempt}/{maxStreamAttempts})，{backoffSec}s 后恢复…");
                         metrics?.RecordStreamRetry();
@@ -1479,7 +1479,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                         // SSE 读取超时（v1.1.10）：120s 无数据 → 流被 Dispose → ReadLineAsync 抛 ObjectDisposedException
                         streamAttempt++;
                         savedPartialContent = contentBuilder.ToString();
-                        savedPartialReasoning = ReasoningTextPolicy.ClampForRetry(reasoningBuilder.ToString()) ?? string.Empty;
+                        savedPartialReasoning = reasoningBuilder.ToString();
                         double backoffSec = Math.Pow(2, streamAttempt);
                         Logger.Warn($"[Agent:{Definition.Name}] SSE 流读取超时 (尝试 {streamAttempt}/{maxStreamAttempts})，已收到 {savedPartialContent.Length} 字符，{backoffSec}s 后恢复…");
                         metrics?.RecordStreamRetry();
@@ -1501,7 +1501,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                         // 网络错误导致的 IO 异常（非用户取消），尝试重试
                         streamAttempt++;
                         savedPartialContent = contentBuilder.ToString();
-                        savedPartialReasoning = ReasoningTextPolicy.ClampForRetry(reasoningBuilder.ToString()) ?? string.Empty;
+                        savedPartialReasoning = reasoningBuilder.ToString();
                         double backoffSec = Math.Pow(2, streamAttempt);
                         Logger.Warn($"[Agent:{Definition.Name}] 流网络错误 (尝试 {streamAttempt}/{maxStreamAttempts})，已收到 {savedPartialContent.Length} 字符，{backoffSec}s 后恢复…");
                         contentBuilder.Clear();
@@ -1513,7 +1513,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                     {
                         reasoningLoopRetryCount++;
                         savedPartialContent = contentBuilder.ToString();
-                        savedPartialReasoning = ReasoningTextPolicy.ClampForRetry(reasoningBuilder.ToString()) ?? string.Empty;
+                        savedPartialReasoning = reasoningBuilder.ToString();
                         contentBuilder.Clear();
                         reasoningBuilder.Clear();
                         toolCallAccumulator.Clear();
