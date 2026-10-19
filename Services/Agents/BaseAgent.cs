@@ -1194,6 +1194,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             // CurrentRound is only a cache-age offset and must not consume the
             // next request's safety budget.
             int round = 0;
+            // 本轮工具循环中直传图片的临时文件批次令牌；每次请求发送成功后清理。
+            var visionBatchTokens = new List<string>();
             int cacheRoundOffset = BuiltInTools?.CurrentRound ?? 0;
             int effectiveRoundLimit = ResolveEffectiveToolRoundLimit(
                 configuredSafetyLimit,
@@ -1431,6 +1433,12 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                         //   子任务调用（persistToHistory=false）不走这里。
                         if (persistToHistory)
                             SyncSentMessagesToHistory(sentMessages: messages);
+
+                        // ── 传输成功：删除本轮直传的临时图片文件 ──
+                        //   图片已转为 data URI 随请求发出，临时文件无需保留。
+                        foreach (string token in visionBatchTokens)
+                            VisionImageFetchService.CleanupBatch(token);
+                        visionBatchTokens.Clear();
                     }
                     catch (HttpRequestException ex) when (streamAttempt < maxStreamAttempts - 1)
                     {
@@ -1974,9 +1982,10 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                         string toolResult = toolResults[i];
 
                         // ── 视觉工具：剥离图片块，视觉模型时提取图片直传给视觉模型 ──
-                        // fetch_webpage 提取网页图片 URL；
+                        // fetch_webpage 提取网页图片 URL（**下载为 data URI** 后直传）；
                         // capture_window（窗口截图）/ capture_webpage（网页截图）/ read_file 提取本地图片 data URI。
                         List<string>? imageUrls = null;
+                        string? visionBatchToken = null;
                         string resultText = toolResult;
                         if (tc.Function.Name == "fetch_webpage")
                         {
@@ -1985,8 +1994,44 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                             if (fetchedImageUrls.Count > 0
                                 && _apiService.CurrentIsVision)
                             {
-                                // ── 过滤视觉模型不支持的图片格式（如 SVG），避免直传导致 HTTP 400 ──
-                                imageUrls = WebSearchService.FilterVisionImageUrls(fetchedImageUrls);
+                                // ── 过滤视觉模型不支持的图片格式（如 SVG），并按内容嗅探兜底 ──
+                                var filtered = WebSearchService.FilterVisionImageUrls(fetchedImageUrls);
+                                if (filtered is { Count: > 0 })
+                                {
+                                    // ── 关键修复 ──
+                                    // 过去把网页图片的**远程 URL** 直接作为 image_url 上传，由服务端自行下载；
+                                    // 服务端网络/代理与客户端不一致时会失败并返回不可重试的 HTTP 400
+                                    //（"An exception occurred while loading IMAGE data at index N"），
+                                    // 导致整轮对话直接中断。
+                                    // 现改为客户端下载 → data URI：服务端无需联网取图，从根上消除该类 400。
+                                    // 下载失败（超时/非 2xx/格式不符/超限）的图片被静默丢弃，绝不断整轮对话。
+                                    visionBatchToken = VisionImageFetchService.NewBatchToken();
+                                    List<string> dataUris = await VisionImageFetchService
+                                        .ToDataUrisAsync(
+                                            filtered,
+                                            httpClient: null,
+                                            visionBatchToken,
+                                            ct)
+                                        .ConfigureAwait(false);
+
+                                    if (dataUris.Count > 0)
+                                    {
+                                        imageUrls = dataUris;
+                                        visionBatchTokens.Add(visionBatchToken);
+                                        Logger.Info(
+                                            $"[Agent:{Definition.Name}] fetch_webpage 图片已下载为 data URI 直传: " +
+                                            $"{dataUris.Count}/{filtered.Count} 张（失败的图片已丢弃）");
+                                    }
+                                    else
+                                    {
+                                        // 全部图片下载失败：不留空批次目录，直接清理。
+                                        VisionImageFetchService.CleanupBatch(visionBatchToken);
+                                        visionBatchToken = null;
+                                        Logger.Info(
+                                            $"[Agent:{Definition.Name}] fetch_webpage 的 {filtered.Count} 张图片全部下载失败，" +
+                                            "已按纯文本继续（不打断对话）");
+                                    }
+                                }
                             }
                         }
                         else if (tc.Function.Name == "capture_window"

@@ -573,6 +573,21 @@ namespace DeepSeek_v4_for_VisualStudio
                 }
             });
 
+            // ── 视觉图片临时文件清扫（后台、非 UI 线程）──
+            // 视觉直传的图片会先落盘再转 data URI，传输成功后由 Agent 清理；
+            // 进程崩溃/异常退出可能留下残留批次，这里回收超过 6 小时的空闲批次。
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    Services.VisionImageFetchService.CleanupStaleBatches();
+                }
+                catch (Exception ex)
+                {
+                    DiagnosticLog.Write($"[VisionImage] startup sweep failed: {ex.Message}");
+                }
+            });
+
             // ── 自动恢复聊天窗口（标记门控）──
             // 仅当用户此前显式打开过聊天窗口（存在标记文件）时才随启动自动弹出；
             // 空白实例 / 从未使用过的实例不再强制走"加载持久化配置 + 创建窗口"链路。
