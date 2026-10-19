@@ -770,28 +770,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Providers
             }
 
             // ── 保存本次实际发送的消息快照，供 Handoff 复用 ──
-            LastSentMessages = request.Messages
-                .Select(m => new ChatApiMessage
-                {
-                    Role = m.Role,
-                    Content = m.Content,
-                    MultimodalContent = m.MultimodalContent,
-                    ReasoningContent = m.ReasoningContent,
-                    ToolCalls = m.ToolCalls?
-                        .Select(tc => new ToolCall
-                        {
-                            Id = tc.Id,
-                            Type = tc.Type,
-                            Function = new ToolCallFunction
-                            {
-                                Name = tc.Function?.Name,
-                                Arguments = tc.Function?.Arguments,
-                            }
-                        }).ToList(),
-                    ToolCallId = m.ToolCallId,
-                    Name = m.Name,
-                })
-                .ToList();
+            LastSentMessages = ChatMessageCloner.CloneAll(request.Messages);
 
             // ── 预序列化请求体，供重试时复用 ──
             var requestJson = JsonSerializer.Serialize(request, new JsonSerializerOptions
@@ -1232,7 +1211,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Providers
                     continue;
                 }
 
-                target.Add(CloneContentParts(new List<ChatContentPart> { part })[0]);
+                target.Add(ChatMessageCloner.CloneContentParts(new List<ChatContentPart> { part })![0]);
             }
         }
 
@@ -1245,26 +1224,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Providers
                 return;
             if (seenText.Add(text))
                 target.Add(TextContentPart(text));
-        }
-
-        private static List<ChatContentPart> CloneContentParts(List<ChatContentPart> parts)
-        {
-            return parts.Select(p => new ChatContentPart
-            {
-                Type = p.Type,
-                Text = p.Text,
-                ImageUrl = p.ImageUrl == null
-                    ? null
-                    : new ChatImageUrl { Url = p.ImageUrl.Url, Detail = p.ImageUrl.Detail },
-                File = p.File == null
-                    ? null
-                    : new ChatFilePart
-                    {
-                        FileId = p.File.FileId,
-                        FileData = p.File.FileData,
-                        Filename = p.File.Filename,
-                    },
-            }).ToList();
         }
 
         private static ChatContentPart TextContentPart(string text)
@@ -1282,25 +1241,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Providers
         /// 绝不污染调用方（ConversationContextManager）持有的消息实例。
         /// </summary>
         internal static ChatApiMessage CloneMessage(ChatApiMessage m)
-        {
-            return new ChatApiMessage
-            {
-                Role = m.Role,
-                Content = m.Content,
-                MultimodalContent = m.MultimodalContent == null ? null : new List<ChatContentPart>(m.MultimodalContent),
-                ReasoningContent = m.ReasoningContent,
-                ToolCalls = m.ToolCalls?.Select(tc => new ToolCall
-                {
-                    Id = tc.Id,
-                    Type = tc.Type,
-                    Function = tc.Function == null
-                        ? new ToolCallFunction()
-                        : new ToolCallFunction { Name = tc.Function.Name, Arguments = tc.Function.Arguments },
-                }).ToList(),
-                ToolCallId = m.ToolCallId,
-                Name = m.Name,
-            };
-        }
+            => ChatMessageCloner.Clone(m);
 
         /// <summary>
         /// 合并连续 assistant 消息的 ToolCalls，按 tool_call_id 去重。

@@ -88,42 +88,45 @@ public class ReasoningGuardTests
     }
 
     [Fact]
-    public void ClampStored_LongText_ReturnsBoundedHeadAndTail()
+    public void ClampForCompression_LongText_IsBoundedAndOnlyUsedOffWire()
     {
+        // Clamp/ClampForCompression 仅服务压缩摘要这类本地用途；
+        // 其插入的截断标记绝不能出现在回传给 API 的 reasoning_content 中
+        // （见 BuildApiMessages_* 系列测试与 TrimForDisplay 的移除原因）。
         string input = new string('a', 20_000) + "MIDDLE" + new string('z', 20_000);
 
-        string? result = ReasoningTextPolicy.ClampStored(input);
+        string? result = ReasoningTextPolicy.ClampForCompression(input);
 
         result.Should().NotBeNull();
-        result!.Length.Should().BeLessOrEqualTo(ReasoningTextPolicy.StoredReasoningMaxChars);
+        result!.Length.Should().BeLessOrEqualTo(ReasoningTextPolicy.CompressionReasoningMaxChars);
         result.Should().Contain("reasoning truncated");
-        result.Should().StartWith("a");
-        result.Should().EndWith("z");
     }
 
     [Fact]
-    public void AddAssistantMessage_LongReasoning_IsStoredBounded()
+    public void AddAssistantMessage_LongReasoning_IsStoredVerbatim()
     {
         var manager = new ConversationContextManager();
         manager.AddUserMessage("question");
 
-        manager.AddAssistantMessage("answer", new string('r', 60_000));
+        string longReasoning = new string('r', 60_000);
+        manager.AddAssistantMessage("answer", longReasoning);
 
         var history = manager.GetConversationHistory();
         var assistant = history.Single(message => message.Role == "assistant");
         assistant.ReasoningContent.Should().NotBeNull();
-        assistant.ReasoningContent!.Length.Should()
-            .BeLessOrEqualTo(ReasoningTextPolicy.StoredReasoningMaxChars);
+        // 存储阶段不裁剪：官方要求携带 tools 的请求必须完整回传 reasoning_content
+        assistant.ReasoningContent.Should().Be(longReasoning);
     }
 
     [Fact]
-    public void BuildApiMessages_HistoricalToolCallReasoning_IsCompacted()
+    public void BuildApiMessages_HistoricalToolCallReasoning_IsNotCompacted()
     {
         var manager = new ConversationContextManager();
         manager.AddUserMessage("first");
+        string longReasoning = new string('r', 40_000);
         manager.AddAssistantMessage(
             "calling tool",
-            new string('r', 40_000),
+            longReasoning,
             new List<ToolCall>
             {
                 new()
@@ -147,8 +150,48 @@ public class ReasoningGuardTests
             && message.ToolCalls != null
             && message.ToolCalls.Count > 0);
         historicalAssistant.ReasoningContent.Should().NotBeNull();
-        historicalAssistant.ReasoningContent!.Length.Should()
-            .BeLessOrEqualTo(ReasoningTextPolicy.HistoricalToolCallMaxChars);
+        // 历史轮次完整回传：既不受旧的 4_000 上限压缩，也不受存储上限压缩
+        historicalAssistant.ReasoningContent.Should().Be(longReasoning);
+        historicalAssistant.ReasoningContent.Should().NotContain("reasoning truncated");
+    }
+
+    /// <summary>
+    /// 关键回归防护：同一个条目在「当前轮」与「历史轮」两种状态下回传的 reasoning_content
+    /// 必须逐字节一致——否则 TurnCount 递增就会改写同一段历史，击穿 DeepSeek 前缀缓存。
+    /// </summary>
+    [Fact]
+    public void BuildApiMessages_CurrentVsHistoricalReasoning_AreByteIdentical()
+    {
+        var manager = new ConversationContextManager();
+        manager.AddUserMessage("first");
+        string reasoning = new string('r', 12_345);
+        manager.AddAssistantMessage(
+            "calling tool",
+            reasoning,
+            new List<ToolCall>
+            {
+                new()
+                {
+                    Id = "call_1",
+                    Type = "function",
+                    Function = new ToolCallFunction { Name = "read_file", Arguments = "{}" }
+                }
+            });
+
+        // 仍是当前轮（TurnIndex == TurnCount）
+        var asCurrentTurn = manager.BuildApiMessages()
+            .First(m => m.Role == "assistant" && m.ToolCalls != null)
+            .ReasoningContent;
+
+        manager.AddToolResult("call_1", "read_file", "ok");
+        manager.AddUserMessage("second"); // 开新一轮 → 上一条变历史轮
+
+        var asHistoricalTurn = manager.BuildApiMessages()
+            .First(m => m.Role == "assistant" && m.ToolCalls != null)
+            .ReasoningContent;
+
+        asCurrentTurn.Should().Be(reasoning);
+        asHistoricalTurn.Should().Be(asCurrentTurn);
     }
 
     [Fact]

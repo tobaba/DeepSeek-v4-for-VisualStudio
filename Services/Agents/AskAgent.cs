@@ -625,11 +625,14 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                 //    auto 与主对话保持同一 tool_choice，避免该字段变化击穿 DeepSeek Prefix Cache。
                 //    完整上下文含工具调用记录，模型可能模仿历史发起工具调用；此处改走工具循环而非
                 //    单次调用，让误调用能在只读白名单内正常收尾（读文件/搜索），而不是静默返回空。
+                //    子任务：persistToHistory=false —— 润色草稿与润色指令都不属于主流程对话，
+                //    落库会让下一轮请求带上一段无意义的"总结润色"问答。
                 string result = await CallAiWithReadOnlyToolLoopAsync(
                     messages,
                     ct,
                     reminderAfterFirstToolRound:
-                        LocalizationService.Instance["agent.summaryPolishNoMoreToolsAfterToolRound"]);
+                        LocalizationService.Instance["agent.summaryPolishNoMoreToolsAfterToolRound"],
+                    persistToHistory: false);
 
                 result = StripToolCallMarkers(result);
                 return result?.Trim() ?? string.Empty;

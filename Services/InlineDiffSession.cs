@@ -253,20 +253,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             Dispose();
         }
 
-        /// <summary>
-        /// 检查是否存在冲突（仅对已打开文档有效）。
-        /// </summary>
-        public bool HasConflict()
-        {
-            if (SourceBuffer == null || SourceBaselineSnapshot == null)
-                return false;
-
-            var currentSnapshot = SourceBuffer.CurrentSnapshot;
-            return currentSnapshot.Version.VersionNumber != SourceBaselineSnapshot.Version.VersionNumber
-                && !string.Equals(currentSnapshot.GetText(),
-                    SourceBaselineSnapshot.GetText(), StringComparison.Ordinal);
-        }
-
         #endregion
 
         #region IDisposable

@@ -111,46 +111,9 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// </summary>
         public static string MemoryInstructionsFragment => L["system.memoryInstructions"];
 
-        /// <summary>
-        /// Agent 路由分析 — 系统提示词。
-        /// </summary>
-        public static string AgentRoutingSystemPrompt => L["system.agentRoutingSystemPrompt"];
-
-        /// <summary>
-        /// Agent 路由分析 — 用户提示词模板。
-        /// {0} = 用户消息
-        /// </summary>
-        public static string AgentRoutingUserPrompt => L["system.agentRoutingUserPrompt"];
-
-        #endregion
-        #region Code Completion Prompts
-
-        /// <summary>
-        /// 代码补全 — 系统提示词。
-        /// </summary>
-        public static string CodeCompletionSystemPrompt => L["system.codeCompletionSystemPrompt"];
-
-        /// <summary>
-        /// 代码补全 — 用户提示词（有光标位置）。
-        /// {0} = 光标前的代码
-        /// {1} = 光标后的代码
-        /// </summary>
-        public static string CodeCompletionUserPromptWithCursor => L["system.codeCompletionUserPromptWithCursor"];
-
-        /// <summary>
-        /// 代码补全 — 用户提示词（追加模式，无光标位置）。
-        /// {0} = 上下文代码
-        /// </summary>
-        public static string CodeCompletionUserPromptAppend => L["system.codeCompletionUserPromptAppend"];
-
         #endregion
 
         #region Explore Agent Prompts
-
-        /// <summary>
-        /// 搜索关键词专家 — 系统提示词。
-        /// </summary>
-        public static string SearchKeywordsExpertSystemPrompt => L["system.searchKeywordsExpertSystemPrompt"];
 
         /// <summary>
         /// Explore Agent 搜索指令 — 注入到探索任务的末尾，指导 AI 如何系统性地搜索代码库。
@@ -322,23 +285,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         #endregion
 
         #region Helper Methods
-
-        /// <summary>
-        /// 获取格式化的 Skill 路由用户提示词。
-        /// </summary>
-        public static string BuildSkillRoutingPrompt(string skillSummary, string userQuestion)
-        {
-            return string.Format(SkillRoutingUserPrompt, skillSummary, userQuestion);
-        }
-
-        /// <summary>
-        /// 获取格式化的 Agent 路由用户提示词。
-        /// </summary>
-        public static string BuildAgentRoutingPrompt(string userMessage)
-        {
-            // 使用 Replace 代替 string.Format 以避免模板中的 JSON 大括号被误解析为格式项
-            return AgentRoutingUserPrompt.Replace("{0}", userMessage);
-        }
 
         /// <summary>
         /// 构建会话标题生成提示词（用户消息部分）。

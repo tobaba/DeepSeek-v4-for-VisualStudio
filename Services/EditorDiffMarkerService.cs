@@ -147,17 +147,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         }
 
         /// <summary>
-        /// 检查指定 buffer 是否有活跃的差异预览。
-        /// </summary>
-        public bool IsPreviewActive(ITextBuffer buffer)
-        {
-            lock (_windowsLock)
-            {
-                return _activeWindows.ContainsKey(buffer);
-            }
-        }
-
-        /// <summary>
         /// 新版 Inline Diff 预览（preview-then-commit）。
         /// 预览阶段不修改 sourceBuffer，用户确认后才通过 ProposalCommitCoordinator 提交。
         /// </summary>
@@ -276,11 +265,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         }
 
         /// <summary>
-        /// 获取活跃 Session 数量（新版）。
-        /// </summary>
-        public int GetActiveSessionCount() => _sessionManager.ActiveCount;
-
-        /// <summary>
         /// 获取差异预览的数量（旧版活跃窗口 + 新版 Session）。
         /// </summary>
         public int GetActiveCount()
@@ -300,17 +284,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             if (_sessionManager.TryGetSession(buffer, out var session))
                 return session;
             return null;
-        }
-
-        /// <summary>
-        /// 编辑器内嵌挂件：获取指定 buffer 当前待处理的差异块（含已撤销状态）。
-        /// </summary>
-        public IReadOnlyList<Models.DiffHunkInfo> GetHunksForBuffer(ITextBuffer buffer)
-        {
-            var session = GetActiveSessionForBuffer(buffer);
-            if (session?.Workspace == null)
-                return Array.Empty<Models.DiffHunkInfo>();
-            return session.Workspace.GetHunks(session.Change.FilePath);
         }
 
         /// <summary>
@@ -383,18 +356,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         #endregion
 
         #region Public API — Confirm / Undo
-
-        /// <summary>
-        /// 确认变更：关闭指定 buffer 的差异预览窗口。
-        /// （新代码已写入缓冲区，确认只是关闭预览）
-        /// </summary>
-        public void ConfirmChanges(ITextBuffer buffer)
-        {
-            ThreadHelper.ThrowIfNotOnUIThread();
-
-            CloseExistingWindow(buffer);
-            Logger.Info("[EditorDiff] 变更已确认");
-        }
 
         /// <summary>
         /// 撤销变更：回退缓冲区到原始代码，关闭预览窗口。
@@ -519,14 +480,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             {
                 return _pendingDiffs.Count;
             }
-        }
-
-        /// <summary>
-        /// 获取变更文件总数（活跃 + 待处理）。
-        /// </summary>
-        public int GetTotalChangeCount()
-        {
-            return GetActiveCount() + GetPendingCount();
         }
 
         #endregion

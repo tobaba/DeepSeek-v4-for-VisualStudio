@@ -1,4 +1,4 @@
-﻿using DeepSeek_v4_for_VisualStudio.Models;
+using DeepSeek_v4_for_VisualStudio.Models;
 using DeepSeek_v4_for_VisualStudio.Utils;
 using System;
 using System.Collections.Generic;
@@ -115,9 +115,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// <summary>当前使用的模型标识（用于裁剪器的大上下文模型检测）</summary>
         public string CurrentModel { get; set; } = "deepseek-v4";
 
-        /// <summary>完整工具结果存储（按 tool_call_id 索引，保留原始结果备查）</summary>
-        private readonly Dictionary<string, string> _fullToolResultStore = new();
-
         /// <summary>Token 预算上限（默认 900K，DeepSeek 上下文窗口为 1M，留 100K 给输出）</summary>
         public int TokenBudget { get; set; } = 900_000;
 
@@ -203,61 +200,23 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             _cachedDynamicBlock = null;
         }
 
-        /// <summary>获取当前对话轮次数（一个 user 消息 = 一轮）</summary>
-        public int TurnCount => _entries.Count(e => e.Role == "user");
+        /// <summary>获取当前对话轮次数（一个真实用户轮次 = 一轮）</summary>
+        /// <remarks>
+        /// 按「轮次序号去重」计数：同一轮内可能有多条 user 条目
+        /// （如 Handoff 任务提示、Edit 步骤提示，它们归属当前轮但不开启新轮），
+        /// 只有真实用户提问才会产生新的 TurnIndex。
+        /// </remarks>
+        public int TurnCount => _entries
+            .Where(e => e.Role == "user" && e.TurnIndex > 0)
+            .Select(e => e.TurnIndex)
+            .Distinct()
+            .Count();
 
         /// <summary>获取消息总条数</summary>
         public int MessageCount => _entries.Count;
 
         /// <summary>获取当前上下文中 assistant 消息携带的工具调用总次数</summary>
         public int ToolCallCount => _entries.Sum(e => e.ToolCalls?.Count ?? 0);
-
-        /// <summary>
-        /// 从指定起始索引开始，将 _entries 转换为 ChatApiMessage 列表（不含 SP/FP/DB 前缀）。
-        /// 用于子代理（Explore）执行后将内部工具循环消息回注到父代理消息列表。
-        /// </summary>
-        /// <param name="startIndex">起始索引（含）</param>
-        /// <param name="endIndex">结束索引（不含），默认到末尾</param>
-        public List<ChatApiMessage> GetEntryMessages(int startIndex, int endIndex = -1)
-        {
-            int end = endIndex < 0 ? _entries.Count : Math.Min(endIndex, _entries.Count);
-            var result = new List<ChatApiMessage>();
-            for (int i = startIndex; i < end; i++)
-            {
-                var entry = _entries[i];
-                if (string.IsNullOrEmpty(entry.Content)
-                    && (entry.ToolCalls == null || entry.ToolCalls.Count == 0)
-                    && (entry.MultimodalContent == null || entry.MultimodalContent.Count == 0))
-                    continue;
-
-                var apiMsg = new ChatApiMessage
-                {
-                    Role = entry.Role,
-                    Content = entry.Content,
-                    MultimodalContent = CloneContentParts(entry.MultimodalContent),
-                };
-
-                //  序列化保真度：原样复制 ReasoningContent（null 保持 null），
-                //     不使用 ?? string.Empty 兜底。JsonIgnoreCondition.WhenWritingNull
-                //     会省略 null 但序列化 "" → JSON 字节不同 → 前缀缓存断裂。
-                if (entry.Role == "assistant" && entry.HasToolCalls)
-                    apiMsg.ReasoningContent = ReasoningTextPolicy.ClampStored(entry.ReasoningContent);
-
-                if (entry.Role == "assistant" && entry.ToolCalls != null && entry.ToolCalls.Count > 0)
-                    apiMsg.ToolCalls = entry.ToolCalls;
-
-                if (entry.Role == "tool")
-                {
-                    if (!string.IsNullOrEmpty(entry.ToolCallId))
-                        apiMsg.ToolCallId = entry.ToolCallId;
-                    if (!string.IsNullOrEmpty(entry.Name))
-                        apiMsg.Name = entry.Name;
-                }
-
-                result.Add(apiMsg);
-            }
-            return result;
-        }
 
         /// <summary>获取校准后的估算 Token 数（= 原始估算 × 校准系数）</summary>
         public int EstimatedTokens => (int)(_estimatedTokens * _calibrationFactor);
@@ -480,7 +439,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             string? ToolCallId = null,
             string? Name = null,
             int TurnIndex = -1,
-            bool IsVolatileSnapshot = false)
+            bool IsVolatileSnapshot = false,
+            bool Replay = true)
         {
             return new ContextEntry
             {
@@ -495,6 +455,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 Name = Name,
                 TurnIndex = TurnIndex,
                 IsVolatileSnapshot = IsVolatileSnapshot,
+                Replay = Replay,
             };
         }
 
@@ -572,15 +533,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         public void SetActiveFileTracker(IActiveFileTracker? tracker)
         {
             _activeFileTracker = tracker;
-        }
-
-        /// <summary>
-        /// 获取完整未裁剪的工具结果（按 tool_call_id）。
-        /// </summary>
-        public string? GetFullToolResult(string toolCallId)
-        {
-            _fullToolResultStore.TryGetValue(toolCallId, out string? result);
-            return result;
         }
 
         /// <summary>
@@ -693,7 +645,10 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// <param name="toolCalls">工具调用列表（可为 null）</param>
         public void AddAssistantMessage(string? content, string? reasoningContent = null, List<ToolCall>? toolCalls = null)
         {
-            reasoningContent = ReasoningTextPolicy.ClampStored(reasoningContent);
+            // 不裁剪：官方要求携带 tools 的请求必须完整回传 reasoning_content，
+            // 落库/落内存时截断会直接违反该要求（超长时还可能诱发 400）。
+            // 仅做超限告警，便于观察实际体量。
+            ReasoningTextPolicy.WarnIfOversized(reasoningContent);
 
             // ──  前缀缓存优化：写时合并连续 assistant 消息 ──
             //     如果上一条也是 assistant，合并内容而非新增条目，
@@ -770,15 +725,9 @@ namespace DeepSeek_v4_for_VisualStudio.Services
 
         /// <summary>
         /// 添加工具调用结果（tool 角色消息）。
-        /// 自动裁剪过长结果以保护上下文窗口。
-        /// 完整结果保留在独立存储中备查。
         /// </summary>
         public void AddToolResult(string toolCallId, string toolName, string result)
         {
-            // 保存原始完整结果
-            if (!string.IsNullOrEmpty(toolCallId) && !string.IsNullOrEmpty(result))
-                _fullToolResultStore[toolCallId] = result;
-
             _entries.Add(CreateEntry(
                 Role: "tool",
                 Content: result,
@@ -792,15 +741,37 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// 添加自定义角色消息（如 skill 指令注入的 system 消息）。
         /// 这些消息不计入 turn 管理。
         /// </summary>
-        public void AddCustomMessage(string role, string content)
+        /// <param name="role">消息角色。</param>
+        /// <param name="content">消息内容。</param>
+        /// <param name="turnIndex">
+        /// 归属轮次；默认 -1（不属于任何轮次）。
+        /// 传入具体轮次时该条目会随该轮一起参与压缩/裁剪，但仍不计入 <see cref="TurnCount"/>。
+        /// </param>
+        public void AddCustomMessage(string role, string content, int turnIndex = -1)
         {
             if (string.IsNullOrEmpty(content)) return;
 
             _entries.Add(CreateEntry(
                 Role: role,
                 Content: content,
-                TurnIndex: -1)); // 不属于任何轮次
+                TurnIndex: turnIndex));
             _estimatedTokens += EstimateTokens(content);
+        }
+
+        /// <summary>
+        /// 当前轮次序号（最后一条真实 user 的 TurnIndex）；无真实轮次时返回 -1。
+        /// </summary>
+        private int CurrentTurnIndex
+        {
+            get
+            {
+                for (int i = _entries.Count - 1; i >= 0; i--)
+                {
+                    if (_entries[i].Role == "user" && _entries[i].TurnIndex > 0)
+                        return _entries[i].TurnIndex;
+                }
+                return -1;
+            }
         }
 
         #endregion
@@ -824,6 +795,12 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// <param name="userPrompt">追加到末尾的 user 提示（子任务指令正文）。</param>
         /// <param name="systemPrompt">子任务 system 指令；替换或追加到消息数组最末。</param>
         /// <returns>新构建的消息列表；不修改内部历史条目对象，也不影响后续主对话请求。</returns>
+        /// <remarks>
+        /// <b>子任务尾提示一律不落库</b>：记忆判定、总结润色等属于主流程之外的一次性脚手架，
+        /// 其提示词与返回结果都不应进入 <c>_entries</c>，否则会污染下一轮主对话历史
+        /// （模型会把「记忆管理助手」的问答当成本轮对话的一部分）。
+        /// 因此本方法只构建请求，绝不写历史。
+        /// </remarks>
         public List<ChatApiMessage> BuildApiMessagesWithSubTaskPrompt(string userPrompt, string systemPrompt)
         {
             // ── 复用主对话完整快照（稳定前缀 + 动态块 + 完整历史，含工具调用记录）──
@@ -846,6 +823,301 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             }
 
             return messages;
+        }
+
+        /// <summary>
+        /// 将「本次实际发出的消息列表」与内部历史对账，把**主流程**脱节消息补写进 <c>_entries</c>。
+        ///
+        /// ── 不变量 ──
+        /// <c>_entries</c> 必须完整包含主流程发出过的每一条消息（任何一条都不能缺），
+        /// 且必须**完全不含**一次性子任务（记忆判定、总结润色、路由）的提示词与返回结果。
+        ///
+        /// ── 为什么需要它 ──
+        /// 正常请求由 <see cref="BuildApiMessages"/> 从 <c>_entries</c> 重建，但有几类主流程内容
+        /// 只在请求副本上临时存在、从不落库：
+        ///   1. Handoff 分支插入的 volatile 上下文块（当前解决方案 / Git / IDE 快照）；
+        ///   2. Handoff 目标 Agent 的任务提示（「[当前任务目标] 你是一个 Edit Agent…」）；
+        ///   3. 显式 @Agent 路由的 doNotHandoff 边界指令；
+        ///   4. Agent 专属行为指令（末尾 system）。
+        /// 这些一旦不入库，从 <c>_entries</c> 重建历史的链路（子任务、会话持久化、重启恢复）
+        /// 就会看到一份「缺了几条」的历史：既丢上下文，也让前缀缓存从缺失点断裂。
+        ///
+        /// ── 对账算法 ──
+        /// 以「角色 + 内容（assistant 另比 tool_calls id 集合、tool 另比 tool_call_id）」做
+        /// 贪心顺序匹配：为每条已发出消息找到匹配条目即前移；找不到匹配的即为脱节消息，补写为新条目。
+        /// 结构性前缀（稳定 system / 动态块）不参与条目匹配，天然被跳过。
+        ///
+        /// 幂等：同一条消息重复对账不会重复写入（第二次会匹配到已补写的条目）。
+        /// </summary>
+        /// <param name="sentMessages">实际发送给 API 的消息列表（清洗后的最终版本）。</param>
+        /// <returns>补写的条目数。</returns>
+        public int SyncSentMessagesToHistory(IReadOnlyList<ChatApiMessage>? sentMessages)
+        {
+            if (sentMessages == null || sentMessages.Count == 0)
+                return 0;
+
+            // ── 正在压缩时不对账：压缩会重排 _entries，此时写入会与压缩边界冲突 ──
+            if (_isCompressing)
+                return 0;
+
+            // ── 匹配范围必须覆盖全部条目 ──
+            //     不能用 _cacheSnapshotEntryIndex 截断：缓存边界快照只约束"本次渲染哪些条目"，
+            //     而 Handoff 分支恰好会在快照之后把身份边界提示等写入 _entries。
+            //     若用快照下标当上界，刚写下的那条就落在窗口外、匹配不到，
+            //     于是被判为"脱节内容"再补一份 —— 这正是 152 号请求 [48][49] 相邻重复的成因。
+            int entryLimit = _entries.Count;
+            int appended = 0;
+            int cursor = 0;      // _entries 扫描游标：已匹配到的条目下标
+
+            // ── 跳过结构性前缀（[0] 稳定系统提示词、[1] 动态上下文块）──
+            //     这两条由 BuildApiMessagesSnapshot 每次从字段重新生成，不是历史条目；
+            //     若把它们当脱节消息补写，下一轮就会在历史里重放一遍，与前缀重复。
+            string? stablePrompt = BuildStableSystemPrompt();
+            string? dynamicBlockForMatch = _cachedDynamicBlock ?? BuildDynamicContextBlock();
+            int structuralSkip = 0;
+            foreach (var msg in sentMessages)
+            {
+                if (msg?.Role != "system")
+                    break;
+                bool isStable = !string.IsNullOrEmpty(stablePrompt)
+                    && string.Equals(msg.Content, stablePrompt, StringComparison.Ordinal);
+                bool isDynamic = !string.IsNullOrEmpty(dynamicBlockForMatch)
+                    && string.Equals(msg.Content, dynamicBlockForMatch, StringComparison.Ordinal);
+                if (!isStable && !isDynamic)
+                    break;
+                structuralSkip++;
+            }
+
+            // ── 兜底：前缀已漂移时，跳过「起始处未匹配的 system」──
+            //     动态块内容在本轮内可能被重建（记忆刷新、语言守卫、压缩摘要、新用户消息落库），
+            //     于是发送列表里的那份与当前字段不再逐字相等。若把它当成脱节内容补写，
+            //     游标会跳到 _entries 末尾，导致其后所有历史消息都匹配不到而被整段复制
+            //     （线上 26/27：Ask 阶段 [3..15] 与 [21..33] 逐字节重复）。
+            //     system 前缀永远由字段重建，绝不作为历史补写。
+            while (structuralSkip < sentMessages.Count
+                && string.Equals(sentMessages[structuralSkip]?.Role, "system", StringComparison.Ordinal))
+            {
+                structuralSkip++;
+            }
+
+            // 当前轮次：补写条目归属最近一条真实 user 的轮次，避免凭空造轮
+            int currentTurn = CurrentTurnIndex;
+
+            // 最后一条 user 的位置：用于区分「历史内容」与「请求尾部提示」。
+            // 尾部 system（Agent 行为指令、路由边界）在每次请求都会重新生成，
+            // 若参与重放会随请求数无限累积，故只登记不重放。
+            int lastUserSentIndex = -1;
+            for (int i = sentMessages.Count - 1; i >= 0; i--)
+            {
+                if (string.Equals(sentMessages[i]?.Role, "user", StringComparison.Ordinal))
+                {
+                    lastUserSentIndex = i;
+                    break;
+                }
+            }
+
+            for (int i = structuralSkip; i < sentMessages.Count; i++)
+            {
+                var msg = sentMessages[i];
+                if (msg == null || string.IsNullOrEmpty(msg.Role))
+                    continue;
+
+                // ── 空壳消息（无内容、无工具调用）不落库，与 BuildApiMessagesSnapshot 的跳过规则一致 ──
+                bool hasBody = !string.IsNullOrEmpty(msg.Content)
+                    || (msg.MultimodalContent is { Count: > 0 })
+                    || (msg.ToolCalls is { Count: > 0 })
+                    || (msg.Role == "tool" && !string.IsNullOrEmpty(msg.ToolCallId));
+                if (!hasBody)
+                    continue;
+
+                // ── 在条目中寻找匹配（限界内、顺序前移）──
+                int matched = FindMatchingEntryIndex(msg, cursor, entryLimit);
+                if (matched >= 0)
+                {
+                    cursor = matched + 1;
+                    continue;
+                }
+
+                // ── 未匹配 → 主流程脱节内容，补写（不变量：主流程消息一条都不能缺）──
+                //     · user（Handoff 任务提示、Edit 步骤提示）归属当前轮次，不新开轮次；
+                //     · volatile 快照（当前解决方案 + Git/IDE）参与重放，并标记 IsVolatileSnapshot，
+                //       使 PersistCurrentVolatileSnapshot 的同轮幂等判断能识别它、不再重复固化；
+                //     · 尾部 system（Agent 行为指令、路由边界）只登记不重放：
+                //       它们每次请求都会在尾部重新生成，重放会随请求数无限累积。
+                bool isTailSystem = string.Equals(msg.Role, "system", StringComparison.Ordinal)
+                    && i > lastUserSentIndex;
+                bool isVolatile = IsVolatileSnapshotContent(msg.Content);
+
+                _entries.Add(CreateEntry(
+                    Role: msg.Role,
+                    Content: msg.Content,
+                    MultimodalContent: CloneContentParts(msg.MultimodalContent),
+                    ReasoningContent: msg.ReasoningContent,
+                    ToolCalls: CloneToolCalls(msg.ToolCalls),
+                    HasToolCalls: msg.ToolCalls is { Count: > 0 },
+                    ToolCallId: msg.ToolCallId,
+                    Name: msg.Name,
+                    TurnIndex: currentTurn,
+                    IsVolatileSnapshot: isVolatile,
+                    Replay: !isTailSystem));
+
+                cursor = _entries.Count;
+                appended++;
+            }
+
+            if (appended > 0)
+            {
+                _estimatedTokens = RecalculateEstimatedTokens();
+                Logger.Info($"[ContextManager] 主流程对账：补写 {appended} 条脱节消息进 _entries（当前 {MessageCount} 条 / {TurnCount} 轮）");
+            }
+
+            return appended;
+        }
+
+        /// <summary>
+        /// 判断给定文本是否为「volatile 上下文快照」（当前解决方案 + IDE/Git 等易变块）。
+        /// 这类内容每轮由 <see cref="PersistCurrentVolatileSnapshot"/> 重新固化，
+        /// 若把已固化的那份再参与重放，同一块会在历史里叠成两份。
+        /// </summary>
+        private static bool IsVolatileSnapshotContent(string? content)
+        {
+            if (string.IsNullOrWhiteSpace(content))
+                return false;
+
+            // 易变块以「[当前解决方案: 」或「[Git Context]」开头（见 BuildVolatileContextBlock 的拼装顺序）
+            string solutionLabel = LocalizationService.Instance["system.contextSolutionLabel"];
+            string prefix = string.IsNullOrWhiteSpace(solutionLabel)
+                ? "[当前解决方案"
+                : solutionLabel.Split('{')[0];
+
+            return (!string.IsNullOrEmpty(prefix) && content.StartsWith(prefix, StringComparison.Ordinal))
+                || content.StartsWith("[Git Context]", StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// 在 <c>_entries</c> 的 <paramref name="fromIndex"/>~<paramref name="entryLimit"/> 区间内
+        /// 顺序查找与 <paramref name="msg"/> 内容一致的条目，返回下标；未找到返回 -1。
+        ///
+        /// 匹配规则：角色一致 + 内容一致；assistant 还需 tool_calls 的 id 集合一致；
+        /// tool 还需 tool_call_id 一致。允许跳过区间内更早的条目，
+        /// 使乱序/并发写入的历史也能正确对齐。
+        /// </summary>
+        private int FindMatchingEntryIndex(ChatApiMessage msg, int fromIndex, int entryLimit)
+        {
+            int limit = Math.Min(entryLimit, _entries.Count);
+            for (int i = Math.Max(0, fromIndex); i < limit; i++)
+            {
+                var entry = _entries[i];
+                if (entry.Role != msg.Role)
+                    continue;
+
+                if (entry.Role == "tool")
+                {
+                    if (!string.Equals(entry.ToolCallId, msg.ToolCallId, StringComparison.Ordinal))
+                        continue;
+                }
+                else if (entry.Role == "assistant" && msg.ToolCalls is { Count: > 0 })
+                {
+                    var entryIds = entry.ToolCalls?.Select(tc => tc.Id).Where(id => !string.IsNullOrEmpty(id))
+                        .OrderBy(id => id, StringComparer.Ordinal).ToList()
+                        ?? new List<string?>();
+                    var msgIds = msg.ToolCalls.Select(tc => tc.Id).Where(id => !string.IsNullOrEmpty(id))
+                        .OrderBy(id => id, StringComparer.Ordinal).ToList();
+                    if (!entryIds.SequenceEqual(msgIds, StringComparer.Ordinal))
+                        continue;
+                }
+
+                if (!string.Equals(entry.Content ?? string.Empty, msg.Content ?? string.Empty, StringComparison.Ordinal))
+                    continue;
+
+                return i;
+            }
+
+            return -1;
+        }
+
+        /// <summary>
+        /// 重新累计 <c>_entries</c> 的估算 Token（含思维链与多模态开销）。
+        /// 仅在对账补写等低频路径调用。
+        /// </summary>
+        /// <remarks>
+        /// 排除 <c>Replay == false</c> 的条目：它们不进入请求序列，
+        /// 因此不应计入上下文预算（否则会虚高使用率、提前触发压缩）。
+        /// </remarks>
+        private int RecalculateEstimatedTokens()
+        {
+            int total = 0;
+            foreach (var entry in _entries)
+            {
+                if (!entry.Replay)
+                    continue;
+
+                total += EstimateTokens(entry.Content);
+                total += EstimateMultimodalTokens(entry.MultimodalContent);
+                if (!string.IsNullOrEmpty(entry.ReasoningContent))
+                    total += EstimateTokens(entry.ReasoningContent);
+            }
+            return total;
+        }
+
+        /// <summary>
+        /// 克隆工具调用列表，避免调用方（Provider 侧快照）与内部历史共享可变对象。
+        /// </summary>
+        private static List<ToolCall>? CloneToolCalls(List<ToolCall>? toolCalls)
+            => ChatMessageCloner.CloneToolCalls(toolCalls);
+
+        /// <summary>
+        /// 判断当前轮次（最近一条真实 user 所在轮）是否已存在内容与 <paramref name="volatileBlock"/>
+        /// 完全相同的 volatile 快照条目（含固化快照与对账补写）。
+        ///
+        /// 供请求构建器在「临时注入易变块」前做去重：同一轮内的多次请求
+        /// （如 Edit 多步骤推进）不应把同一份易变块重复叠加，否则既浪费 token，
+        /// 也让从 _entries 重建的链路与线上请求在这一点上前缀分叉。
+        /// </summary>
+        /// <param name="volatileBlock">待注入的易变块文本。</param>
+        public bool HasVolatileSnapshotInCurrentTurn(string? volatileBlock)
+        {
+            if (string.IsNullOrWhiteSpace(volatileBlock))
+                return false;
+
+            int currentTurn = CurrentTurnIndex;
+            if (currentTurn < 0)
+                return false;
+
+            for (int i = _entries.Count - 1; i >= 0; i--)
+            {
+                var entry = _entries[i];
+                if (entry.TurnIndex != currentTurn)
+                    continue;
+                if (string.Equals(entry.Content, volatileBlock, StringComparison.Ordinal))
+                    return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// 判断一条 user 消息是否代表「真实用户轮次」。
+        ///
+        /// 规则：带「当前任务目标」前缀的（Handoff 任务提示、Edit 步骤提示）属于当前轮的执行内容，
+        /// 不是新轮次；其余一律视为真实轮次 —— 包括纯图片/附件的 multimodal 轮次（文本为空）。
+        /// </summary>
+        private static bool IsRealUserTurn(ChatApiMessage msg)
+        {
+            string? content = msg.Content;
+
+            // 纯图片/附件轮次：文本为空但带 content 块，仍是真实用户轮次
+            if (string.IsNullOrWhiteSpace(content))
+                return msg.MultimodalContent is { Count: > 0 };
+
+            string handoffPrefix = LocalizationService.Instance["system.agent.handoffTaskGoalPrefix"];
+            if (!string.IsNullOrWhiteSpace(handoffPrefix)
+                && content.StartsWith(handoffPrefix, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            return true;
         }
 
         /// <summary>
@@ -1071,6 +1343,13 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             for (int i = startEntryIdx; i < _entries.Count && i < entryLimit; i++)
             {
                 var entry = _entries[i];
+
+                // ── 对账补写的「不重放」条目不进入请求序列 ──
+                //     它们保留在 _entries 中供持久化 / 调试 / 子任务可见，
+                //     但对应内容由构建器按需重新生成，重放会造成重复。
+                if (!entry.Replay)
+                    continue;
+
                 if (string.IsNullOrEmpty(entry.Content)
                     && (entry.ToolCalls == null || entry.ToolCalls.Count == 0)
                     && (entry.MultimodalContent == null || entry.MultimodalContent.Count == 0))
@@ -1085,12 +1364,10 @@ namespace DeepSeek_v4_for_VisualStudio.Services
 
                 if (entry.Role == "assistant")
                 {
-                    if (entry.HasToolCalls)
-                    {
-                        apiMsg.ReasoningContent = entry.TurnIndex == TurnCount
-                            ? ReasoningTextPolicy.ClampStored(entry.ReasoningContent)
-                            : ReasoningTextPolicy.ClampHistoricalToolCall(entry.ReasoningContent);
-                    }
+                    // 官方要求（思考模式 + tools）：携带 tools 的请求，后续所有请求必须**完整回传**
+                    // reasoning_content——即使该轮未实际进行工具调用。未正确回传 API 会返回 400。
+                    // 因此这里不做任何长度压缩，原样回放 entry.ReasoningContent（该值为 null 时不写字段）。
+                    apiMsg.ReasoningContent = entry.ReasoningContent;
                 }
 
                 if (entry.Role == "assistant" && entry.ToolCalls != null && entry.ToolCalls.Count > 0)
@@ -1131,109 +1408,10 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             if (!string.IsNullOrWhiteSpace(_memoryContext))
                 parts.Add(_memoryContext!);
 
-            // 语言一致性守卫：检测用户最后一条消息的语言，确保回复语言与用户一致
-            string? languageGuard = BuildLanguageGuard();
-            if (languageGuard != null)
-                parts.Add(languageGuard);
-
             if (parts.Count == 0)
                 return null;
 
             return string.Join("\n\n", parts);
-        }
-
-        /// <summary>
-        /// 检测最后一条用户消息的语言，如果用户使用英文而系统/记忆中有中文内容，
-        /// 则生成一条语言一致性守卫指令，防止模型被中文上下文误导而用中文回复。
-        /// </summary>
-        private string? BuildLanguageGuard()
-        {
-            // 反向查找最后一条用户消息
-            string? lastUserMessage = null;
-            for (int i = _entries.Count - 1; i >= 0; i--)
-            {
-                if (_entries[i].Role == "user" && !string.IsNullOrWhiteSpace(_entries[i].Content))
-                {
-                    lastUserMessage = _entries[i].Content;
-                    break;
-                }
-            }
-
-            if (lastUserMessage == null)
-                return null;
-
-            bool isEnglish = IsEnglishMessage(lastUserMessage);
-            if (!isEnglish)
-                return null;
-
-            // 检查记忆上下文中是否包含中文（如果记忆是中文但用户用英文，需要守卫）
-            bool memoryHasChinese = !string.IsNullOrWhiteSpace(_memoryContext)
-                && ContainsCjkCharacters(_memoryContext);
-
-            // 即使用户记忆中没有中文，也始终确保英文回复（因为用户用英文提问）
-            return memoryHasChinese
-                ? " LANGUAGE OVERRIDE: The user is writing in English. Even though some context or memory content above is in Chinese, you MUST respond in English. The memory content is metadata — the user's actual communication language is English."
-                : null;
-        }
-
-        /// <summary>
-        /// 检测文本是否主要为英文（非 CJK 语言）。
-        /// 统计 CJK 字符占比，若低于 15% 则判定为英文消息。
-        /// </summary>
-        private static bool IsEnglishMessage(string text)
-        {
-            if (string.IsNullOrWhiteSpace(text))
-                return true; // 空消息默认为英文
-
-            int cjkCount = 0;
-            int totalLetters = 0;
-
-            foreach (char c in text)
-            {
-                if (char.IsLetter(c))
-                {
-                    totalLetters++;
-                    // CJK 统一表意文字范围
-                    if ((c >= 0x4E00 && c <= 0x9FFF) ||   // CJK Unified Ideographs
-                        (c >= 0x3400 && c <= 0x4DBF) ||   // CJK Unified Ideographs Extension A
-                        (c >= 0x3000 && c <= 0x303F) ||   // CJK Symbols and Punctuation
-                        (c >= 0xFF00 && c <= 0xFFEF) ||   // Halfwidth and Fullwidth Forms
-                        (c >= 0xF900 && c <= 0xFAFF))     // CJK Compatibility Ideographs
-                    {
-                        cjkCount++;
-                    }
-                }
-            }
-
-            // 如果没有字母字符，默认为英文
-            if (totalLetters == 0)
-                return true;
-
-            double cjkRatio = (double)cjkCount / totalLetters;
-            return cjkRatio < 0.15;
-        }
-
-        /// <summary>
-        /// 检测文本中是否包含 CJK 字符。
-        /// </summary>
-        private static bool ContainsCjkCharacters(string? text)
-        {
-            if (string.IsNullOrWhiteSpace(text))
-                return false;
-
-            foreach (char c in text)
-            {
-                if ((c >= 0x4E00 && c <= 0x9FFF) ||
-                    (c >= 0x3400 && c <= 0x4DBF) ||
-                    (c >= 0x3000 && c <= 0x303F) ||
-                    (c >= 0xFF00 && c <= 0xFFEF) ||
-                    (c >= 0xF900 && c <= 0xFAFF))
-                {
-                    return true;
-                }
-            }
-
-            return false;
         }
 
         /// <summary>
@@ -1877,27 +2055,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         }
 
         private static List<ChatContentPart>? CloneContentParts(List<ChatContentPart>? parts)
-        {
-            if (parts == null || parts.Count == 0)
-                return null;
-
-            return parts.Select(p => new ChatContentPart
-            {
-                Type = p.Type,
-                Text = p.Text,
-                ImageUrl = p.ImageUrl == null
-                    ? null
-                    : new ChatImageUrl { Url = p.ImageUrl.Url, Detail = p.ImageUrl.Detail },
-                File = p.File == null
-                    ? null
-                    : new ChatFilePart
-                    {
-                        FileId = p.File.FileId,
-                        FileData = p.File.FileData,
-                        Filename = p.File.Filename,
-                    },
-            }).ToList();
-        }
+            => ChatMessageCloner.CloneContentParts(parts);
 
         /// <summary>
         /// 当估算 Token 超过预算时，自动修剪最旧的轮次（旧行为，无压缩服务时使用）。
@@ -2018,15 +2176,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                         $"newFactor={_calibrationFactor:F3}");
         }
 
-        /// <summary>
-        /// 重置校准去重标记。会话切换/清空上下文后调用，避免新会话的首个
-        /// usage 与上一会话末次值相同而被误判为重复上报。
-        /// </summary>
-        internal void ResetCalibrationDedup()
-        {
-            _lastCalibratedPromptTokens = 0;
-        }
-
         #endregion
 
         #region Core API — 查询与序列化
@@ -2034,16 +2183,20 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// <summary>
         /// 获取所有 user/assistant 角色的原始消息列表（用于持久化和 UI）。
         /// </summary>
+        /// <remarks>
+        /// 排除 <c>Replay == false</c> 的对账补写条目（子任务提示等脚手架），
+        /// 使 UI 展示与轮次语义保持一致；这类内容仍保留在 <c>_entries</c> 中可追溯。
+        /// </remarks>
         public List<ChatApiMessage> GetConversationHistory()
         {
             return _entries
-                .Where(e => e.Role == "user" || e.Role == "assistant")
+                .Where(e => e.Replay && (e.Role == "user" || e.Role == "assistant"))
                 .Select(e => new ChatApiMessage
                 {
                     Role = e.Role,
                     Content = e.Content,
                     MultimodalContent = CloneContentParts(e.MultimodalContent),
-                    ReasoningContent = ReasoningTextPolicy.ClampStored(e.ReasoningContent),
+                    ReasoningContent = e.ReasoningContent,
                 })
                 .ToList();
         }
@@ -2052,25 +2205,23 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// 获取包含所有角色（含 tool）的完整消息列表，用于完整持久化。
         /// 恢复时使用 RestoreFullContext()。
         /// </summary>
+        /// <remarks>
+        /// 排除 <c>Replay == false</c> 的脚手架条目（子任务尾提示、Agent 行为指令、volatile 块）：
+        /// 它们由请求构建器在每次请求时按需重新生成，语义不会丢失；
+        /// 若写入持久化，恢复时无法区分其「不重放」属性，会被当成历史重放，反而污染后续请求。
+        /// 这类内容在本次会话内仍完整保留在 <c>_entries</c> 中，可经 <see cref="GetDebugSummary"/> 追溯。
+        /// </remarks>
         public List<ChatApiMessage> GetFullContext()
         {
             return _entries
+                .Where(e => e.Replay)
                 .Select(e => new ChatApiMessage
                 {
                     Role = e.Role,
                     Content = e.Content,
                     MultimodalContent = CloneContentParts(e.MultimodalContent),
-                    ReasoningContent = ReasoningTextPolicy.ClampStored(e.ReasoningContent),
-                    ToolCalls = e.ToolCalls?.Select(tc => new ToolCall
-                    {
-                        Id = tc.Id,
-                        Type = tc.Type,
-                        Function = new ToolCallFunction
-                        {
-                            Name = tc.Function.Name,
-                            Arguments = tc.Function.Arguments,
-                        }
-                    }).ToList(),
+                    ReasoningContent = e.ReasoningContent,
+                    ToolCalls = CloneToolCalls(e.ToolCalls),
                     ToolCallId = e.ToolCallId,
                     Name = e.Name,
                 })
@@ -2088,7 +2239,15 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 switch (msg.Role)
                 {
                     case "user":
-                        AddUserMessage(msg.Content ?? string.Empty, msg.MultimodalContent);
+                        // ── 区分「真实用户轮次」与「请求侧注入的 user」──
+                        //     真实轮次在落库时带「本轮用户需求」前缀（AddUserMessage 写入）；
+                        //     Handoff 任务提示 / Edit 步骤提示带「当前任务目标」前缀，
+                        //     它们属于当前轮的执行内容，不是新轮次。
+                        //     若不区分，恢复后每个步骤提示都会被算作一轮，污染轮次计数与缓存窗口。
+                        if (IsRealUserTurn(msg))
+                            AddUserMessage(msg.Content ?? string.Empty, msg.MultimodalContent);
+                        else
+                            AddCustomMessage("user", msg.Content ?? string.Empty, CurrentTurnIndex);
                         break;
                     case "assistant":
                         AddAssistantMessage(msg.Content, msg.ReasoningContent, msg.ToolCalls);
@@ -2111,13 +2270,14 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         public void RestoreFromHistory(List<ChatApiMessage> history)
         {
             Clear();
-            int turnIdx = 0;
             foreach (var msg in history)
             {
                 if (msg.Role == "user")
                 {
-                    turnIdx++;
-                    AddUserMessage(msg.Content ?? string.Empty, msg.MultimodalContent);
+                    if (IsRealUserTurn(msg))
+                        AddUserMessage(msg.Content ?? string.Empty, msg.MultimodalContent);
+                    else
+                        AddCustomMessage("user", msg.Content ?? string.Empty, CurrentTurnIndex);
                 }
                 else if (msg.Role == "assistant")
                 {
@@ -2160,7 +2320,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         {
             _entries.Clear();
             _estimatedTokens = 0;
-            _fullToolResultStore.Clear();
             _compressor?.Clear();
             _pendingCompressedSummaries.Clear();
             _cacheSnapshotEntryIndex = null;
@@ -2267,6 +2426,14 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             public int TurnIndex { get; set; } = -1;
             /// <summary>是否为固化到历史中的 volatile 上下文快照</summary>
             public bool IsVolatileSnapshot { get; set; }
+            /// <summary>
+            /// 是否参与后续请求的历史重放。
+            /// 仅「对账补写」的条目会置 false：它们只用于持久化与子任务上下文可见性，
+            /// 不进入 <see cref="BuildApiMessagesSnapshot"/> 的重放序列 ——
+            /// 因为这类内容（子任务尾提示、Agent 行为指令、volatile 块）由请求构建器按需重新生成，
+            /// 重放会与重新生成的那份重复，反而破坏前缀。
+            /// </summary>
+            public bool Replay { get; set; } = true;
         }
 
         #endregion

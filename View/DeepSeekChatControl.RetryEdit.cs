@@ -362,8 +362,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     Logger.Info($"[AgentHandoff] AutoSend 链式跟进: → {nextHandoff.TargetAgent} ({nextHandoff.Label})");
 
                     // ── 保存当前推理内容，防止链式 Handoff 覆盖 ──
-                    string chainPreReasoning = ReasoningTextPolicy.ClampStored(agentResult.ReasoningContent)
-                        ?? string.Empty;
+                    // 不裁剪：该值会并回 agentResult 并最终持久化/回传。
+                    string chainPreReasoning = agentResult.ReasoningContent ?? string.Empty;
 
                     await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
                     StatusLabel.Text = string.Format(LocalizationService.Instance["status.agentSwitched"], nextHandoff.TargetAgent);
@@ -411,8 +411,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
                         agentResult.ReasoningContent = string.IsNullOrEmpty(agentResult.ReasoningContent)
                             ? chainPreReasoning
                             : chainPreReasoning + "\n\n" + agentResult.ReasoningContent;
-                        agentResult.ReasoningContent =
-                            ReasoningTextPolicy.ClampStored(agentResult.ReasoningContent) ?? string.Empty;
+                        // 不裁剪：合并结果会随 AgentResult 持久化并回传给 API。
                     }
                 }
 
@@ -532,9 +531,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     // 此前这里手写字段赋值后直接 PostStreamEnd，导致 Handoff（Plan→Edit）路径的消息
                     // 既无 TurnId 也无 IsProcessMessage，前端根本不生成「过程折叠块」，
                     // 工具调用过程便一直平铺展开；而 Ask→Edit 走 RunAgentWorkflowAsync 的正规收尾，故正常。
-                    string boundedReasoning = ReasoningTextPolicy.ClampStored(_streamingReasoning.ToString())
-                        ?? string.Empty;
-                    FinalizeAgentMessage(_agentStreamingMsgIndex, finalContent, boundedReasoning, cacheFooter);
+                    // 不裁剪：FinalizeAgentMessage 会把它写入消息对象并最终被持久化/回传。
+                    string finalReasoning = _streamingReasoning.ToString();
+                    FinalizeAgentMessage(_agentStreamingMsgIndex, finalContent, finalReasoning, cacheFooter);
 
                     StatusLabel.Text = plan.IsCancelled
                         ? LocalizationService.Instance["status.stopped"]

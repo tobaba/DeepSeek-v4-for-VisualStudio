@@ -445,12 +445,10 @@ namespace DeepSeek_v4_for_VisualStudio.View
             {
                 _messages.Clear();
                 var msgs = _tree.GetActiveMessages();
-                foreach (var msg in msgs)
-                {
-                    if (!string.IsNullOrEmpty(msg.ReasoningContent))
-                        msg.ReasoningContent = ReasoningTextPolicy.ClampStored(msg.ReasoningContent)
-                            ?? string.Empty;
-                }
+                // 注意：GetActiveMessages 返回的是树节点的**活引用**。
+                // 这里绝不能就地改写 msg.ReasoningContent——该字段会被 ConversationTree
+                // 持久化并在后续请求中回传给 API；官方要求携带 tools 时必须完整回传，
+                // 就地裁剪会永久破坏历史（且此前的 ClampStored 还会注入截断标记文本）。
                 _messages.AddRange(msgs);
             }
         }
@@ -492,9 +490,6 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
         /// <summary>最近一次 Agent 执行的 Handoff（用于 UI 渲染"开始实现"按钮）</summary>
         private Models.AgentHandoff? _pendingHandoff;
-
-        // ── Agent 流式日志面板 ID（会话级，不依赖 PlanId）──
-        private string _agentLogPanelId = "session";
 
         // ── 已创建的计划 ID 集合（防止重复创建计划消息）──
         private readonly HashSet<string> _createdPlanIds = new();

@@ -387,17 +387,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         }
 
         /// <summary>
-        /// 获取文件读取缓存的快照（含轮次信息，用于 LRU 淘汰排序）。
-        /// </summary>
-        public Dictionary<string, int> GetFileReadCacheRoundSnapshot()
-        {
-            var snapshot = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-            foreach (var kvp in _fileReadCache)
-                snapshot[kvp.Key] = kvp.Value.LastReadRound;
-            return snapshot;
-        }
-
-        /// <summary>
         /// 写入或更新文件读取缓存。
         /// Agent 应用编辑后用它刷新最新文件内容，保证缓存与磁盘一致。
         /// </summary>

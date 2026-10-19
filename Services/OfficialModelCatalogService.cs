@@ -78,10 +78,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             }
         }
 
-        /// <summary>官方模式没有选中模型时的默认模型；优先取接口返回的第一项。</summary>
-        public static string GetDefaultModel()
-            => GetModels().FirstOrDefault() ?? string.Empty;
-
         /// <summary>
         /// 获取或刷新官方模型列表。相同 Key 的成功结果在缓存期内直接复用；
         /// Key 变化会强制重新请求，失败时返回当前远程列表。

@@ -1131,8 +1131,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     string reasoningForRender;
                     lock (_lock)
                     {
-                        reasoningForRender = ReasoningTextPolicy.ClampStored(_streamingReasoning.ToString())
-                            ?? string.Empty;
+                        // 不裁剪：该值经 FinalizeAgentMessage 写入消息对象并被持久化/回传。
+                        reasoningForRender = _streamingReasoning.ToString();
                     }
                     string cacheFooter = BuildCacheFooterAndPersist(_agentStreamingMsgIndex);
                     FinalizeAgentMessage(_agentStreamingMsgIndex, finalContent, reasoningForRender, cacheFooter);
@@ -1181,8 +1181,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     string reasoningForRender;
                     lock (_lock)
                     {
-                        reasoningForRender = ReasoningTextPolicy.ClampStored(_streamingReasoning.ToString())
-                            ?? string.Empty;
+                        // 不裁剪：该值经 FinalizeAgentMessage 写入消息对象并被持久化/回传。
+                        reasoningForRender = _streamingReasoning.ToString();
                     }
                     string cacheFooter = BuildCacheFooterAndPersist(_agentStreamingMsgIndex);
                     FinalizeAgentMessage(_agentStreamingMsgIndex, agentResult.Content, reasoningForRender, cacheFooter);
@@ -1367,7 +1367,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
         private void FinalizeAgentMessage(int msgIndex, string content, string reasoning,
             string footerHtml, string? extraFooterHtml = null)
         {
-            reasoning = ReasoningTextPolicy.ClampStored(reasoning) ?? string.Empty;
+            // 不裁剪：reasoning 最终会写入消息对象（_messages[idx] 是 ConversationTree 的活引用），
+            // 进而被持久化并在后续请求中回传给 API。官方要求携带 tools 时必须完整回传
+            // reasoning_content，任何裁剪（尤其是注入截断标记）都会破坏历史。
 
             // ── 更新消息状态为最终完成态（下标无效时跳过更新，与旧分支行为一致）──
             string timelineContent;
@@ -1459,8 +1461,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 string reasoning;
                 lock (_lock)
                 {
-                    reasoning = ReasoningTextPolicy.ClampStored(_streamingReasoning.ToString())
-                        ?? string.Empty;
+                    // 不裁剪：该值经 FinalizeAgentMessage 写入消息对象后被持久化与回传。
+                    reasoning = _streamingReasoning.ToString();
                 }
                 string cacheFooter = BuildCacheFooterAndPersist(msgIndex);
                 FinalizeAgentMessage(msgIndex, body, reasoning, cacheFooter);
@@ -1668,10 +1670,17 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 // toolChoice:"auto" + 只读白名单：与主对话保持同一 tool_choice，避免因该字段变化
                 // 击穿 DeepSeek Prefix Cache。完整上下文含工具调用记录，模型可能模仿历史发起工具
                 // 调用；此处走只读工具循环而非单次调用，误调用可在白名单内正常收尾，而非静默返回空。
+                // 子任务：persistToHistory=false —— 记忆判定的提示词与返回结果都不属于主流程对话，
+                // 绝不能进入 _entries，否则下一轮请求会把「记忆管理助手」的问答当成本轮内容。
+                // 注：不再固定 temperature:0.0 —— 与主对话保持一致的采样参数，避免字段差异
+                //    造成请求签名不同、影响前缀缓存复用。
+                //    response_format:json_object 保留：JSON 结构由服务端约束比依赖提示词更可靠，
+                //    解析失败会导致本次记忆漏记（解析侧已有 ExtractJsonArray + 单对象兜底容错）。
                 var rawResponse = await _activeAgent.CallAiWithReadOnlyToolLoopAsync(
                     messages, CancellationToken.None,
                     reminderAfterFirstToolRound: LocalizationService.Instance["agent.memoryAutoRecordNoMoreToolsAfterToolRound"],
-                    responseFormat: "json_object", temperature: 0.0);
+                    responseFormat: "json_object",
+                    persistToHistory: false);
 
                 if (string.IsNullOrWhiteSpace(rawResponse))
                 {
@@ -1880,8 +1889,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
                 var previousMessage = _messages[previousIndex];
                 previousContent = _streamingContent.ToString().Trim();
-                previousReasoning = ReasoningTextPolicy.ClampStored(
-                    _streamingReasoning.ToString()) ?? string.Empty;
+                // 不裁剪：下面会写入 previousMessage（ConversationTree 活引用），需完整回传。
+                previousReasoning = _streamingReasoning.ToString();
 
                 previousMessage.Content = previousContent;
                 previousMessage.ReasoningContent = previousReasoning;

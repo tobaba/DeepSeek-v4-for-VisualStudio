@@ -56,78 +56,9 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// <summary>当前使用的 OCR 引擎类型</summary>
         public static OcrEngineType CurrentEngine { get; set; } = OcrEngineType.WindowsBuiltIn;
 
-        /// <summary>PaddleOCR 推理模型目录路径（已弃用：PaddleOCR 现使用包自带 ChineseV5 本地模型，无需外部模型目录）</summary>
-        public static string? PaddleOcrModelPath { get; set; }
-
-        /// <summary>插件安装根目录（用于默认模型路径）</summary>
-        public static string? PluginRootPath { get; set; }
-
         /// <summary>MCP 管理器引用（用于 MCP 服务器 OCR）</summary>
         public static McpManagerService? McpManager { get; set; }
 
-        /// <summary>
-        /// 确保原生 DLL 能被 .NET Framework 运行时找到。
-        /// 由于 VS 扩展宿主是 devenv.exe（不在我们的输出目录），
-        /// 需要手动将插件目录及其原生 DLL 子目录加入 Windows DLL 搜索路径。
-        /// </summary>
-        public static void EnsureNativeDllSearchPath()
-        {
-            try
-            {
-                string? searchPath = PluginRootPath
-                    ?? Path.GetDirectoryName(typeof(OcrService).Assembly.Location);
-
-                if (string.IsNullOrWhiteSpace(searchPath) || !Directory.Exists(searchPath))
-                    return;
-
-                // 将插件根目录加入搜索路径
-                SetDllDirectory(searchPath);
-                Logger.Info($"[OCR] 原生 DLL 搜索路径: {searchPath}");
-
-                // ── 预加载 dll\x64 子目录中的原生 DLL ──
-                // 这些 DLL 由 NuGet 包（PaddleInference/OpenCvSharp）部署到 dll\x64\，
-                // 但它们不在 SetDllDirectory 的搜索路径中，因此需要手动 LoadLibrary。
-                string dllX64Dir = Path.Combine(searchPath, "dll", "x64");
-                if (Directory.Exists(dllX64Dir))
-                {
-                    // OpenCvSharp
-                    PreloadDll(dllX64Dir, "OpenCvSharpExtern.dll");
-                    // PaddleInference（按依赖顺序：先加载被依赖的 DLL）
-                    PreloadDll(dllX64Dir, "libiomp5md.dll");
-                    PreloadDll(dllX64Dir, "mklml.dll");
-                    PreloadDll(dllX64Dir, "mkldnn.dll");
-                    PreloadDll(dllX64Dir, "onnxruntime_providers_shared.dll");
-                    PreloadDll(dllX64Dir, "onnxruntime.dll");
-                    PreloadDll(dllX64Dir, "paddle2onnx.dll");
-                    PreloadDll(dllX64Dir, "common.dll");
-                    PreloadDll(dllX64Dir, "paddle_inference_c.dll");
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Info($"[OCR] 设置 DLL 搜索路径失败: {ex.Message}");
-            }
-        }
-
-        /// <summary>
-        /// 从指定目录预加载原生 DLL（如文件存在）。
-        /// 预加载后，Windows 会将此模块标记为已加载，后续 DllImport/PInvoke 可直接使用。
-        /// </summary>
-        private static void PreloadDll(string directory, string dllName)
-        {
-            string dllPath = Path.Combine(directory, dllName);
-            if (File.Exists(dllPath))
-            {
-                LoadLibrary(dllPath);
-                Logger.Info($"[OCR] 预加载原生 DLL: {dllName}");
-            }
-        }
-
-        [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
-        private static extern bool SetDllDirectory(string lpPathName);
-
-        [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
-        private static extern IntPtr LoadLibrary(string lpFileName);
 
         #endregion
 
@@ -427,19 +358,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             if (bytes < 1024) return $"{bytes} B";
             if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
             return $"{bytes / (1024.0 * 1024.0):F1} MB";
-        }
-
-        /// <summary>
-        /// 获取 PaddleOCR 模型默认路径（已弃用：现使用包自带 ChineseV5 本地模型）。
-        /// 保留以兼容旧配置读取。
-        /// </summary>
-        internal static string GetDefaultPaddleModelPath()
-        {
-            if (!string.IsNullOrWhiteSpace(PaddleOcrModelPath))
-                return PaddleOcrModelPath;
-            if (!string.IsNullOrWhiteSpace(PluginRootPath))
-                return Path.Combine(PluginRootPath, "inference");
-            return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "inference");
         }
 
         #endregion

@@ -29,9 +29,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
     {
         private ExploreAgent? _exploreAgent;
 
-        /// <summary>计划步骤的目标数量。复杂任务围绕这个规模组织，避免过度拆分。</summary>
-        internal const int PreferredPlanStepCount = 5;
-
         /// <summary>计划步骤的硬性上限。即使模型输出更多步骤，也会合并到该数量以内。</summary>
         internal const int MaxPlanStepCount = 8;
 

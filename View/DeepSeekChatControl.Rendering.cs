@@ -717,48 +717,6 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
 
         /// <summary>
-        /// 强制重建整条 WebView2 链路：丢弃当前控件与环境，创建全新实例并全量重绘。
-        /// <para>
-        /// 与 <see cref="RebuildWebViewIfNeededAsync"/> 的区别：后者以
-        /// <c>TryGetLiveCoreWebView</c>（属性可访问性）为判据，会放过
-        /// 「属性可访问但实际不可用」的控件；本方法跳过该判据，无条件重建，
-        /// 用于那种「探测通过、页面就是起不来」的情形。
-        /// </para>
-        /// </summary>
-        private async Task ForceRecreateWebViewAsync()
-        {
-            await Microsoft.VisualStudio.Shell.ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-            if (_disposed) return;
-
-            // 合并并发请求
-            var inFlight = _webViewRebuildTask;
-            if (inFlight != null && !inFlight.IsCompleted)
-            {
-                Logger.Debug("[WebViewLifecycle] forceRecreate | 已有重建任务在进行，复用");
-                await inFlight;
-                return;
-            }
-
-            var task = RebuildWebViewCoreAsync();
-            _webViewRebuildTask = task;
-            try
-            {
-                bool ok = await task;
-                Logger.Info($"[WebViewLifecycle] forceRecreate | 结果={ok} "
-                    + $"| view={ChatWebView?.GetHashCode() ?? 0}");
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"[WebViewLifecycle] 强制重建失败: {ex.GetType().Name}: {ex.Message}", ex);
-            }
-            finally
-            {
-                if (ReferenceEquals(_webViewRebuildTask, task))
-                    _webViewRebuildTask = null;
-            }
-        }
-
-        /// <summary>
         /// 解绑 WebView2 控件上的事件订阅。
         /// 用于控件重建与宿主释放场景，避免旧控件继续回调已失效的处理器。
         /// </summary>

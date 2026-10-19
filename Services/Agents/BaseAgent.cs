@@ -344,11 +344,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             return AiPrompts.SharedImmutablePrefix;
         }
 
-        /// <summary>
-        /// 兼容旧代码：首次访问时返回当前语言的前缀。
-        /// </summary>
-        protected static string CommonSystemPromptPrefix => GetCommonSystemPromptPrefix();
-
         /// <summary>Agent 元数据定义</summary>
         public AgentDefinition Definition { get; protected set; }
 
@@ -559,6 +554,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                 else if (IsContentChunk(chunk))
                     sb.Append(chunk);
             }
+            // ── 单次工具无关调用（路由/分类等）：不属于主流程对话内容，不写历史 ──
             LogCacheHitRate();
             return sb.ToString().Trim();
         }
@@ -576,12 +572,18 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         /// <param name="reminderAfterFirstToolRound">首次工具调用后追加的"禁止继续调用工具"提示</param>
         /// <param name="responseFormat">响应格式（例如 json_object）</param>
         /// <param name="temperature">采样温度</param>
+        /// <param name="persistToHistory">
+        /// 是否把本轮 assistant/tool 消息与对账结果写入历史。
+        /// 主流程调用保持默认 true；记忆判定、总结润色等一次性子任务必须传 false，
+        /// 否则子任务的提示词与返回结果会进入 <c>_entries</c> 并污染下一轮请求。
+        /// </param>
         public async Task<string> CallAiWithReadOnlyToolLoopAsync(
             List<ChatApiMessage> messages,
             CancellationToken ct,
             string? reminderAfterFirstToolRound = null,
             string? responseFormat = null,
-            double? temperature = null)
+            double? temperature = null,
+            bool persistToHistory = true)
         {
             return await CallAiWithToolLoopAsync(
                 messages,
@@ -591,7 +593,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                 toolChoiceOverride: "auto",
                 responseFormat: responseFormat,
                 temperature: temperature,
-                noToolsReminderAfterFirstToolRound: reminderAfterFirstToolRound);
+                noToolsReminderAfterFirstToolRound: reminderAfterFirstToolRound,
+                persistToHistory: persistToHistory);
         }
 
         /// <summary>
@@ -619,6 +622,43 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                 return null;
 
             return CloneApiMessages(sent);
+        }
+
+        /// <summary>
+        /// 把本次实际发出的消息与内部历史对账，补齐主流程「发出但未落库」的内容。
+        ///
+        /// 背景：请求构建器会在消息副本上临时追加几类**主流程**内容（Handoff 的 volatile 块与
+        /// 任务提示、路由边界指令、Agent 行为指令），它们此前从不写回 <c>_entries</c>。
+        /// 这会让从 <c>_entries</c> 重建的历史「缺了几条」，既丢上下文，也让前缀缓存从缺失点断裂。
+        ///
+        /// <b>仅主流程可调用</b>：一次性子任务（记忆判定、总结润色）的提示词与返回结果
+        /// 不属于主流程，绝不能落库，否则会污染下一轮主对话请求。
+        /// </summary>
+        /// <param name="sentMessages">
+        /// 显式指定的发送快照；传 null 时取 <see cref="CaptureLastSentMessagesForCache"/>。
+        /// 工具循环内应传入本地 messages（含当轮新插入的 assistant/tool），
+        /// 因为 Provider 的 LastSentMessages 只反映最近一次 HTTP 调用。
+        /// </param>
+        protected int SyncSentMessagesToHistory(List<ChatApiMessage>? sentMessages = null)
+        {
+            var ctxManager = Context?.ContextManager;
+            if (ctxManager == null)
+                return 0;
+
+            var sent = sentMessages ?? CaptureLastSentMessagesForCache();
+            if (sent == null || sent.Count == 0)
+                return 0;
+
+            try
+            {
+                return ctxManager.SyncSentMessagesToHistory(sent);
+            }
+            catch (Exception ex)
+            {
+                // 对账失败不能影响主流程：历史补齐是增强，不是必需路径
+                Logger.Warn($"[Agent:{Definition.Name}] 发送内容对账失败: {ex.Message}");
+                return 0;
+            }
         }
 
         /// <summary>
@@ -713,28 +753,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         /// 深拷贝 ChatApiMessage 列表，避免 Handoff 后目标 Agent 修改复制列表时影响源快照。
         /// </summary>
         protected static List<ChatApiMessage> CloneApiMessages(IEnumerable<ChatApiMessage> messages)
-        {
-            return messages.Select(m => new ChatApiMessage
-            {
-                Role = m.Role,
-                Content = m.Content,
-                MultimodalContent = m.MultimodalContent,
-                ReasoningContent = m.ReasoningContent,
-                ToolCalls = m.ToolCalls?
-                    .Select(tc => new ToolCall
-                    {
-                        Id = tc.Id,
-                        Type = tc.Type,
-                        Function = new ToolCallFunction
-                        {
-                            Name = tc.Function?.Name,
-                            Arguments = tc.Function?.Arguments,
-                        }
-                    }).ToList(),
-                ToolCallId = m.ToolCallId,
-                Name = m.Name,
-            }).ToList();
-        }
+            => ChatMessageCloner.CloneAll(messages);
 
         /// <summary>
         /// 构建上下文感知的消息列表，将 Agent 的 system prompt 与对话历史合并。
@@ -900,8 +919,14 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             if (ctxManager != null && !volatilePersisted)
             {
                 string? volatileBlock = ctxManager.BuildVolatileContextBlock();
-                if (!string.IsNullOrWhiteSpace(volatileBlock))
+                // ── 去重：本轮已有一份内容完全相同的 volatile 快照（固化或对账补写）时不再注入 ──
+                //   否则同一轮内的多次请求（如 Edit 多步骤推进）会把同一份易变块重复叠加，
+                //   既浪费 token，也让从 _entries 重建的链路与线上请求在这一点上前缀分叉。
+                if (!string.IsNullOrWhiteSpace(volatileBlock)
+                    && !ctxManager.HasVolatileSnapshotInCurrentTurn(volatileBlock))
+                {
                     messages.Add(new ChatApiMessage { Role = "system", Content = volatileBlock });
+                }
             }
 
             // ── 第5层：当前用户消息 ──
@@ -1103,6 +1128,12 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         /// <param name="temperature">采样温度</param>
         /// <param name="toolChoiceOverride">覆盖本轮工具选择策略（例如 auto / none）</param>
         /// <param name="noToolsReminderAfterFirstToolRound">首次完成工具调用后追加的“禁止继续调用工具”提示</param>
+        /// <param name="persistToHistory">
+        /// 是否把本轮的 assistant / tool / 对账结果写入 <c>_entries</c>。
+        /// 主流程（Ask/Plan/Edit/Build 的对话推进）传 true；
+        /// 一次性子任务（记忆判定、总结润色等）必须传 false —— 它们的提示词与返回结果
+        /// 不属于主流程对话，落库会污染下一轮请求（模型会把「记忆管理助手」的问答当成本轮内容）。
+        /// </param>
         /// <returns>AI 最终生成的文本内容</returns>
         protected async Task<string> CallAiWithToolLoopAsync(
             List<ChatApiMessage> messages,
@@ -1117,7 +1148,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             string? responseFormat = null,
             double? temperature = null,
             string? toolChoiceOverride = null,
-            string? noToolsReminderAfterFirstToolRound = null)
+            string? noToolsReminderAfterFirstToolRound = null,
+            bool persistToHistory = true)
         {
             string? originalUserQuestion = messages
                 .LastOrDefault(m => string.Equals(m.Role, "user", StringComparison.OrdinalIgnoreCase))
@@ -1392,6 +1424,13 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                         {
                             Logger.Info($"[Agent:{Definition.Name}] 流断点续传成功 (尝试 {streamAttempt + 1}/{maxStreamAttempts})");
                         }
+
+                        // ── 主流程发送内容对账 ──
+                        //   把本次真正发出去的主流程消息（Handoff 的 volatile 块与任务提示、
+                        //   路由边界指令、Agent 行为指令）补齐进 _entries，保证重建历史不缺消息。
+                        //   子任务调用（persistToHistory=false）不走这里。
+                        if (persistToHistory)
+                            SyncSentMessagesToHistory(sentMessages: messages);
                     }
                     catch (HttpRequestException ex) when (streamAttempt < maxStreamAttempts - 1)
                     {
@@ -1404,7 +1443,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
 
                         streamAttempt++;
                         savedPartialContent = contentBuilder.ToString();
-                        savedPartialReasoning = ReasoningTextPolicy.ClampForRetry(reasoningBuilder.ToString()) ?? string.Empty;
+                        savedPartialReasoning = reasoningBuilder.ToString();
                         double backoffSec = Math.Pow(2, streamAttempt);
                         Logger.Warn($"[Agent:{Definition.Name}] 流中断 (尝试 {streamAttempt}/{maxStreamAttempts})，已收到 {savedPartialContent.Length} 字符，{backoffSec}s 后恢复…");
                         metrics?.RecordStreamRetry();
@@ -1418,7 +1457,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                         // 超时（非用户取消）
                         streamAttempt++;
                         savedPartialContent = contentBuilder.ToString();
-                        savedPartialReasoning = ReasoningTextPolicy.ClampForRetry(reasoningBuilder.ToString()) ?? string.Empty;
+                        savedPartialReasoning = reasoningBuilder.ToString();
                         double backoffSec = Math.Pow(2, streamAttempt);
                         Logger.Warn($"[Agent:{Definition.Name}] 流超时 (尝试 {streamAttempt}/{maxStreamAttempts})，{backoffSec}s 后恢复…");
                         metrics?.RecordStreamRetry();
@@ -1440,7 +1479,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                         // SSE 读取超时（v1.1.10）：120s 无数据 → 流被 Dispose → ReadLineAsync 抛 ObjectDisposedException
                         streamAttempt++;
                         savedPartialContent = contentBuilder.ToString();
-                        savedPartialReasoning = ReasoningTextPolicy.ClampForRetry(reasoningBuilder.ToString()) ?? string.Empty;
+                        savedPartialReasoning = reasoningBuilder.ToString();
                         double backoffSec = Math.Pow(2, streamAttempt);
                         Logger.Warn($"[Agent:{Definition.Name}] SSE 流读取超时 (尝试 {streamAttempt}/{maxStreamAttempts})，已收到 {savedPartialContent.Length} 字符，{backoffSec}s 后恢复…");
                         metrics?.RecordStreamRetry();
@@ -1462,7 +1501,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                         // 网络错误导致的 IO 异常（非用户取消），尝试重试
                         streamAttempt++;
                         savedPartialContent = contentBuilder.ToString();
-                        savedPartialReasoning = ReasoningTextPolicy.ClampForRetry(reasoningBuilder.ToString()) ?? string.Empty;
+                        savedPartialReasoning = reasoningBuilder.ToString();
                         double backoffSec = Math.Pow(2, streamAttempt);
                         Logger.Warn($"[Agent:{Definition.Name}] 流网络错误 (尝试 {streamAttempt}/{maxStreamAttempts})，已收到 {savedPartialContent.Length} 字符，{backoffSec}s 后恢复…");
                         contentBuilder.Clear();
@@ -1474,7 +1513,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                     {
                         reasoningLoopRetryCount++;
                         savedPartialContent = contentBuilder.ToString();
-                        savedPartialReasoning = ReasoningTextPolicy.ClampForRetry(reasoningBuilder.ToString()) ?? string.Empty;
+                        savedPartialReasoning = reasoningBuilder.ToString();
                         contentBuilder.Clear();
                         reasoningBuilder.Clear();
                         toolCallAccumulator.Clear();
@@ -1675,9 +1714,12 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                             ReasoningContent = string.IsNullOrWhiteSpace(interimReasoning) ? null : interimReasoning,
                         });
                         toolInsertPos++;
-                        Context?.ContextManager?.AddAssistantMessage(
-                            string.IsNullOrWhiteSpace(interimContent) ? null : interimContent,
-                            string.IsNullOrWhiteSpace(interimReasoning) ? null : interimReasoning);
+                        if (persistToHistory)
+                        {
+                            Context?.ContextManager?.AddAssistantMessage(
+                                string.IsNullOrWhiteSpace(interimContent) ? null : interimContent,
+                                string.IsNullOrWhiteSpace(interimReasoning) ? null : interimReasoning);
+                        }
                     }
 
                     int newToolInsertPos = await ApplyPendingGuidanceMessageAsync(
@@ -1849,7 +1891,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                     toolInsertPos++;
 
                     // ── 同步 assistant 消息（含 tool_calls）到全局 ContextManager，确保重启后可恢复完整对话 ──
-                    if (Context?.ContextManager != null)
+                    //     子任务（persistToHistory=false）不落库：其提示词/返回结果不属于主流程对话。
+                    if (persistToHistory && Context?.ContextManager != null)
                     {
                         Context.ContextManager.AddAssistantMessage(
                             contentBuilder.Length > 0 ? contentBuilder.ToString() : null,
@@ -1987,7 +2030,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                         }
 
                         // ── 同步 tool 结果到全局 ContextManager，确保重启后可恢复完整对话 ──
-                        if (Context?.ContextManager != null)
+                        //     子任务（persistToHistory=false）不落库。
+                        if (persistToHistory && Context?.ContextManager != null)
                         {
                             Context.ContextManager.AddToolResult(tc.Id, tc.Function.Name, contextResult);
                         }
@@ -3002,58 +3046,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         }
 
         /// <summary>
-        /// 从对话历史中提取 runSubagent 工具调用结果，用于 Handoff 时传递给目标 Agent。
-        /// 去重并按内容截断（~8KB），避免目标 Agent 因 maxRecentTurns 限制丢失探索上下文。
-        /// </summary>
-        private static string ExtractRunSubagentResults(List<ChatApiMessage> conversationHistory)
-        {
-            if (conversationHistory == null || conversationHistory.Count == 0)
-                return string.Empty;
-
-            var seenHashes = new HashSet<string>();
-            var sb = new StringBuilder();
-            const int maxBytes = 8192;
-
-            foreach (var msg in conversationHistory)
-            {
-                if (msg.Role == "tool"
-                    && string.Equals(msg.Name, "runSubagent", StringComparison.OrdinalIgnoreCase)
-                    && !string.IsNullOrWhiteSpace(msg.Content))
-                {
-                    // 去重：相同内容的 tool 结果只保留一份
-                    string hash = ComputeSimpleHash(msg.Content!);
-                    if (!seenHashes.Add(hash))
-                        continue;
-
-                    if (sb.Length > 0)
-                        sb.AppendLine("\n---\n");
-                    sb.AppendLine(msg.Content!.Truncate(2048));
-
-                    // 截断保护
-                    if (sb.Length > maxBytes)
-                    {
-                        sb.AppendLine(LocalizationService.Instance["agent.exploreResultTruncated"]);
-                        break;
-                    }
-                }
-            }
-
-            return sb.ToString().Trim();
-        }
-
-        /// <summary>
-        /// 简单哈希：用于 runSubagent 结果去重（不要求密码学强度）。
-        /// </summary>
-        private static string ComputeSimpleHash(string text)
-        {
-            if (string.IsNullOrEmpty(text)) return string.Empty;
-            int hash = 17;
-            foreach (char c in text)
-                hash = hash * 31 + c;
-            return hash.ToString("X8");
-        }
-
-        /// <summary>
         /// 将 HandoffRequest（AI 通过 request_handoff 工具发起的 JSON 移交）
         /// 转换为 AgentHandoff（供 UI 层使用的移交格式）。
         /// </summary>
@@ -3197,51 +3189,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         }
 
         /// <summary>
-        /// 按 Markdown 章节边界截断 plan.md，在 ~maxChars 附近最近的 ## 标题前干净切断。
-        /// 避免在段落中间截断导致内容不完整。
-        /// </summary>
-        private static string TruncatePlanMdBySection(string planMd, int maxChars)
-        {
-            if (planMd.Length <= maxChars)
-                return planMd;
-
-            // 收集所有 ## 标题的位置（行首 ## ，前无更高级别 #）
-            var sectionStarts = new List<int>();
-            var lines = planMd.Split('\n');
-            int charPos = 0;
-            foreach (var line in lines)
-            {
-                string trimmed = line.TrimStart();
-                // 匹配 ## 或 ### 标题（但不匹配 # 一级标题，保留它）
-                if (trimmed.StartsWith("##") && !trimmed.StartsWith("###"))
-                {
-                    sectionStarts.Add(charPos);
-                }
-                charPos += line.Length + 1; // +1 for \n
-            }
-
-            // 从后往前找第一个在 maxChars 之前的 ## 边界
-            int cutPos = maxChars;
-            for (int i = sectionStarts.Count - 1; i >= 0; i--)
-            {
-                if (sectionStarts[i] < maxChars)
-                {
-                    cutPos = sectionStarts[i];
-                    break;
-                }
-            }
-
-            // 如果第一个 ## 都在 maxChars 之后，就用纯字符截断（只有开头概述，没有章节标题）
-            string truncated = planMd.Substring(0, cutPos).TrimEnd();
-            int keptSections = sectionStarts.Count(s => s < cutPos);
-            string note = keptSections > 0
-                ? $"\n\n... (已截断，保留了前 {keptSections} 个章节。后续步骤详情请参阅上方结构化步骤列表)"
-                : "\n\n... (已截断。各步骤详情请参阅上方结构化步骤列表)";
-
-            return truncated + note;
-        }
-
-        /// <summary>
         /// 清理消息列表中不完整的工具调用链。
         /// 与 ChatStreamAsync Rule 5 使用相同算法：对每个 assistant(tool_calls)，
         /// 向前扫描匹配的 tool 结果；遇到非 tool 消息停止。
@@ -3253,16 +3200,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         internal static List<ChatApiMessage> CleanIncompleteToolChains(List<ChatApiMessage> messages)
         {
             // 浅克隆避免修改原始消息（与 ChatStreamAsync 保持一致）
-            var result = messages.Select(m => new ChatApiMessage
-            {
-                Role = m.Role,
-                Content = m.Content,
-                MultimodalContent = m.MultimodalContent,
-                ReasoningContent = m.ReasoningContent,
-                ToolCalls = m.ToolCalls,
-                ToolCallId = m.ToolCallId,
-                Name = m.Name,
-            }).ToList();
+            var result = ChatMessageCloner.CloneAll(messages);
 
             int strippedCount = 0;
             for (int i = 0; i < result.Count; i++)
@@ -4552,59 +4490,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                 BriefDescription = System.IO.Path.GetFileName(filePath)
                     + (System.IO.File.Exists(filePath) ? " (修改)" : " (新建)"),
             });
-        }
-
-        /// <summary>
-        /// 从 AI 返回结果中解析待删除的文件（delete: 格式）。
-        /// 支持格式:
-        ///   delete: path/to/file.cs
-        ///   delete_file: path/to/file.cs
-        ///   ```delete: path/to/file.cs```
-        /// </summary>
-        protected static List<string> ParseFileDeletionsFromResult(string aiResult)
-        {
-            var deletions = new List<string>();
-            if (string.IsNullOrWhiteSpace(aiResult)) return deletions;
-
-            // 严格匹配：仅匹配行首的 delete: 或 delete_file: 格式
-            // 要求路径包含文件扩展名（如 .cs/.cpp），排除代码块内的 delete 关键字误匹配
-            var regex = new System.Text.RegularExpressions.Regex(
-                @"(?<=^|\n)\s*(?:delete|delete_file)\s*:\s*(?<path>[^\r\n`]+?\.[a-zA-Z0-9]+)\b",
-                System.Text.RegularExpressions.RegexOptions.Multiline | System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-
-            var matches = regex.Matches(aiResult);
-            foreach (System.Text.RegularExpressions.Match match in matches)
-            {
-                string filePath = match.Groups["path"].Value.Trim();
-                // 过滤：路径不能以 ``` 结尾（排除代码块标记）
-                if (string.IsNullOrWhiteSpace(filePath) || filePath.EndsWith("`"))
-                    continue;
-
-                // 过滤：路径不能在代码块内部
-                int matchPos = match.Index;
-                string textBefore = aiResult.Substring(0, Math.Min(matchPos, aiResult.Length));
-                int openFences = CountSubstring(textBefore, "```");
-                if (openFences % 2 != 0)
-                    continue;
-
-                deletions.Add(filePath);
-            }
-
-            return deletions;
-        }
-
-        /// <summary>
-        /// 统计子串出现次数。
-        /// </summary>
-        private static int CountSubstring(string text, string substring)
-        {
-            int count = 0, idx = 0;
-            while ((idx = text.IndexOf(substring, idx, StringComparison.Ordinal)) >= 0)
-            {
-                count++;
-                idx += substring.Length;
-            }
-            return count;
         }
 
         /// <summary>
