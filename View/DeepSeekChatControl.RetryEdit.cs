@@ -803,8 +803,10 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 ClearRecordedFileChanges(userMsgIndex);
 
                 StatusLabel.Text = revertedCount > 0
-                    ? $"已回退 {revertedCount} 个文件" + (failedCount > 0 ? $"，{failedCount} 个失败" : "")
-                    : "未回退任何文件";
+                    ? (failedCount > 0
+                        ? string.Format(L["agent.revert.revertedCountFailed"], revertedCount, failedCount)
+                        : string.Format(L["agent.revert.revertedCount"], revertedCount))
+                    : L["agent.revert.revertedNone"];
                 Logger.Info($"[FileHistory] 回退完成: {revertedCount} 成功, {failedCount} 失败");
 
                 RefreshChangeSummary();

@@ -1101,7 +1101,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
                         if (plan.ChangedFiles.Count > 0)
                         {
-                            summaryBuilder.AppendLine($"**{LocalizationService.Instance["agent.panel.fileChanges"]}**: {plan.ChangedFiles.Count} 个文件");
+                            summaryBuilder.AppendLine(
+                                $"**{LocalizationService.Instance["agent.panel.fileChanges"]}**: "
+                                + string.Format(LocalizationService.Instance["agent.panel.fileCount"], plan.ChangedFiles.Count));
                             foreach (var f in plan.ChangedFiles)
                             {
                                 string fname = System.IO.Path.GetFileName(f.FilePath);
