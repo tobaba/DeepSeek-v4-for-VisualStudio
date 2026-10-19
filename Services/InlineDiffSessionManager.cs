@@ -21,9 +21,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services
     ///
     /// 职责：
     /// - 创建和销毁 Session。
-    /// - 确保单文档单 Session（同一 Buffer 或同一路径）。
-    /// - 管理待处理 Proposal（文件尚未在编辑器中打开时）。
-    /// - 提供全局「全部保留」/「全部撤销」操作。
+    /// - 确保单文档单 Session。
+    /// - 提供全局「全部接受」/「全部撤销」操作。
     /// </summary>
     public sealed class InlineDiffSessionManager : IDisposable
     {
@@ -32,21 +31,10 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         // 以 ITextBuffer 为键（已打开文档）
         private readonly Dictionary<ITextBuffer, InlineDiffSession> _activeByBuffer = new();
 
-        // 以规范化路径为键（未打开文件）
-        private readonly Dictionary<string, PreparedChangeSet> _pendingByPath
-            = new(StringComparer.OrdinalIgnoreCase);
-
         private readonly object _lock = new();
         private readonly ProposalCommitCoordinator _coordinator = new();
 
         private bool _disposed;
-
-        #endregion
-
-        #region Events
-
-        /// <summary>活跃 Session 数量变更事件</summary>
-        public event EventHandler? SessionCountChanged;
 
         #endregion
 
@@ -57,15 +45,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         {
             get { lock (_lock) return _activeByBuffer.Count; }
         }
-
-        /// <summary>待处理 Proposal 数量</summary>
-        public int PendingCount
-        {
-            get { lock (_lock) return _pendingByPath.Count; }
-        }
-
-        /// <summary>变更总数（活跃 + 待处理）</summary>
-        public int TotalChangeCount => ActiveCount + PendingCount;
 
         #endregion
 
@@ -145,7 +124,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 _activeByBuffer[sourceBuffer] = session;
             }
 
-            session.StateChanged += OnSessionStateChanged;
             session.Disposed += (s, e) =>
             {
                 lock (_lock)
@@ -156,7 +134,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
 
             Logger.Info($"[SessionManager] Session 已创建: {session.SessionId.Substring(0, 8)} " +
                 $"({Path.GetFileName(filePath ?? change.FilePath)})");
-            SessionCountChanged?.Invoke(this, EventArgs.Empty);
 
             return session;
         }
@@ -170,42 +147,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             {
                 return _activeByBuffer.TryGetValue(buffer, out session);
             }
-        }
-
-        /// <summary>
-        /// 当文件在编辑器中打开时，检查是否有待处理 Proposal 并激活。
-        /// </summary>
-        public bool TryActivatePending(IWpfTextView textView)
-        {
-            ThreadHelper.ThrowIfNotOnUIThread();
-
-            string? filePath = null;
-            if (textView.TextDataModel.DocumentBuffer.Properties.TryGetProperty(
-                typeof(ITextDocument), out ITextDocument textDoc))
-            {
-                filePath = textDoc.FilePath;
-            }
-
-            if (string.IsNullOrWhiteSpace(filePath)) return false;
-
-            PreparedChangeSet? pending;
-            lock (_lock)
-            {
-                if (!_pendingByPath.TryGetValue(filePath, out pending))
-                    return false;
-
-                _pendingByPath.Remove(filePath);
-            }
-
-            var session = CreateSession(textView, pending);
-            if (session != null)
-            {
-                Logger.Info($"[SessionManager] 待处理 Proposal 已激活: {Path.GetFileName(filePath)}");
-                SessionCountChanged?.Invoke(this, EventArgs.Empty);
-                return true;
-            }
-
-            return false;
         }
 
         #endregion
@@ -270,10 +211,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                     session.Dispose();
             }
 
-            // 清理待处理
-            lock (_lock) { _pendingByPath.Clear(); }
-
-            SessionCountChanged?.Invoke(this, EventArgs.Empty);
             return result;
         }
 
@@ -287,7 +224,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             {
                 sessions = _activeByBuffer.Values.ToList();
                 _activeByBuffer.Clear();
-                _pendingByPath.Clear();
             }
 
             foreach (var session in sessions)
@@ -296,7 +232,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 catch (Exception ex) { Logger.Warn($"[SessionManager] Dismiss 失败: {ex.Message}"); }
             }
 
-            SessionCountChanged?.Invoke(this, EventArgs.Empty);
             Logger.Info($"[SessionManager] 已撤销全部: {sessions.Count} 个 Session");
         }
 
@@ -315,16 +250,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         #endregion
 
         #region Private Helpers
-
-        private void OnSessionStateChanged(object? sender, InlineDiffSessionState state)
-        {
-            if (state is InlineDiffSessionState.Committed or
-                InlineDiffSessionState.Dismissed or
-                InlineDiffSessionState.Disposed)
-            {
-                SessionCountChanged?.Invoke(this, EventArgs.Empty);
-            }
-        }
 
         private static ITextUndoHistoryRegistry GetUndoHistoryRegistry()
         {

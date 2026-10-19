@@ -440,57 +440,6 @@
             </StackPanel>
         </Border>
 
-        <!-- ═══ Diff 预览全局控制栏 ═══ -->
-        <Border Grid.Row="2"
-                x:Name="DiffGlobalBar"
-                Background="#1A3A20"
-                BorderBrush="#3F3F46" BorderThickness="0,1,0,0"
-                Padding="10,4"
-                Visibility="Collapsed">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <TextBlock Grid.Column="0"
-                           x:Name="DiffGlobalLabel"
-                           Foreground="#E0E0E0"
-                           FontSize="12"
-                           VerticalAlignment="Center"
-                           Text="检测到文件变更" />
-                <TextBlock Grid.Column="1"
-                           x:Name="DiffGlobalDetail"
-                           Foreground="#90B090"
-                           FontSize="11"
-                           VerticalAlignment="Center"
-                           Margin="10,0,0,0" />
-                <StackPanel Grid.Column="2" Orientation="Horizontal">
-                    <Button x:Name="UndoAllButton"
-                            Content="撤销全部"
-                            Click="UndoAllDiffButton_Click"
-                            Background="#5C2A2A"
-                            Foreground="#E0E0E0"
-                            BorderThickness="0"
-                            MinWidth="72" MinHeight="22"
-                            FontSize="11"
-                            Cursor="Hand"
-                            Padding="8,2"
-                            Margin="0,0,4,0" />
-                    <Button x:Name="AcceptAllButton"
-                            Content="接受全部"
-                            Click="AcceptAllDiffButton_Click"
-                            Background="#1A6A2A"
-                            Foreground="#E0E0E0"
-                            BorderThickness="0"
-                            MinWidth="72" MinHeight="22"
-                            FontSize="11"
-                            Cursor="Hand"
-                            Padding="8,2" />
-                </StackPanel>
-            </Grid>
-        </Border>
-
         <!-- ═══ 状态行 ═══ -->
         <Border Grid.Row="3"
                 x:Name="StatusAreaBorder"
