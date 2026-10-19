@@ -546,10 +546,32 @@
                         <TextBlock x:Name="ChangeSummaryAdded"
                                    Foreground="#4EC9B0"
                                    FontSize="11"
+                                   VerticalAlignment="Center"
                                    Margin="0,0,8,0" />
                         <TextBlock x:Name="ChangeSummaryRemoved"
                                    Foreground="#E07878"
-                                   FontSize="11" />
+                                   FontSize="11"
+                                   VerticalAlignment="Center"
+                                   Margin="0,0,10,0" />
+                        <Button x:Name="ChangeSummaryApplyAllButton"
+                                Style="{StaticResource AccentButton}"
+                                Content="{utils:I18n changeSummary.applyAll}"
+                                Click="ChangeSummaryApplyAllButton_Click"
+                                Padding="8,1"
+                                MinHeight="20"
+                                FontSize="11"
+                                Margin="0,0,6,0"
+                                Cursor="Hand"
+                                ToolTip="{utils:I18n changeSummary.applyAllTip}" />
+                        <Button x:Name="ChangeSummaryRevertAllButton"
+                                Style="{StaticResource TransparentButton}"
+                                Content="{utils:I18n changeSummary.revertAll}"
+                                Click="ChangeSummaryRevertAllButton_Click"
+                                Foreground="#E07878"
+                                Padding="8,1"
+                                FontSize="11"
+                                Cursor="Hand"
+                                ToolTip="{utils:I18n changeSummary.revertAllTip}" />
                     </StackPanel>
                 </Grid>
 

@@ -95,6 +95,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 _fileChangeHistory.Clear();
                 _pendingEditMsgIndex = -1;
             }
+
+            // 同时丢弃上一会话残留的待处理改动追踪（不修改磁盘内容）。
+            EditorDiffMarkerService.Instance.ClearPendingTracking();
         }
 
         /// <summary>
@@ -573,6 +576,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
                     if (plan.ChangedFiles.Count > 0)
                         _pendingAgentFileChanges = new List<FileChangeSummary>(plan.ChangedFiles);
+
+                    // 待处理改动归属本轮（Handoff 执行）用户消息。
+                    EditorDiffMarkerService.Instance.SetReviewTurn(_pendingEditMsgIndex);
 
                     // ── 计划已写入 PlanJson：刷新文件改动列表 ──
                     RefreshChangeSummary();

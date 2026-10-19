@@ -46,6 +46,15 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             get { lock (_lock) return _activeByBuffer.Count; }
         }
 
+        /// <summary>当前所有活跃 Session 的快照。</summary>
+        public IReadOnlyList<InlineDiffSession> GetActiveSessions()
+        {
+            lock (_lock)
+            {
+                return _activeByBuffer.Values.ToList();
+            }
+        }
+
         #endregion
 
         #region Public API — Session Creation

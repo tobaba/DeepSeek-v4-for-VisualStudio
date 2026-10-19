@@ -188,7 +188,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 // 确认提交后，若关联了写穿 Workspace，保留磁盘内容并清除撤销追踪
                 if (result.Success && Workspace != null)
                 {
-                    Workspace.ConfirmAll();
+                    Workspace.ConfirmFile(Change.FilePath);
                 }
 
                 if (result.Success)
@@ -225,9 +225,10 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 return;
 
             // ── 写穿模式：撤销 = 恢复磁盘到 Baseline ──
-            if (Workspace != null && Workspace.HasAnyTrackedChanges)
+            // 仅撤销本会话对应的文件，避免关掉一个文件的预览时回滚整轮其它文件。
+            if (Workspace != null && Workspace.HasTrackedFile(Change.FilePath))
             {
-                Workspace.RestoreToBaseline();
+                Workspace.RestoreFileToBaseline(Change.FilePath);
             }
 
             TransitionTo(InlineDiffSessionState.Dismissed);
@@ -247,7 +248,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 State == InlineDiffSessionState.Disposed)
                 return;
 
-            Workspace?.ConfirmAll();
+            // 仅确认本会话对应的文件，其它文件继续保留各自的待处理状态。
+            Workspace?.ConfirmFile(Change.FilePath);
 
             TransitionTo(InlineDiffSessionState.Committed);
             Dispose();

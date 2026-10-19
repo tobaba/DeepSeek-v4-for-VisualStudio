@@ -37,6 +37,9 @@ namespace DeepSeek_v4_for_VisualStudio.View.Hosts
         private bool _loadedHandlerAttached;
         private bool _overlayRetryHandlerAttached;
 
+        /// <summary>宿主关闭后触发（供服务清理 _editorHosts 索引）。</summary>
+        public event EventHandler? Closed;
+
         public EditorDiffHost(IWpfTextView textView)
         {
             _textView = textView ?? throw new ArgumentNullException(nameof(textView));
@@ -59,6 +62,7 @@ namespace DeepSeek_v4_for_VisualStudio.View.Hosts
             {
                 session.Dismiss();
                 Close();
+                EditorDiffMarkerService.Instance.NotifyPendingChanged();
             };
 
             WireHunkHandlers(session);
@@ -95,6 +99,7 @@ namespace DeepSeek_v4_for_VisualStudio.View.Hosts
                     return;
                 }
 
+                EditorDiffMarkerService.Instance.NotifyPendingChanged();
                 RebuildViewerForPendingHunks(session);
             };
 
@@ -112,6 +117,7 @@ namespace DeepSeek_v4_for_VisualStudio.View.Hosts
                     return;
                 }
 
+                EditorDiffMarkerService.Instance.NotifyPendingChanged();
                 RebuildViewerForPendingHunks(session);
             };
         }
@@ -331,6 +337,7 @@ namespace DeepSeek_v4_for_VisualStudio.View.Hosts
             else
                 _ = session.CommitAsync(System.Threading.CancellationToken.None);
             Close();
+            EditorDiffMarkerService.Instance.NotifyPendingChanged();
         }
 
         /// <summary>
@@ -399,6 +406,7 @@ namespace DeepSeek_v4_for_VisualStudio.View.Hosts
             _hostControl = null;
             _isShown = false;
             Logger.Info("[EditorDiffHost] Inline diff closed");
+            try { Closed?.Invoke(this, EventArgs.Empty); } catch { }
         }
 
         private void DetachOverlayRetryHandlers(System.Windows.UIElement visualElement)

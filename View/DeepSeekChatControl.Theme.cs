@@ -110,6 +110,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
             try
             {
                 bool isLight = textColor.Color.R < 0x80;
+                var dangerText = new SolidColorBrush(Color.FromRgb(0xE0, 0x78, 0x78));
 
                 // ── 替换 ComboBox / ComboBoxItem / CheckBox 隐式样式 ──
                 ReplaceComboBoxStyles(isLight, panelBg, panelBorder, textColor, mutedText, accentBlue);
@@ -132,6 +133,13 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 if (ChangeSummaryTitle != null) ChangeSummaryTitle.Foreground = textColor;
                 if (ChangeSummaryChevron != null) ChangeSummaryChevron.Foreground = mutedText;
                 if (ChangeFileListBox != null) ChangeFileListBox.Foreground = textColor;
+                if (ChangeSummaryApplyAllButton != null)
+                {
+                    ChangeSummaryApplyAllButton.Background = accentBlue;
+                    ChangeSummaryApplyAllButton.BorderBrush = accentBlue;
+                }
+                if (ChangeSummaryRevertAllButton != null)
+                    ChangeSummaryRevertAllButton.Foreground = dangerText;
 
                 // ── 输入区 ──
                 if (InputTextBox != null)

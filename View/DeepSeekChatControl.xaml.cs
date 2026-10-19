@@ -560,6 +560,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
             ModelComboBox.ItemsSource = BuildModelListItems();
             ModelComboBox.SelectedIndex = 0;
 
+            // ── 文件改动列表：订阅待处理改动变更 ──
+            SubscribeChangeSummary();
+
             // 官方模型的 effort 档位由 /models 声明，接口拉到前先用兜底列表。
             EffortComboBox.ItemsSource = DeepSeekOptionsPage.DefaultReasoningEfforts.ToList();
             // 推理强度初始值稍后在 StartControl 中从设置恢复（此时 _options 尚未赋值）
@@ -1628,6 +1631,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
             {
                 Logger.Warn($"[Dispose] 退订语言变更事件失败: {ex.Message}");
             }
+
+            // ── 退订待处理改动变更事件 ──
+            UnsubscribeChangeSummary();
 
             // ── 取消主题事件订阅 ──
             _themeService.ThemeChanged -= OnThemeChanged;

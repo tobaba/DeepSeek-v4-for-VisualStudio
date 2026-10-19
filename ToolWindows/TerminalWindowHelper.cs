@@ -65,7 +65,7 @@ namespace DeepSeek_v4_for_VisualStudio.ToolWindows
         /// <summary>
         /// 通过枚举 VS 所有打开的文档窗口，查找指定文件路径对应的 <see cref="IWpfTextView"/>。
         /// </summary>
-        private static IWpfTextView? FindWpfTextViewForFile(string filePath)
+        internal static IWpfTextView? FindWpfTextViewForFile(string filePath)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
 

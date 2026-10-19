@@ -8,6 +8,7 @@ using Microsoft.VisualStudio.Text.Editor;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading.Tasks;
 
 namespace DeepSeek_v4_for_VisualStudio.Services
 {
@@ -47,6 +48,19 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         private readonly InlineDiffSessionManager _sessionManager = new();
         private readonly Dictionary<ITextBuffer, EditorDiffHost> _editorHosts = new();
         private readonly object _editorHostsLock = new();
+
+        // ── 待处理改动追踪（供聊天区「文件改动列表」驱动）──
+        // 一轮编辑的多个文件共用同一个 StagedEditWorkspace；列表按 Workspace 的
+        // 实时追踪集合渲染，某文件被保留/撤销后自然从列表消失。
+        private readonly object _reviewLock = new();
+        private Editing.StagedEditWorkspace? _reviewWorkspace;
+        private int _reviewTurnUserMsgIndex = -1;
+
+        /// <summary>
+        /// 待处理改动集合发生变化（文件新增/确认/撤销）时触发。
+        /// 供聊天区刷新文件改动列表；触发线程不固定，订阅方需自行切回 UI 线程。
+        /// </summary>
+        public event EventHandler? PendingChangesChanged;
 
         #endregion
 
@@ -114,10 +128,22 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             if (workspace != null)
             {
                 session.Workspace = workspace;
+                AttachReviewWorkspace(workspace);
             }
 
             // 显示：先登记宿主，待编辑器首帧渲染后再挂载覆盖层，避免阻塞视图创建
             var editorHost = new EditorDiffHost(textView);
+            editorHost.Closed += (_, __) =>
+            {
+                lock (_editorHostsLock)
+                {
+                    if (_editorHosts.TryGetValue(textView.TextBuffer, out var current) &&
+                        ReferenceEquals(current, editorHost))
+                    {
+                        _editorHosts.Remove(textView.TextBuffer);
+                    }
+                }
+            };
 
             lock (_editorHostsLock)
             {
@@ -154,11 +180,18 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             session.ReplaceChange(change);
             session.Workspace = workspace;
 
+            lock (_reviewLock)
+            {
+                if (ReferenceEquals(_reviewWorkspace, workspace))
+                    _reviewWorkspace = null;
+            }
+
             lock (_editorHostsLock)
             {
                 if (_editorHosts.TryGetValue(buffer, out var editorHost))
                     editorHost.RefreshSession(session);
             }
+            AttachReviewWorkspace(workspace);
         }
 
         /// <summary>
@@ -235,6 +268,280 @@ namespace DeepSeek_v4_for_VisualStudio.Services
 
             CloseEditorHost(buffer);
             session.Dismiss();
+            RaisePendingChangesChanged();
+        }
+
+        #endregion
+
+        #region Public API — Pending Change Tracking
+
+        /// <summary>
+        /// 登记本轮编辑的待处理 Workspace（Agent 每个文件完成写入时调用）。
+        /// 同一轮的多个文件共用一个 Workspace，重复登记幂等。
+        /// </summary>
+        public void AttachReviewWorkspace(Editing.StagedEditWorkspace workspace)
+        {
+            if (workspace == null) return;
+
+            Editing.StagedEditWorkspace? previous;
+            lock (_reviewLock)
+            {
+                if (ReferenceEquals(_reviewWorkspace, workspace)) return;
+                previous = _reviewWorkspace;
+                DetachReviewWorkspaceLocked();
+                _reviewWorkspace = workspace;
+                workspace.FileTracked += OnReviewFileTracked;
+            }
+            // 新一轮编辑接管后，关闭上一轮残留的预览覆盖层（磁盘内容保持不变）。
+            CloseReviewSessions(previous);
+            // 上一轮未处理完的改动默认保留（磁盘已是最终内容），同时清理其撤销备份。
+            try { previous?.ConfirmAll(); } catch (Exception ex) { Logger.Warn($"[EditorDiff] 清理上一轮 Review Workspace 失败: {ex.Message}"); }
+            RaisePendingChangesChanged();
+        }
+
+        /// <summary>
+        /// 记录本轮待处理改动归属的用户消息索引（会话切换清空时使用）。
+        /// </summary>
+        public void SetReviewTurn(int userMsgIndex)
+        {
+            lock (_reviewLock) { _reviewTurnUserMsgIndex = userMsgIndex; }
+        }
+
+        /// <summary>本轮待处理改动归属的用户消息索引；无活动轮时为 -1。</summary>
+        public int ReviewTurnUserMsgIndex
+        {
+            get { lock (_reviewLock) return _reviewTurnUserMsgIndex; }
+        }
+
+        /// <summary>
+        /// 当前仍有待处理改动的文件路径快照（相对/绝对取决于写入方，通常为绝对路径）。
+        /// </summary>
+        public IReadOnlyList<string> GetPendingFilePaths()
+        {
+            lock (_reviewLock)
+            {
+                return _reviewWorkspace != null
+                    ? _reviewWorkspace.GetTrackedFilePaths()
+                    : (IReadOnlyList<string>)Array.Empty<string>();
+            }
+        }
+
+        /// <summary>指定文件当前是否仍有待处理改动。</summary>
+        public bool HasPendingFile(string filePath)
+        {
+            lock (_reviewLock)
+            {
+                return _reviewWorkspace != null && _reviewWorkspace.HasTrackedFile(filePath);
+            }
+        }
+
+        /// <summary>
+        /// 指定文件「待处理差异」的真实增删行数（仅统计未保留/未撤销的块）。
+        /// </summary>
+        public (int Added, int Removed) GetPendingLineStats(string filePath)
+        {
+            lock (_reviewLock)
+            {
+                return _reviewWorkspace != null
+                    ? _reviewWorkspace.GetPendingLineStats(filePath)
+                    : (0, 0);
+            }
+        }
+
+        /// <summary>
+        /// 为指定文件打开（或聚焦）内嵌 Diff 预览。
+        /// 从「文件改动列表」点击条目时调用：已打开的文件直接复用其活跃会话，
+        /// 未打开的文件按需打开编辑器后再创建会话。
+        /// </summary>
+        public async Task<bool> OpenDiffPreviewForFileAsync(string filePath)
+        {
+            if (string.IsNullOrWhiteSpace(filePath)) return false;
+
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+
+            Editing.StagedEditWorkspace? workspace;
+            lock (_reviewLock) { workspace = _reviewWorkspace; }
+
+            // 只显示「尚未处理」的块：已保留/已撤销的块并入基线，不再重复出现在预览里。
+            string baseline = workspace != null && workspace.HasTrackedFile(filePath)
+                ? workspace.BuildPendingOnlyBaseline(filePath)
+                : (workspace?.GetBaseline(filePath) ?? string.Empty);
+            string proposed = File.Exists(filePath)
+                ? Utils.FileEncodingHelper.ReadAllText(filePath)
+                : string.Empty;
+
+            IWpfTextView? view = FindWpfTextViewForFile(filePath);
+            if (view == null)
+            {
+                view = await OpenDocumentAndGetViewAsync(filePath);
+            }
+            if (view == null) return false;
+
+            // 已有活跃会话 → 直接返回（覆盖层已挂在该编辑器上）
+            if (_sessionManager.TryGetSession(view.TextBuffer, out var existing) && existing != null)
+                return true;
+
+            var session = CreateInlineDiffPreview(
+                view, baseline, proposed, textChanges: null, workspace: workspace);
+            return session != null;
+        }
+
+        /// <summary>
+        /// 全部应用：确认所有待处理文件（清除撤销追踪，保留磁盘内容）并收起预览。
+        /// </summary>
+        public void ApplyAllPending()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+
+            Editing.StagedEditWorkspace? workspace;
+            lock (_reviewLock) { workspace = _reviewWorkspace; }
+
+            // 先关闭本轮所有编辑器覆盖层，再确认文件，避免覆盖层挂在已确认的文件上。
+            CloseReviewSessions(workspace);
+            workspace?.ConfirmAll();
+            RaisePendingChangesChanged();
+        }
+
+        /// <summary>
+        /// 全部撤销：把所有待处理文件恢复到 Baseline（写回磁盘）并收起预览。
+        /// </summary>
+        public void RevertAllPending()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+
+            Editing.StagedEditWorkspace? workspace;
+            lock (_reviewLock) { workspace = _reviewWorkspace; }
+
+            CloseReviewSessions(workspace);
+            workspace?.RestoreToBaseline();
+            RaisePendingChangesChanged();
+        }
+
+        /// <summary>
+        /// 清空待处理追踪（切换会话 / 新建 / 回退整轮后调用）。
+        /// 不修改磁盘：调用方需自行决定是否先确认或撤销。
+        /// </summary>
+        public void ClearPendingTracking()
+        {
+            Editing.StagedEditWorkspace? workspace;
+            lock (_reviewLock)
+            {
+                workspace = _reviewWorkspace;
+                DetachReviewWorkspaceLocked();
+            }
+            CloseReviewSessions(workspace);
+            try { workspace?.ConfirmAll(); } catch (Exception ex) { Logger.Warn($"[EditorDiff] 清理 Review Workspace 失败: {ex.Message}"); }
+            RaisePendingChangesChanged();
+        }
+
+        /// <summary>
+        /// 某文件被单独保留/撤销后主动通知列表刷新（逐块操作收尾时调用）。
+        /// </summary>
+        public void NotifyPendingChanged()
+        {
+            RaisePendingChangesChanged();
+        }
+
+        #endregion
+
+        #region Private — Pending Change Tracking
+
+        private void OnReviewFileTracked(string filePath)
+        {
+            RaisePendingChangesChanged();
+        }
+
+        private void DetachReviewWorkspaceLocked()
+        {
+            if (_reviewWorkspace != null)
+            {
+                _reviewWorkspace.FileTracked -= OnReviewFileTracked;
+                _reviewWorkspace = null;
+            }
+            _reviewTurnUserMsgIndex = -1;
+        }
+
+        /// <summary>关闭属于指定 Workspace 的编辑器覆盖层并释放对应 Session。</summary>
+        private void CloseReviewSessions(Editing.StagedEditWorkspace? workspace)
+        {
+            if (workspace == null) return;
+
+            if (!ThreadHelper.CheckAccess())
+            {
+                // EditorDiffHost.Close 有 UI 线程亲和性；此处切回 UI 线程执行。
+                try
+                {
+                    ThreadHelper.JoinableTaskFactory.Run(async () =>
+                    {
+                        await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                        CloseReviewSessionsCore(workspace);
+                    });
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn($"[EditorDiff] 切换 UI 线程关闭预览失败: {ex.Message}");
+                }
+                return;
+            }
+
+            CloseReviewSessionsCore(workspace);
+        }
+
+        private void CloseReviewSessionsCore(Editing.StagedEditWorkspace workspace)
+        {
+            foreach (var session in _sessionManager.GetActiveSessions())
+            {
+                if (!ReferenceEquals(session.Workspace, workspace)) continue;
+                try
+                {
+                    if (session.SourceBuffer != null)
+                        CloseEditorHost(session.SourceBuffer);
+                }
+                catch (Exception ex) { Logger.Warn($"[EditorDiff] 关闭全部应用/撤销覆盖层失败: {ex.Message}"); }
+
+                try { session.Dispose(); }
+                catch (Exception ex) { Logger.Warn($"[EditorDiff] 释放全部应用/撤销会话失败: {ex.Message}"); }
+            }
+        }
+
+        private void RaisePendingChangesChanged()
+        {
+            try { PendingChangesChanged?.Invoke(this, EventArgs.Empty); }
+            catch (Exception ex) { Logger.Warn($"[EditorDiff] PendingChangesChanged 订阅异常: {ex.Message}"); }
+        }
+
+        private static IWpfTextView? FindWpfTextViewForFile(string filePath)
+            => ToolWindows.TerminalWindowHelper.FindWpfTextViewForFile(filePath);
+
+        private static async Task<IWpfTextView?> OpenDocumentAndGetViewAsync(string filePath)
+        {
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+            try
+            {
+                var openDoc = (Microsoft.VisualStudio.Shell.Interop.IVsUIShellOpenDocument?)
+                    Package.GetGlobalService(typeof(Microsoft.VisualStudio.Shell.Interop.SVsUIShellOpenDocument));
+                if (openDoc == null) return null;
+
+                var logicalView = Microsoft.VisualStudio.VSConstants.LOGVIEWID_Primary;
+                openDoc.OpenDocumentViaProject(
+                    filePath, ref logicalView, out _, out _, out _,
+                    out Microsoft.VisualStudio.Shell.Interop.IVsWindowFrame frame);
+                frame?.Show();
+
+                // 等待编辑器首帧装载后再取视图
+                for (int i = 0; i < 20; i++)
+                {
+                    var view = FindWpfTextViewForFile(filePath);
+                    if (view != null) return view;
+                    await Task.Delay(100);
+                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"[EditorDiff] 打开文档并获取视图失败 ({filePath}): {ex.Message}");
+            }
+            return null;
         }
 
         #endregion

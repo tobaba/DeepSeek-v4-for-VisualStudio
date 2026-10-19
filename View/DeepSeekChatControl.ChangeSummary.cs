@@ -4,22 +4,20 @@ using DeepSeek_v4_for_VisualStudio.Utils;
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
-using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
 
 namespace DeepSeek_v4_for_VisualStudio.View
 {
     /// <summary>
     /// 文件改动列表（聊天区与状态行之间）。
     ///
-    /// 数据来源是每轮随会话持久化的 <see cref="ChatMessage.ChangedFiles"/>
-    /// （Agent 编辑与内联编辑统一经 <c>RecordFileChangesForTurn</c> 登记）；
-    /// 早期版本的消息没有该字段时，回退到该轮计划 JSON 里的改动文件。
-    /// 按会话聚合，因此重启、切换、回退后依然与真实改动一致。
-    /// 默认只显示总计（+X / -Y、文件数），展开后逐文件列出，点击条目在 IDE 中打开该文件。
+    /// 数据来源是 <see cref="EditorDiffMarkerService"/> 当前登记的待处理 Workspace：
+    /// Agent 每改完一个文件就会把该文件登记进来，因此列表在编辑过程中即时出现，
+    /// 而不是等整轮结束。用户在 Diff 预览里逐块「保留 / 撤销」，或点击
+    /// 「全部应用 / 全部撤销」后，对应文件会从列表移除；全部处理完列表自动隐藏。
     /// </summary>
     public partial class DeepSeekChatControl
     {
@@ -35,6 +33,26 @@ namespace DeepSeek_v4_for_VisualStudio.View
         }
 
         private bool _changeSummaryExpanded;
+        private bool _changeSummarySubscribed;
+
+        /// <summary>订阅待处理改动变更事件（控件初始化时调用一次）。</summary>
+        private void SubscribeChangeSummary()
+        {
+            if (_changeSummarySubscribed) return;
+            _changeSummarySubscribed = true;
+            EditorDiffMarkerService.Instance.PendingChangesChanged += OnPendingChangesChanged;
+        }
+
+        /// <summary>退订待处理改动变更事件（控件释放时调用）。</summary>
+        private void UnsubscribeChangeSummary()
+        {
+            if (!_changeSummarySubscribed) return;
+            _changeSummarySubscribed = false;
+            try { EditorDiffMarkerService.Instance.PendingChangesChanged -= OnPendingChangesChanged; }
+            catch { }
+        }
+
+        private void OnPendingChangesChanged(object? sender, EventArgs e) => RefreshChangeSummary();
 
         /// <summary>
         /// 重新计算并刷新文件改动列表。可从任意线程调用；WPF 操作会切回 UI 线程。
@@ -57,8 +75,13 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 return;
             }
 
-            int totalAdded = files.Sum(f => f.LinesAdded);
-            int totalRemoved = files.Sum(f => f.LinesRemoved);
+            int totalAdded = 0;
+            int totalRemoved = 0;
+            foreach (var f in files)
+            {
+                totalAdded += f.LinesAdded;
+                totalRemoved += f.LinesRemoved;
+            }
 
             ChangeSummaryArea.Visibility = Visibility.Visible;
             ChangeSummaryTitle.Text = string.Format(
@@ -71,83 +94,33 @@ namespace DeepSeek_v4_for_VisualStudio.View
         }
 
         /// <summary>
-        /// 按会话聚合同一文件的增删行数。
-        /// 每轮优先取消息自身持久化的 <see cref="ChatMessage.ChangedFiles"/>；
-        /// 早期版本的消息没有该字段，回退到该轮计划 JSON 里的 ChangedFiles。
-        /// 同一条消息只取一个来源，避免同一轮被统计两次。
+        /// 从待处理 Workspace 读取仍有未处理差异的文件及其真实增删行数。
+        /// 只保留未保留 / 未撤销的块，因此用户在 Diff 里处理完一个文件，
+        /// 该文件（或它的剩余计数）会实时从列表消失 / 收敛。
         /// </summary>
         private List<ChangeFileRow> BuildChangeFileRows()
         {
-            // 路径（忽略大小写）→ 展示用路径 + 增删累计
-            var aggregated = new Dictionary<string, (string DisplayPath, int Added, int Removed)>(
-                StringComparer.OrdinalIgnoreCase);
+            var rows = new List<ChangeFileRow>();
+            var service = EditorDiffMarkerService.Instance;
 
-            void Accumulate(IEnumerable<FileChangeSummary>? changes)
+            foreach (var path in service.GetPendingFilePaths())
             {
-                if (changes == null) return;
-                foreach (var change in changes)
+                if (string.IsNullOrWhiteSpace(path)) continue;
+
+                var stats = service.GetPendingLineStats(path);
+                if (stats.Added <= 0 && stats.Removed <= 0) continue;
+
+                rows.Add(new ChangeFileRow
                 {
-                    if (change == null || string.IsNullOrWhiteSpace(change.FilePath))
-                        continue;
-
-                    string key = change.FilePath;
-                    // 删除文件时 LinesRemoved 可能记为 -1（仅表示「已删除」），不计入行数。
-                    int added = Math.Max(0, change.LinesAdded);
-                    int removed = Math.Max(0, change.LinesRemoved);
-
-                    if (aggregated.TryGetValue(key, out var existing))
-                    {
-                        aggregated[key] = (
-                            string.IsNullOrWhiteSpace(existing.DisplayPath) ? key : existing.DisplayPath,
-                            existing.Added + added,
-                            existing.Removed + removed);
-                    }
-                    else
-                    {
-                        aggregated[key] = (key, added, removed);
-                    }
-                }
+                    FilePath = path,
+                    FileName = Path.GetFileName(path),
+                    LinesAdded = stats.Added,
+                    LinesRemoved = stats.Removed,
+                });
             }
 
-            List<ChatMessage> snapshot;
-            lock (_lock)
-            {
-                snapshot = new List<ChatMessage>(_messages);
-            }
-
-            var opts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
-            foreach (var msg in snapshot)
-            {
-                // 首选本轮持久化的改动记录
-                if (msg.ChangedFiles != null && msg.ChangedFiles.Count > 0)
-                {
-                    Accumulate(msg.ChangedFiles);
-                    continue;
-                }
-
-                // 兼容历史会话：回退到该轮计划中的改动文件
-                if (string.IsNullOrEmpty(msg.PlanJson)) continue;
-                try
-                {
-                    var plan = JsonSerializer.Deserialize<AgentTaskPlan>(msg.PlanJson, opts);
-                    Accumulate(plan?.ChangedFiles);
-                }
-                catch
-                {
-                    // 历史数据格式异常时跳过该轮，不影响其它轮次统计
-                }
-            }
-
-            return aggregated
-                .Select(kv => new ChangeFileRow
-                {
-                    FilePath = kv.Value.DisplayPath,
-                    FileName = Path.GetFileName(kv.Value.DisplayPath),
-                    LinesAdded = kv.Value.Added,
-                    LinesRemoved = kv.Value.Removed,
-                })
-                .OrderBy(f => f.FileName, StringComparer.OrdinalIgnoreCase)
-                .ToList();
+            rows.Sort((a, b) => string.Compare(a.FileName, b.FileName, StringComparison.OrdinalIgnoreCase));
+            return rows;
         }
 
         /// <summary>按展开状态同步明细列表与箭头方向。</summary>
@@ -161,6 +134,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
         /// <summary>
         /// 清除某轮登记的文件改动（该轮改动已被回退时调用）。
+        /// 注意：这里只清理随消息持久化的历史记录；列表本身由待处理 Workspace 驱动。
         /// </summary>
         private void ClearRecordedFileChanges(int userMsgIndex)
         {
@@ -173,11 +147,24 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
         private void ChangeSummaryHeader_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
         {
+            // 点击「全部应用 / 全部撤销」按钮时不要连带展开 / 收起。
+            if (IsWithinButton(e.OriginalSource as DependencyObject)) return;
+
             _changeSummaryExpanded = !_changeSummaryExpanded;
             ApplyChangeSummaryExpandedState();
         }
 
-        private void ChangeFileListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        private static bool IsWithinButton(DependencyObject? source)
+        {
+            while (source != null)
+            {
+                if (source is Button) return true;
+                source = VisualTreeHelper.GetParent(source);
+            }
+            return false;
+        }
+
+        private async void ChangeFileListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
             if (ChangeFileListBox.SelectedItem is not ChangeFileRow row) return;
 
@@ -185,7 +172,40 @@ namespace DeepSeek_v4_for_VisualStudio.View
             ChangeFileListBox.SelectedItem = null;
 
             if (string.IsNullOrWhiteSpace(row.FilePath)) return;
-            _ = NavigateToFileAsync(row.FilePath);
+
+            // ── 先打开 / 聚焦文件，再确保该文件的内嵌 Diff 预览已弹出 ──
+            // 逐块保留 / 撤销完成后，Diff 宿主会通知待处理集合刷新，
+            // 列表随之移除已经全部处理完的文件。
+            await NavigateToFileAsync(row.FilePath);
+            await EditorDiffMarkerService.Instance.OpenDiffPreviewForFileAsync(row.FilePath);
+        }
+
+        private void ChangeSummaryApplyAllButton_Click(object sender, RoutedEventArgs e)
+        {
+            e.Handled = true;
+            try
+            {
+                EditorDiffMarkerService.Instance.ApplyAllPending();
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"[ChangeSummary] 全部应用失败: {ex.Message}");
+            }
+            RefreshChangeSummary();
+        }
+
+        private void ChangeSummaryRevertAllButton_Click(object sender, RoutedEventArgs e)
+        {
+            e.Handled = true;
+            try
+            {
+                EditorDiffMarkerService.Instance.RevertAllPending();
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"[ChangeSummary] 全部撤销失败: {ex.Message}");
+            }
+            RefreshChangeSummary();
         }
     }
 }

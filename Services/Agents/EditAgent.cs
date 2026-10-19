@@ -2,7 +2,6 @@ using DeepSeek_v4_for_VisualStudio.Models;
 using DeepSeek_v4_for_VisualStudio.Services;
 using DeepSeek_v4_for_VisualStudio.Services.EditTools;
 using DeepSeek_v4_for_VisualStudio.Settings;
-using DeepSeek_v4_for_VisualStudio.ToolWindows;
 using DeepSeek_v4_for_VisualStudio.Utils;
 using System;
 using System.Collections.Generic;
@@ -59,6 +58,10 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
 
         // ── Agent 多步编辑 Workspace ──
         private Editing.StagedEditWorkspace? _stagedWorkspace;
+
+        // 本轮是否已初始化 Workspace：多步计划会复用同一 Workspace 累积改动，
+        // 只在首个步骤清空残留，避免后续步骤把前面步骤的待处理改动清掉。
+        private bool _reviewWorkspaceStarted;
 
         /// <summary>
         /// ExploreAgent 引用，由 AgentFactory 注入。
@@ -256,6 +259,9 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         {
             CurrentPlan = plan;
             _agentCts = CancellationTokenSource.CreateLinkedTokenSource(context.CancellationToken);
+
+            // 新一轮编辑开始：允许下一步骤重置 Workspace 残留（多步计划共用同一个 Workspace）。
+            _reviewWorkspaceStarted = false;
 
             // ── 记录本轮计划开始时刻：供"前序步骤已代劳"判定区分本轮改动与上一轮残留 ──
             _planStartedUtc = DateTime.UtcNow;
@@ -516,7 +522,16 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             _stagedWorkspace.OpenDocumentWriter = EditBufferApplier.TryWriteOpenDocument;
             _stagedWorkspace.OpenDocumentContentProvider = EditBufferApplier.TryGetOpenDocumentContent;
 
-            _stagedWorkspace.Discard(); // 清空上一轮残留
+            // 只在首步清空残留；多步计划共用同一 Workspace 累积本轮全部改动，
+            // 这样「文件改动列表」能在每个文件改完后立即登记，而不是等整轮结束。
+            if (!_reviewWorkspaceStarted)
+            {
+                _stagedWorkspace.Discard();
+                _reviewWorkspaceStarted = true;
+            }
+
+            // 登记为本轮 Review Workspace：文件首次写入时触发列表即时刷新。
+            EditorDiffMarkerService.Instance.AttachReviewWorkspace(_stagedWorkspace);
 
             if (BuiltInTools != null)
                 BuiltInTools.Workspace = _stagedWorkspace;
@@ -670,13 +685,27 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                     // 从 originalContents 计算真实行数变化（使用 diff 算法）
                     int realAdded = 0;
                     int realRemoved = 0;
-                    if (originalContents.TryGetValue(r.FilePath, out string? original))
+                    string? original = null;
+                    bool hasOriginal = originalContents.TryGetValue(r.FilePath, out original);
+                    if (!hasOriginal)
+                    {
+                        // 已存在文件未登记在 originalContents 中：改用 Workspace 的 Baseline，
+                        // 避免把「整文件行数」当成新增行数（计数虚高）。
+                        var baseline = _stagedWorkspace?.GetBaseline(r.FilePath);
+                        if (baseline != null)
+                        {
+                            original = baseline;
+                            hasOriginal = true;
+                        }
+                    }
+
+                    if (hasOriginal)
                     {
                         // RAG-SOURCE: file-read 读取最终文件内容（计算变更统计）
                         string final = File.Exists(r.FilePath)
                             ? FileEncodingHelper.ReadAllText(r.FilePath)
                             : (r.FinalContent ?? string.Empty);
-                        CountDiffLines(original, final, out realAdded, out realRemoved);
+                        CountDiffLines(original ?? string.Empty, final, out realAdded, out realRemoved);
                     }
                     else
                     {
@@ -775,38 +804,12 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                 BuiltInTools.UpdateFileReadCache(latestContents);
             }
 
-            // ── 恢复 diff 预览，从 Workspace 生成 Batch 并创建 Session ──
-            var batch = _stagedWorkspace!.ToPreparedChangeBatch();
-
-            if (batch.Changes.Count > 0)
-            {
-                foreach (var change in batch.Changes)
-                {
-                    // RAG-SOURCE: file-read 读取最终文件内容（diff 预览对比）
-                    string finalContent = change.ProposedText;
-                    string oldContent = change.BaselineText;
-                    if (oldContent != finalContent)
-                    {
-                        // 写穿模式：已落盘，撤销时通过 _stagedWorkspace 恢复磁盘 Baseline
-                        await TerminalWindowHelper.ShowFinalDiffAsync(
-                            oldContent, finalContent, change.FilePath, _stagedWorkspace);
-                    }
-                }
-            }
-            else
-            {
-                // 无 Workspace 变更 → 保持旧版路径兼容
-                foreach (var kvp in originalContents)
-                {
-                    string finalContent = File.Exists(kvp.Key)
-                        ? await Task.Run(() => FileEncodingHelper.ReadAllText(kvp.Key), ct)
-                        : string.Empty;
-                    if (kvp.Value != finalContent)
-                    {
-                        await TerminalWindowHelper.ShowFinalDiffAsync(kvp.Value, finalContent, kvp.Key);
-                    }
-                }
-            }
+            // ── 不再批量自动弹出 diff 预览 ──
+            // 待处理改动已在每个文件写入时登记到 Review Workspace，聊天区的
+            // 「文件改动列表」会在每个文件改完后即时出现；用户在列表里点击某个文件
+            // 时才打开该文件的 Inline Diff 预览（逐块保留/撤销会同步回列表）。
+            // 旧的批量预览会在编辑过程中反复遮挡编辑器，且与列表状态不同源。
+            _ = originalContents; // 仍保留原始内容快照供步骤自检 / 诊断使用
 
             // ── v1.1.10: 步骤完成自检 — 对比步骤描述中的文件名与实际修改 ──
             // 如果步骤描述明确提到了某文件但未在本次编辑中修改，记录提示。
@@ -1531,15 +1534,17 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                 // ── 更新 plan.ChangedFiles ──
                 if (!plan.ChangedFiles.Any(c => string.Equals(c.FilePath, resolvedPath, StringComparison.OrdinalIgnoreCase)))
                 {
+                    // 用 Workspace 的待处理差异计算真实增删行数：
+                    // 旧实现对新文件直接记「整文件行数」、对已存在文件记「最终文件行数」，
+                    // 都不是真实变更行数（+366 / +364 就是由此产生的）。
                     int added = 0, removed = 0;
-                    if (isNewFile || !fileExists)
+                    var stats = _stagedWorkspace?.GetPendingLineStats(resolvedPath) ?? (0, 0);
+                    added = stats.Added;
+                    removed = stats.Removed;
+
+                    // Workspace 不可用（旧路径）时回退：新文件按整文件行数，其余按 0 计。
+                    if (added == 0 && removed == 0 && (isNewFile || !fileExists))
                     {
-                        added = 1; // 新文件或异常情况
-                    }
-                    else
-                    {
-                        // 工具修改了已存在的文件，无法获取原始内容做精确 diff，
-                        // 使用最终文件行数作为变更量估算
                         try
                         {
                             string content = await Task.Run(() => FileEncodingHelper.ReadAllText(resolvedPath), ct);
