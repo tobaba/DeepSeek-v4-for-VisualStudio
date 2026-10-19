@@ -56,6 +56,8 @@ namespace DeepSeek_v4_for_VisualStudio.View.Hosts
             _hostControl = new InlineDiffHostControl();
             _hostControl.SetViewerHandle(session.ViewerHandle);
             // diff 各子视图的缩放跟随宿主编辑器页面的 ZoomLevel
+            // 必须在 SetViewerHandle 之后赋值：控件在注入 viewer 时才会应用缩放，
+            // 先设 HostTextView 会因为 _viewer 仍为空而丢掉首次同步。
             _hostControl.HostTextView = _textView;
 
             _hostControl.OnAccept = () => FinishSession(session);
@@ -499,6 +501,7 @@ namespace DeepSeek_v4_for_VisualStudio.View.Hosts
                 _fallbackContainer = null;
             }
 
+            _hostControl?.DisposeZoomSync();
             _hostControl?.DetachViewer();
             _hostControl = null;
             _isShown = false;
