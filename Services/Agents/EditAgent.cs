@@ -804,12 +804,16 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                 BuiltInTools.UpdateFileReadCache(latestContents);
             }
 
-            // ── 不再批量自动弹出 diff 预览 ──
-            // 待处理改动已在每个文件写入时登记到 Review Workspace，聊天区的
-            // 「文件改动列表」会在每个文件改完后即时出现；用户在列表里点击某个文件
-            // 时才打开该文件的 Inline Diff 预览（逐块保留/撤销会同步回列表）。
-            // 旧的批量预览会在编辑过程中反复遮挡编辑器，且与列表状态不同源。
-            _ = originalContents; // 仍保留原始内容快照供步骤自检 / 诊断使用
+            // ── Diff 预览的弹出时机统一交给 EditorDiffMarkerService ──
+            // 每个文件写入时会触发 FileTracked：
+            //  · 该文件已在 IDE 打开 → 立即自动弹出 Inline Diff 预览（保持既有体验）；
+            //  · 未打开 → 只登记到「文件改动列表」，用户点击条目时再打开预览。
+            // 这样无需在这里批量创建会话，也不会让未打开的文件被强行打开。
+            // 步骤结束时再补一次：同一文件在本步骤被多次写入时，刷新既有预览内容。
+            foreach (var change in _stagedWorkspace.ToPreparedChangeBatch().Changes)
+            {
+                EditorDiffMarkerService.Instance.TryAutoPreviewOpenFile(change.FilePath);
+            }
 
             // ── v1.1.10: 步骤完成自检 — 对比步骤描述中的文件名与实际修改 ──
             // 如果步骤描述明确提到了某文件但未在本次编辑中修改，记录提示。

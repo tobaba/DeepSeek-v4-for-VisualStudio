@@ -93,16 +93,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 ?? textView.TextBuffer.GetHashCode().ToString();
 
             // 构建 PreparedChangeSet
-            var change = new PreparedChangeSet
-            {
-                FilePath = filePath,
-                Operation = ProposedFileOperation.Modify,
-                BaselineText = originalContent,
-                ProposedText = proposedContent,
-                TextChanges = textChanges ?? Array.Empty<ProposedTextChange>(),
-                ContentTypeName = textView.TextBuffer.ContentType.TypeName,
-                SaveBehavior = ProposalSaveBehavior.KeepDocumentDirty,
-            };
+            var change = BuildChangeSet(
+                textView, filePath, originalContent, proposedContent, textChanges);
 
             // ── 同一文档已有活跃写穿会话（AI 在预览期间再次编辑同一文件）→ 原地刷新 ──
             // 旧会话的 Baseline / Hunks 已过期，直接创建会被单文档单 Session 约束拒绝。
@@ -162,6 +154,23 @@ namespace DeepSeek_v4_for_VisualStudio.Services
 
             return session;
         }
+
+        /// <summary>
+        /// 构建写穿模式下的单文件变更提案（Baseline = 待处理基线，Proposed = 当前内容）。
+        /// </summary>
+        private static PreparedChangeSet BuildChangeSet(
+            IWpfTextView textView, string filePath, string baseline, string proposed,
+            IReadOnlyList<ProposedTextChange>? textChanges = null)
+            => new PreparedChangeSet
+            {
+                FilePath = filePath,
+                Operation = ProposedFileOperation.Modify,
+                BaselineText = baseline,
+                ProposedText = proposed,
+                TextChanges = textChanges ?? Array.Empty<ProposedTextChange>(),
+                ContentTypeName = textView.TextBuffer.ContentType.TypeName,
+                SaveBehavior = ProposalSaveBehavior.KeepDocumentDirty,
+            };
 
         /// <summary>
         /// 原地刷新已有写穿会话：把撤销追踪移交新 Workspace、替换变更内容，
@@ -453,6 +462,59 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         private void OnReviewFileTracked(string filePath)
         {
             RaisePendingChangesChanged();
+
+            // 文件已在 IDE 打开时，恢复「被修改即自动弹出 Diff 预览」的既有行为；
+            // 未打开的文件不主动打开，留在文件改动列表里由用户点击查看。
+            TryAutoPreviewOpenFile(filePath);
+        }
+
+        /// <summary>
+        /// 若目标文件此刻已在编辑器中打开，则立即为其弹出内嵌 Diff 预览。
+        /// 已打开文档在 Agent 写穿后 buffer 已是新内容，这里用待处理块构建只读预览。
+        /// 未打开 / 已有活跃会话 / 用户关闭了预览设置时静默跳过。
+        /// </summary>
+        public void TryAutoPreviewOpenFile(string filePath)
+        {
+            if (string.IsNullOrWhiteSpace(filePath)) return;
+            if (!(Settings.DeepSeekOptionsPage.Instance?.ShowDiffMarkersInEditor ?? true)) return;
+
+            // Agent 在线程池线程写入，这里必须切回 UI 线程再创建宿主。
+            _ = ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
+            {
+                try
+                {
+                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+
+                    var view = FindWpfTextViewForFile(filePath);
+                    if (view == null) return; // 未在 IDE 打开 → 不主动打开
+
+                    Editing.StagedEditWorkspace? workspace;
+                    lock (_reviewLock) { workspace = _reviewWorkspace; }
+                    if (workspace == null || !workspace.HasTrackedFile(filePath)) return;
+
+                    string baseline = workspace.BuildPendingOnlyBaseline(filePath);
+                    string proposed = workspace.ReadFile(filePath);
+                    if (string.Equals(baseline, proposed, StringComparison.Ordinal)) return;
+
+                    // 同一文件再次被写入 → 原地刷新既有会话，保持预览与最新内容一致。
+                    if (_sessionManager.TryGetSession(view.TextBuffer, out var existing) && existing != null)
+                    {
+                        RefreshWriteThroughSession(
+                            existing,
+                            BuildChangeSet(view, filePath, baseline, proposed),
+                            workspace,
+                            view.TextBuffer);
+                        return;
+                    }
+
+                    CreateInlineDiffPreview(
+                        view, baseline, proposed, textChanges: null, workspace: workspace);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn($"[EditorDiff] 自动弹出 Diff 预览失败 ({Path.GetFileName(filePath)}): {ex.Message}");
+                }
+            });
         }
 
         private void DetachReviewWorkspaceLocked()
