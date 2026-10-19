@@ -915,6 +915,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     _activeSession.Title = string.Empty;
                 }
 
+                // 文件改动列表随会话清空
+                RefreshChangeSummary();
+
                 var welcomeMsg = new ChatMessage
                 {
                     Role = "assistant",

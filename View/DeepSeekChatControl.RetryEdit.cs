@@ -48,8 +48,38 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     .ToList();
 
                 _fileChangeHistory[userMsgIndex] = merged;
+
+                // ── 同步写入对应消息，随会话持久化；任务面板关闭清除 PlanJson 后
+                //    文件改动列表仍能还原（列表不依赖计划数据）──
+                if (userMsgIndex >= 0 && userMsgIndex < _messages.Count)
+                {
+                    var target = _messages[userMsgIndex];
+                    // 同一轮可能被记录多次（多步编辑/内联编辑），按路径合并而非覆盖
+                    var byPath = new Dictionary<string, FileChangeSummary>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var existing in target.ChangedFiles)
+                    {
+                        if (!string.IsNullOrWhiteSpace(existing.FilePath))
+                            byPath[existing.FilePath] = existing;
+                    }
+                    foreach (var change in merged)
+                    {
+                        if (string.IsNullOrWhiteSpace(change.FilePath)) continue;
+                        byPath[change.FilePath] = new FileChangeSummary
+                        {
+                            FilePath = change.FilePath,
+                            LinesAdded = Math.Max(0, change.LinesAdded),
+                            LinesRemoved = Math.Max(0, change.LinesRemoved),
+                            BriefDescription = change.BriefDescription,
+                        };
+                    }
+                    target.ChangedFiles = byPath.Values.ToList();
+                }
+
                 Logger.Info($"[FileHistory] 记录第 {userMsgIndex} 轮文件变更: {merged.Count} 个文件");
             }
+
+            // 文件改动列表与回退历史同源，记录后立即刷新
+            RefreshChangeSummary();
         }
 
         /// <summary>
@@ -543,6 +573,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
                     if (plan.ChangedFiles.Count > 0)
                         _pendingAgentFileChanges = new List<FileChangeSummary>(plan.ChangedFiles);
+
+                    // ── 计划已写入 PlanJson：刷新文件改动列表 ──
+                    RefreshChangeSummary();
                 }
                 else
                 {
@@ -760,10 +793,15 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
                 lock (_lock) { _fileChangeHistory.Remove(userMsgIndex); }
 
+                // 本轮改动已被回退，同步清理消息上登记的文件改动
+                ClearRecordedFileChanges(userMsgIndex);
+
                 StatusLabel.Text = revertedCount > 0
                     ? $"已回退 {revertedCount} 个文件" + (failedCount > 0 ? $"，{failedCount} 个失败" : "")
                     : "未回退任何文件";
                 Logger.Info($"[FileHistory] 回退完成: {revertedCount} 成功, {failedCount} 失败");
+
+                RefreshChangeSummary();
             }
             else
             {

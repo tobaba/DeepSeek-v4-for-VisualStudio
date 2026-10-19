@@ -796,6 +796,15 @@ namespace DeepSeek_v4_for_VisualStudio.Models
         public string? PlanJson { get; set; }
 
         /// <summary>
+        /// 本轮实际改动的文件及其增删行数（Agent 编辑或内联编辑登记）。
+        /// 与 <see cref="PlanJson"/> 分开保存：任务面板被关闭会清除 PlanJson，
+        /// 但对文件的改动依然存在，因此会话文件改动列表必须以本字段为准。
+        /// 仅对 Role == "user" 的消息有意义（键为该轮的用户消息）。
+        /// </summary>
+        [DataMember]
+        public List<FileChangeSummary> ChangedFiles { get; set; } = new();
+
+        /// <summary>
         /// 缓存命中率统计卡片的 HTML（由 BuildCacheHitFooterHtml 生成）。
         /// 重启后 RebuildMessagesHtml 将其注入到消息末尾，确保缓存统计在会话恢复后仍可见。
         /// null 或空字符串表示无缓存统计（如用户消息、纯文本回复等）。

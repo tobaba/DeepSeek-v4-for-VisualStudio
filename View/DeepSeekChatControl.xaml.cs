@@ -1899,6 +1899,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
                 // ── 当前计价时段徽标 ──
                 UpdatePricingPeriodBadge();
+
+                // ── 文件改动列表：标题文案随语言切换 ──
+                RefreshChangeSummary();
             }
             catch (Exception ex)
             {

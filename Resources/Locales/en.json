@@ -580,6 +580,8 @@
  "diff.guideText": "Use   to navigate diffs. Confirm to apply changes, Revert to restore original code.",
     "diff.linesAdded": "+{0} lines",
     "diff.linesRemoved": "-{0} lines",
+    "═══ File Changes ═══": "═══ File Changes ═══",
+    "changeSummary.files": "{0} file(s) changed",
  "diff.createFailed": "Error: Failed to create diff view: {0}",
     "diff.hunkListHeader": "Change Blocks",
  "diff.revertHunk": "Revert Block",

@@ -1139,6 +1139,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 _messagesHtml.Append(ChatHtmlService.BuildLoadEarlierButtonHtml(_renderWindowStart));
             AppendMessageRange(_messagesHtml, _renderWindowStart, _messages.Count);
             _lastRenderedMessagesLength = 0;
+
+            // 会话切换 / 新建 / 清空 / 重启恢复都会走到这里：同步刷新文件改动列表
+            RefreshChangeSummary();
         }
 
         /// <summary>构建 [from, to) 区间消息 HTML（含分支导航）。</summary>

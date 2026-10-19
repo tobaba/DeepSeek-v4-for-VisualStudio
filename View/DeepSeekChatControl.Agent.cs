@@ -1162,6 +1162,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     {
                         _pendingAgentFileChanges = new List<FileChangeSummary>(plan.ChangedFiles);
                     }
+
+                    // ── 计划已写入 PlanJson：刷新文件改动列表 ──
+                    RefreshChangeSummary();
                 }
                 else if (agentResult.Success && !string.IsNullOrWhiteSpace(agentResult.Content))
                 {

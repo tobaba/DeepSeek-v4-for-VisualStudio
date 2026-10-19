@@ -123,6 +123,16 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 if (StatusLabel != null) StatusLabel.Foreground = mutedText;
                 if (ConversationElapsedLabel != null) ConversationElapsedLabel.Foreground = mutedText;
 
+                // ── 文件改动列表（聊天区与状态行之间）──
+                if (ChangeSummaryArea != null)
+                {
+                    ChangeSummaryArea.Background = panelBg;
+                    ChangeSummaryArea.BorderBrush = panelBorder;
+                }
+                if (ChangeSummaryTitle != null) ChangeSummaryTitle.Foreground = textColor;
+                if (ChangeSummaryChevron != null) ChangeSummaryChevron.Foreground = mutedText;
+                if (ChangeFileListBox != null) ChangeFileListBox.Foreground = textColor;
+
                 // ── 输入区 ──
                 if (InputTextBox != null)
                 {
