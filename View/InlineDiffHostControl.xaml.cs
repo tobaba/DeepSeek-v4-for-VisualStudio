@@ -535,6 +535,13 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 {
                     switch (lineDiff.DifferenceType)
                     {
+                        // 注意：整行替换在 VS 里是 Change，而不是 Add + Remove。
+                        // 之前只处理 Add/Remove，导致修改块既不计新增也不计删除，
+                        // 摘要才会显示成 «+0 行新增 -1 行删除»。
+                        case DifferenceType.Change:
+                            addedCount += lineDiff.Right.Length;
+                            removedCount += lineDiff.Left.Length;
+                            break;
                         case DifferenceType.Add:
                             addedCount += lineDiff.Right.Length;
                             break;
