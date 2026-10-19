@@ -486,18 +486,25 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Editing
         public (int Added, int Removed) GetPendingLineStats(string filePath)
         {
             var normalizedPath = NormalizePath(filePath);
-            string baseline;
             lock (_lock)
             {
-                if (!_trackedFiles.ContainsKey(normalizedPath))
+                if (!_trackedFiles.TryGetValue(normalizedPath, out var file))
                     return (0, 0);
-                baseline = BuildPendingOnlyBaseline(normalizedPath);
-            }
 
-            string current = File.Exists(normalizedPath)
-                ? FileEncodingHelper.ReadAllText(normalizedPath)
-                : string.Empty;
-            return CountChangedLines(baseline, current);
+                // 直接复用已算好的差异块：待处理块的 Old/New 行数之和
+                // 就是「仅含待处理块的基线 vs 当前内容」的真实增删行数，
+                // 不必再拼一遍基线字符串并跑第二遍 diff（那正是 UI 线程卡顿的来源）。
+                RecomputeHunksLocked(file, normalizedPath);
+
+                int added = 0, removed = 0;
+                foreach (var hunk in file.Hunks)
+                {
+                    if (hunk.IsReverted || hunk.IsAccepted) continue;
+                    added += Math.Max(0, hunk.NewLineCount);
+                    removed += Math.Max(0, hunk.OldLineCount);
+                }
+                return (added, removed);
+            }
         }
 
         /// <summary>
@@ -631,36 +638,51 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Editing
                 if (!_trackedFiles.TryGetValue(normalizedPath, out var file))
                     return Array.Empty<DiffHunkInfo>();
 
-                string currentContent = File.Exists(normalizedPath)
-                    ? FileEncodingHelper.ReadAllText(normalizedPath)
-                    : string.Empty;
+                RecomputeHunksLocked(file, normalizedPath);
+                return file.Hunks;
+            }
+        }
 
-                // 重算 hunks（若内容已变化如部分撤销后）
-                var previousHunks = file.Hunks;
-                file.Hunks = ComputeHunks(file.BaselineContent, currentContent);
+        /// <summary>
+        /// 重算指定文件的差异块并回填已保留/已撤销标记（调用方须持有 _lock）。
+        ///
+        /// 以「当前内容哈希」为缓存键：内容未变时直接复用上次结果，
+        /// 避免「文件改动列表」每次刷新都重跑 LCS。UI 线程会在编辑过程中
+        /// 被多次刷新触发，重算全量 diff 正是打开文档卡在「正在加载文档…」的元凶。
+        /// </summary>
+        private void RecomputeHunksLocked(StagedFile file, string normalizedPath)
+        {
+            string currentContent = File.Exists(normalizedPath)
+                ? FileEncodingHelper.ReadAllText(normalizedPath)
+                : string.Empty;
 
-                // ── 回填已撤销/已保留标记 ──
-                // 重算会新建实例，需按 OldText+NewText 精确匹配恢复状态：
-                // 已撤销块在重算后自然消失（内容已等于 Baseline），无需回填；
-                // 已保留块内容未变，按内容匹配即可恢复其标记。
-                foreach (var hunk in file.Hunks)
+            string contentHash = ComputeSha256(currentContent);
+            if (string.Equals(file.HunksContentHash, contentHash, StringComparison.Ordinal))
+                return; // 内容未变 → 复用缓存，跳过 LCS
+
+            var previousHunks = file.Hunks;
+            file.Hunks = ComputeHunks(file.BaselineContent, currentContent);
+            file.HunksContentHash = contentHash;
+
+            // ── 回填已撤销/已保留标记 ──
+            // 重算会新建实例，需按 OldText+NewText 精确匹配恢复状态：
+            // 已撤销块在重算后自然消失（内容已等于 Baseline），无需回填；
+            // 已保留块内容未变，按内容匹配即可恢复其标记。
+            foreach (var hunk in file.Hunks)
+            {
+                foreach (var prev in previousHunks)
                 {
-                    foreach (var prev in previousHunks)
-                    {
-                        if (!prev.IsReverted && !prev.IsAccepted)
-                            continue;
+                    if (!prev.IsReverted && !prev.IsAccepted)
+                        continue;
 
-                        if (HunkTextEquals(prev.OldText, hunk.OldText) &&
-                            HunkTextEquals(prev.NewText, hunk.NewText))
-                        {
-                            hunk.IsReverted = prev.IsReverted;
-                            hunk.IsAccepted = prev.IsAccepted;
-                            break;
-                        }
+                    if (HunkTextEquals(prev.OldText, hunk.OldText) &&
+                        HunkTextEquals(prev.NewText, hunk.NewText))
+                    {
+                        hunk.IsReverted = prev.IsReverted;
+                        hunk.IsAccepted = prev.IsAccepted;
+                        break;
                     }
                 }
-
-                return file.Hunks;
             }
         }
 
@@ -1021,6 +1043,12 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Editing
 
             /// <summary>差异块列表（Baseline vs 当前，逐块撤销用）</summary>
             public List<DiffHunkInfo> Hunks { get; set; } = new();
+
+            /// <summary>
+            /// Hunks 对应的「当前内容」哈希：内容未变时复用 Hunks，跳过 LCS 重算。
+            /// 由 <see cref="RecomputeHunksLocked"/> / <see cref="AcceptSingleHunk"/> 维护。
+            /// </summary>
+            public string? HunksContentHash { get; set; }
         }
     }
 }

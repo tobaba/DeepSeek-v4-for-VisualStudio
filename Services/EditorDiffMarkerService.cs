@@ -468,19 +468,21 @@ namespace DeepSeek_v4_for_VisualStudio.Services
 
             if (!ThreadHelper.CheckAccess())
             {
-                // EditorDiffHost.Close 有 UI 线程亲和性；此处切回 UI 线程执行。
-                try
+                // EditorDiffHost.Close 有 UI 线程亲和性，必须切回 UI 线程。
+                // 这里用 RunAsync 而不是 Run：调用方可能正持有其它锁（例如会话切换路径），
+                // 同步等待 UI 线程会与文档加载 / 编辑器写入互相阻塞，表现为「正在加载文档…」卡死。
+                _ = ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
                 {
-                    ThreadHelper.JoinableTaskFactory.Run(async () =>
+                    try
                     {
                         await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
                         CloseReviewSessionsCore(workspace);
-                    });
-                }
-                catch (Exception ex)
-                {
-                    Logger.Warn($"[EditorDiff] 切换 UI 线程关闭预览失败: {ex.Message}");
-                }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Warn($"[EditorDiff] 异步关闭预览失败: {ex.Message}");
+                    }
+                });
                 return;
             }
 

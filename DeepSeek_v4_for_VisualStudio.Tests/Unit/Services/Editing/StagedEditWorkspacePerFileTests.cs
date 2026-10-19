@@ -117,4 +117,19 @@ public class StagedEditWorkspacePerFileTests : IDisposable
         stats.Removed.Should().Be(0);
         ws.HasPendingHunks(file).Should().BeFalse();
     }
+
+    [Fact]
+    public void GetHunks_ContentUnchanged_ReusesCachedHunks()
+    {
+        // 内容未变时复用同一批 hunk 实例，避免「文件改动列表」每次刷新都重跑 LCS
+        // （那会在 UI 线程上阻塞文档加载）。
+        var file = WriteSourceFile("cache.txt", "A\nB\nC\n");
+        var ws = new StagedEditWorkspace();
+        ws.WriteFile(file, "A\nB2\nC\n");
+
+        var first = ws.GetHunks(file);
+        var second = ws.GetHunks(file);
+
+        second[0].Should().BeSameAs(first[0]);
+    }
 }

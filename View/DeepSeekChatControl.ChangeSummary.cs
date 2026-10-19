@@ -4,6 +4,7 @@ using DeepSeek_v4_for_VisualStudio.Utils;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -34,6 +35,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
         private bool _changeSummaryExpanded;
         private bool _changeSummarySubscribed;
+        private int _changeSummaryRefreshVersion;
 
         /// <summary>订阅待处理改动变更事件（控件初始化时调用一次）。</summary>
         private void SubscribeChangeSummary()
@@ -56,9 +58,15 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
         /// <summary>
         /// 重新计算并刷新文件改动列表。可从任意线程调用；WPF 操作会切回 UI 线程。
+        ///
+        /// 行数据的计算（读盘 + diff）放到线程池执行：编辑过程中每次文件写入与
+        /// 每次逐块操作都会触发刷新，若在 UI 线程同步读盘 / 跑 diff，会长时间占住
+        /// UI 线程，导致此时在 IDE 打开文档卡在「正在加载文档…」。
         /// </summary>
         private void RefreshChangeSummary()
         {
+            if (_disposed) return;
+
             if (!Dispatcher.CheckAccess())
             {
                 _ = Dispatcher.BeginInvoke(new Action(RefreshChangeSummary));
@@ -67,7 +75,43 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
             if (ChangeSummaryArea == null) return;
 
-            var files = BuildChangeFileRows();
+            // 只应用最新一次结果：连续的变更事件（多文件连续写入）无需排队重算。
+            int version = ++_changeSummaryRefreshVersion;
+            _ = Task.Run(() =>
+            {
+                List<ChangeFileRow> rows;
+                try
+                {
+                    rows = BuildChangeFileRows();
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn($"[ChangeSummary] 计算文件改动列表失败: {ex.Message}");
+                    rows = new List<ChangeFileRow>();
+                }
+
+                if (_disposed) return;
+                try
+                {
+                    _ = Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        if (_disposed || version != _changeSummaryRefreshVersion) return;
+                        ApplyChangeSummaryRows(rows);
+                    }));
+                }
+                catch (Exception ex)
+                {
+                    // 控件已卸载 / Dispatcher 已关闭：忽略这次刷新
+                    Logger.Debug($"[ChangeSummary] 刷新调度失败: {ex.GetType().Name}");
+                }
+            });
+        }
+
+        /// <summary>把后台算好的行数据应用到 WPF 控件（必须在 UI 线程调用）。</summary>
+        private void ApplyChangeSummaryRows(List<ChangeFileRow> files)
+        {
+            if (ChangeSummaryArea == null) return;
+
             if (files.Count == 0)
             {
                 ChangeSummaryArea.Visibility = Visibility.Collapsed;
