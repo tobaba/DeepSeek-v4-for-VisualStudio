@@ -377,9 +377,13 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             }
             if (view == null) return false;
 
-            // 已有活跃会话 → 直接返回（覆盖层已挂在该编辑器上）
+            // 已有活跃会话 → 复用，但先确认覆盖层还挂在编辑器上
+            // （切换文档标签会把可视树卸载/重载，Adorner 可能已被 WPF 丢弃）。
             if (_sessionManager.TryGetSession(view.TextBuffer, out var existing) && existing != null)
+            {
+                EnsureEditorHostOverlay(view.TextBuffer);
                 return true;
+            }
 
             var session = CreateInlineDiffPreview(
                 view, baseline, proposed, textChanges: null, workspace: workspace);
@@ -572,6 +576,25 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                     host.Close();
                     _editorHosts.Remove(buffer);
                 }
+            }
+        }
+
+        /// <summary>
+        /// 确保指定 buffer 的覆盖层仍在可视树上（标签切回 / 再次点击条目时调用）。
+        /// </summary>
+        private void EnsureEditorHostOverlay(ITextBuffer buffer)
+        {
+            try
+            {
+                lock (_editorHostsLock)
+                {
+                    if (_editorHosts.TryGetValue(buffer, out var host))
+                        host.EnsureOverlayVisible();
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"[EditorDiff] 重新挂载 Diff 覆盖层失败: {ex.Message}");
             }
         }
 
