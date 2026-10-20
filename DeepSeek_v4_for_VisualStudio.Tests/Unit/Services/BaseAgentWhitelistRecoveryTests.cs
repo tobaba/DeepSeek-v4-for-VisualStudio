@@ -54,10 +54,23 @@ public class BaseAgentWhitelistRecoveryTests
         handler.RequestBodies.Should().HaveCount(1);
         agent.PendingHandoffRequest.Should().NotBeNull();
         agent.PendingHandoffRequest!.TargetAgent.Should().Be(AgentType.Edit);
+        // 线上 58 号请求回归：request_handoff 的转发前缀必须包含本轮完整的
+        // assistant(tool_calls) + tool 结果，才能与 ContextManager 的 canonical history
+        // 逐条对齐；否则后续记忆提取会在 handoff 位置分叉并造成整段 Prompt Cache miss。
         agent.Context.ForwardedMessages.Should().NotBeNull();
-        agent.Context.ForwardedMessages.Should().HaveCount(1);
-        agent.Context.ForwardedMessages![0].Role.Should().Be("user");
-        agent.Context.ForwardedMessages![0].ToolCalls.Should().BeNull();
+        agent.Context.ForwardedMessages.Should().HaveCount(4,
+            "转发前缀必须包含本轮 user、assistant(tool_calls) 以及全部 tool 结果");
+        agent.Context.ForwardedMessages.Should().Contain(m => m.Role == "user");
+
+        var handoffAssistant = agent.Context.ForwardedMessages!.Single(m =>
+            m.Role == "assistant"
+            && m.ToolCalls != null
+            && m.ToolCalls.Any(tc => tc.Function.Name == "request_handoff"));
+        var handoffCall = handoffAssistant.ToolCalls!.Single(tc => tc.Function.Name == "request_handoff");
+
+        var handoffResult = agent.Context.ForwardedMessages!.Single(m =>
+            m.Role == "tool" && m.ToolCallId == handoffCall.Id);
+        handoffResult.Content.Should().StartWith("HANDOFF_REQUESTED");
     }
 
     [Fact]

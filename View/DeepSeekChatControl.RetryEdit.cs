@@ -352,6 +352,11 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     Logger.Warn("[AgentHandoff] 未找到有效的 PlanJson，EditAgent 将回退到单步执行");
                 }
 
+                // ── 切换前先捕获源 Agent 的缓存前缀 ──
+                //     重启恢复等情况下 HandoffJson 不包含 ForwardedMessages；若运行期仍能取到
+                //     最近发送快照，应在这里补齐，避免按钮 Handoff 退化为全量历史重建。
+                CaptureHandoffForwardedMessages(_pendingHandoff);
+
                 // ── 切换到目标 Agent 并绑定事件 ──
                 var handoffTargetAgent = _agentFactory.GetAgent(_pendingHandoff.TargetAgent);
                 SwitchActiveAgent(handoffTargetAgent, context);
@@ -404,6 +409,11 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     await TaskScheduler.Default;
 
                     // ── 切换并执行链式 Handoff ──
+                    //     RetryEdit 的链式路径此前遗漏了 ForwardedMessages 捕获，导致
+                    //     Edit→Build、Edit→Ask、Build→Ask 等切换每次都可能从 canonical history
+                    //     重建前缀。必须在 SwitchActiveAgent 之前、_activeAgent 仍指向源 Agent 时捕获。
+                    CaptureHandoffForwardedMessages(nextHandoff);
+
                     var chainAgent = _agentFactory.GetAgent(nextHandoff.TargetAgent);
                     SwitchActiveAgent(chainAgent, context);
                     context.IsChainBackContinuation = nextHandoff.IsChainBackContinuation;
