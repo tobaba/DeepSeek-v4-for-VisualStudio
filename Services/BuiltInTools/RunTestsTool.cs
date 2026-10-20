@@ -23,6 +23,39 @@ namespace DeepSeek_v4_for_VisualStudio.Services.BuiltInTools
 
         public override string Name => "run_tests";
 
+        /// <summary>
+        /// "工作区没有测试项目"的稳定标记。带前缀是为了让上层（EditAgent 的验证状态跟踪）
+        /// 在不依赖本地化文案的前提下识别该分支，进而回退到构建验证。
+        /// </summary>
+        internal const string NoTestProjectMarker = "NO_TESTS:";
+
+        /// <summary>存在多个测试项目、需要显式指定时的稳定标记。</summary>
+        internal const string MultipleProjectsMarker = "MULTIPLE_TEST_PROJECTS:";
+
+        /// <summary>
+        /// 判断 run_tests 结果是否属于"明确失败"。
+        ///
+        /// 采用白名单式失败判定（而非"成功判定"）：只有出现 failed&gt;0、
+        /// Error: 前缀或 Timeout: 前缀才算失败，其余一律视为通过。
+        /// 理由：把成功误判为失败会让系统多跑一次昂贵的构建，代价明显高于
+        /// 漏判（漏判时最终答案仍会带上测试输出供人工核对）。
+        /// </summary>
+        internal static bool IsTestRunFailure(string? toolResult)
+        {
+            if (string.IsNullOrWhiteSpace(toolResult))
+                return false;
+
+            if (toolResult.StartsWith("Error: ", StringComparison.OrdinalIgnoreCase) ||
+                toolResult.StartsWith("Timeout: ", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            var match = System.Text.RegularExpressions.Regex.Match(
+                toolResult, @"failed=(\d+)");
+            return match.Success
+                && int.TryParse(match.Groups[1].Value, out int failed)
+                && failed > 0;
+        }
+
         public override ToolDefinition GetDefinition()
         {
             return new ToolDefinition
@@ -95,10 +128,10 @@ namespace DeepSeek_v4_for_VisualStudio.Services.BuiltInTools
             switch (result.Error)
             {
                 case TestRunErrorKind.NoTestProject:
-                    return L["tool.runTests.noTestProject"];
+                    return NoTestProjectMarker + L["tool.runTests.noTestProject"];
 
                 case TestRunErrorKind.MultipleProjects:
-                    var sb = new StringBuilder(L["tool.runTests.multipleProjects"]);
+                    var sb = new StringBuilder(MultipleProjectsMarker + L["tool.runTests.multipleProjects"]);
                     sb.AppendLine();
                     foreach (string p in result.CandidateProjects)
                         sb.AppendLine($"- {p}");
@@ -175,6 +208,12 @@ namespace DeepSeek_v4_for_VisualStudio.Services.BuiltInTools
 
             if (string.IsNullOrEmpty(toolResult)) return L("tool.common.noResult");
             if (toolResult.StartsWith("Error: ")) return toolResult;
+
+            // 稳定标记：直接回显，避免被下面的计数正则误判
+            if (toolResult.StartsWith(NoTestProjectMarker))
+                return toolResult.Substring(NoTestProjectMarker.Length);
+            if (toolResult.StartsWith(MultipleProjectsMarker))
+                return toolResult.Substring(MultipleProjectsMarker.Length);
 
             var match = System.Text.RegularExpressions.Regex.Match(
                 toolResult, @"passed=(\d+) failed=(\d+) skipped=(\d+)");

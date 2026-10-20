@@ -50,6 +50,12 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         private bool _didAttemptBuild;
         private bool? _lastBuildSucceeded;
 
+        // ── 本轮是否实际调用过测试，以及最后一次测试运行的结果 ──
+        // 验证优先级：有可运行的测试项目时先跑 run_tests，跑不过才回退 build_solution。
+        private bool _didAttemptTests;
+        private bool? _lastTestsPassed;
+        private string? _lastDirectTestResult;
+
         // ── 本轮计划开始时刻（UTC）──
         // 用于判定"某步骤的目标文件是否在本轮被前序步骤修改过"：
         // 只有最后写入时间晚于该时刻的文件才算"本轮改的"，避免把上一轮残留的
@@ -175,6 +181,9 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             _lastDirectBuildResult = null;
             _didAttemptBuild = false;
             _lastBuildSucceeded = null;
+            _didAttemptTests = false;
+            _lastTestsPassed = null;
+            _lastDirectTestResult = null;
 
             var result = new AgentResult
             {
@@ -640,11 +649,29 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                         "build_solution",
                         StringComparison.OrdinalIgnoreCase)));
 
+                bool hasTestCall = stepMessages.Any(m =>
+                    m.ToolCalls != null &&
+                    m.ToolCalls.Any(tc => string.Equals(
+                        tc.Function?.Name,
+                        "run_tests",
+                        StringComparison.OrdinalIgnoreCase)));
+
                 step.AiResponse = BuildToolStepContent(
                     result,
                     GetLastUserFacingToolOutput(stepMessages));
 
-                if (hasBuildCall)
+                // 测试优先：本步骤跑过测试且拿到明确结论时，以测试结果作为验证结论；
+                // 否则（没跑测试、或工作区没有可运行的测试）再退回构建结论。
+                if (hasTestCall && _lastTestsPassed != null)
+                {
+                    bool testsPassed = _lastTestsPassed == true;
+                    step.ResultSummary = testsPassed
+                        ? LocalizationService.Instance["agent.log.editTestStepPassed"]
+                        : LocalizationService.Instance["agent.log.editTestStepFailed"];
+                    AddLog(testsPassed ? "INFO" : "WARN",
+                        "[EditAgent] " + step.ResultSummary);
+                }
+                else if (hasBuildCall)
                 {
                     bool buildSucceeded = _lastBuildSucceeded == true;
                     step.ResultSummary = buildSucceeded
@@ -1578,8 +1605,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         #region Build State
 
         /// <summary>
-        /// 按消息顺序追踪本轮 build_solution 与文件修改，确保最终构建状态来自最后一次有效构建。
-        /// 如果构建后又修改了文件，则把上次构建标记为失效，后续必须由 Build Agent 重新构建。
+        /// 按消息顺序追踪本轮 run_tests / build_solution 与文件修改，确保验证状态来自最后一次有效结果。
+        /// 文件在验证后又发生变化时，把两种验证结果一并标记为失效。
         /// </summary>
         private void TrackBuildStateFromToolMessages(List<ChatApiMessage> messages)
         {
@@ -1602,23 +1629,55 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
 
                     if (IsFileModificationToolName(toolName))
                     {
-                        // 文件在构建后发生变化，旧构建结果不再可信。
+                        // 文件在验证后发生变化，旧验证结果不再可信。
                         _lastBuildSucceeded = null;
+                        _lastTestsPassed = null;
                         continue;
                     }
 
-                    if (!string.Equals(toolName, "build_solution", StringComparison.OrdinalIgnoreCase))
+                    bool isBuild = string.Equals(toolName, "build_solution", StringComparison.OrdinalIgnoreCase);
+                    bool isTests = string.Equals(toolName, "run_tests", StringComparison.OrdinalIgnoreCase);
+                    if (!isBuild && !isTests)
                         continue;
 
-                    string? buildResult = null;
+                    string? toolResult = null;
                     if (!string.IsNullOrEmpty(toolCall.Id))
-                        toolResults.TryGetValue(toolCall.Id, out buildResult);
+                        toolResults.TryGetValue(toolCall.Id, out toolResult);
 
-                    _didAttemptBuild = true;
-                    _lastBuildSucceeded = DeepSeek_v4_for_VisualStudio.Services.BuiltInTools.BuildSolutionTool.IsSuccessResult(buildResult);
+                    if (isBuild)
+                    {
+                        _didAttemptBuild = true;
+                        _lastBuildSucceeded = DeepSeek_v4_for_VisualStudio.Services.BuiltInTools.BuildSolutionTool.IsSuccessResult(toolResult);
 
-                    if (!string.IsNullOrWhiteSpace(buildResult))
-                        _lastDirectBuildResult = buildResult;
+                        if (!string.IsNullOrWhiteSpace(toolResult))
+                            _lastDirectBuildResult = toolResult;
+                    }
+                    else
+                    {
+                        _didAttemptTests = true;
+
+                        if (toolResult != null &&
+                            (toolResult.StartsWith(
+                                 DeepSeek_v4_for_VisualStudio.Services.BuiltInTools.RunTestsTool.NoTestProjectMarker,
+                                 StringComparison.Ordinal) ||
+                             toolResult.StartsWith(
+                                 DeepSeek_v4_for_VisualStudio.Services.BuiltInTools.RunTestsTool.MultipleProjectsMarker,
+                                 StringComparison.Ordinal)))
+                        {
+                            // 没有可执行的测试（或未指定项目）：测试未构成验证，
+                            // 置空以要求回退到构建验证，而不是当成"测试通过"。
+                            _lastTestsPassed = null;
+                        }
+                        else
+                        {
+                            _lastTestsPassed =
+                                DeepSeek_v4_for_VisualStudio.Services.BuiltInTools.RunTestsTool
+                                    .IsTestRunFailure(toolResult) ? false : true;
+                        }
+
+                        if (!string.IsNullOrWhiteSpace(toolResult))
+                            _lastDirectTestResult = toolResult;
+                    }
                 }
             }
         }
@@ -2128,19 +2187,30 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         }
 
         /// <summary>
-        /// 判断是否必须把最终构建交给 Build Agent。
-        /// 有文件变更时，只有“本轮确实构建过且最后一次构建成功”才能跳过；
-        /// 未构建、构建失败或构建后又修改文件，都需要 Build Agent 处理。
+        /// 判断是否必须把最终验证交给 Build Agent。
+        ///
+        /// 优先级：测试优先，构建兜底。
+        /// - 有文件变更且本轮测试通过 → 跳过（测试是比"能编译"更强的验证）；
+        /// - 测试失败，或没有可运行的测试 → 由构建验证兜底，构建成功才跳过；
+        /// - 未测试、未构建、构建失败，或验证后又改了文件，都需要 Build Agent 处理。
         /// </summary>
         internal static bool ShouldHandoffToBuild(
             bool hasFileChanges,
             bool didAttemptBuild,
             bool? lastBuildSucceeded,
-            bool skipAutoBuild)
+            bool skipAutoBuild,
+            bool didAttemptTests = false,
+            bool? lastTestsPassed = null)
         {
             if (skipAutoBuild || !hasFileChanges)
                 return false;
 
+            // ── 测试优先：跑过且通过即可结束验证 ──
+            if (didAttemptTests && lastTestsPassed == true)
+                return false;
+
+            // ── 测试通过之外的路径一律回到构建判定 ──
+            // 包括：测试失败、工作区没有可运行的测试（lastTestsPassed 为 null）。
             return !didAttemptBuild || lastBuildSucceeded != true;
         }
 
@@ -2156,7 +2226,9 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                 hasFileChanges,
                 _didAttemptBuild,
                 _lastBuildSucceeded,
-                skipBuild);
+                skipBuild,
+                _didAttemptTests,
+                _lastTestsPassed);
 
             // ── AI 动态移交优先，但 Build 移交仍受最终构建状态约束 ──
             if (PendingHandoffRequest != null)
@@ -2208,6 +2280,15 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             var L = LocalizationService.Instance;
             var prompt = new StringBuilder();
             prompt.AppendLine(L["agent.edit.handoffBuildPrompt"]);
+
+            // 把最近的测试结果一并带给 Build Agent：测试失败时它需要据此定位问题，
+            // 而不是从零再跑一遍同样的测试。
+            if (!string.IsNullOrWhiteSpace(_lastDirectTestResult))
+            {
+                prompt.AppendLine();
+                prompt.AppendLine(L["agent.edit.handoffTestResultHeader"]);
+                prompt.AppendLine(TruncateBuildResultForHandoff(_lastDirectTestResult!));
+            }
 
             if (!string.IsNullOrWhiteSpace(_lastDirectBuildResult))
             {

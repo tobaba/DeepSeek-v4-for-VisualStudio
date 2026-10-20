@@ -235,6 +235,48 @@ public class EditAgentTests
         result.Should().Be(expected);
     }
 
+    /// <summary>
+    /// 验证优先级：测试通过即可结束，未通过/无测试时才回到构建判定。
+    /// 参数依次为：尝试测试、测试结果、尝试构建、构建结果、是否移交 Build。
+    /// </summary>
+    [Theory]
+    [InlineData(true, true, false, null, false)]    // 测试通过 → 不必移交（无需构建）
+    [InlineData(true, true, true, false, false)]    // 测试通过覆盖构建失败（构建结果已过期）→ 不移交
+    [InlineData(true, false, false, null, true)]    // 测试失败且未构建 → 移交 Build 处理
+    [InlineData(true, false, true, true, false)]    // 测试失败但随后构建成功 → 编译层面已通过，不移交
+    [InlineData(true, null, false, null, true)]     // 工作区没有可运行的测试（无明确结论）→ 回到构建判定，未构建则移交
+    [InlineData(true, null, true, true, false)]     // 无测试但构建成功 → 不移交
+    [InlineData(false, null, false, null, true)]    // 没跑测试也没构建 → 移交
+    public void ShouldHandoffToBuild_PrefersTestsThenFallsBackToBuild(
+        bool didAttemptTests,
+        bool? lastTestsPassed,
+        bool didAttemptBuild,
+        bool? lastBuildSucceeded,
+        bool expected)
+    {
+        bool result = EditAgent.ShouldHandoffToBuild(
+            hasFileChanges: true,
+            didAttemptBuild: didAttemptBuild,
+            lastBuildSucceeded: lastBuildSucceeded,
+            skipAutoBuild: false,
+            didAttemptTests: didAttemptTests,
+            lastTestsPassed: lastTestsPassed);
+
+        result.Should().Be(expected);
+    }
+
+    [Fact]
+    public void EditVerifyUserMessage_PrefersTestsOverBuild()
+    {
+        // 验证提示词必须把 run_tests 排在 build_solution 之前，
+        // 否则模型会沿用旧的"改完就构建"路径。
+        string message = AiPrompts.EditVerifyUserMessage;
+
+        message.Should().Contain("run_tests");
+        message.IndexOf("run_tests", StringComparison.Ordinal)
+            .Should().BeLessThan(message.IndexOf("build_solution", StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task ExecutePlanAsync_WithCancelledContext_MarksPlanCancelledWithoutExecutingStep()
     {
@@ -624,9 +666,10 @@ public class EditAgentTests
         blocked.Should().Contain("不允许");
         blocked.Should().Contain("build_solution");
 
-        // 最后一步 → 提示允许构建
+        // 最后一步 → 提示允许验证，且测试优先于构建
         var allowed = InvokeBuildStepPrompt(agent, blockedPlan.Steps[1], blockedPlan);
-        allowed.Should().Contain("允许调用 build_solution");
+        allowed.Should().Contain("允许验证");
+        allowed.Should().Contain("run_tests");
     }
 
     private static string InvokeBuildStepPrompt(EditAgent agent, AgentStep step, AgentTaskPlan plan)
