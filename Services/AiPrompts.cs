@@ -143,12 +143,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
 
         #region AI Sub-prompts (summary polish, memory, auto-split, web search, workspace warning)
 
-        /// <summary>摘要润色 — 系统提示词</summary>
-        public static string SummaryPolishSystemPrompt => L["system.aiPrompt.summaryPolishSystem"];
-
-        /// <summary>摘要润色 — 用户提示词模板。{0}=directSummary</summary>
-        public static string SummaryPolishUserPrompt => L["system.aiPrompt.summaryPolishUser"];
-
         /// <summary>自动记忆记录 — 系统提示词</summary>
         public static string MemoryAutoRecordSystemPrompt => L["system.aiPrompt.memoryAutoRecordSystem"];
 

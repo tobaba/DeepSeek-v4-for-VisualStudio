@@ -2333,34 +2333,15 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
 
         /// <summary>
         /// 构建移交 Ask Agent 生成总结的 Handoff。
-        /// 将文件变更统计、步骤执行情况、缓存命中率等上下文打包传递给 Ask Agent。
+        /// Edit/Build 共用 BuildAgent.CreateAskSummaryHandoff，统一进入 summary-only 终态路径。
         /// </summary>
         private AgentHandoff BuildSummaryHandoff(AgentTaskPlan plan)
         {
             var L = LocalizationService.Instance;
-
-            if (plan.IsCancelled)
-            {
-                return new AgentHandoff
-                {
-                    Label = L["agent.edit.handoffAskLabel"],
-                    TargetAgent = AgentType.Ask,
-                    Prompt = L["edit.summary.cancelled"],
-                    AutoSend = true,
-                    ShowContinueOn = false,
-                };
-            }
-
-            // 计划统计、步骤结果和构建状态由源 Agent 的 assistant 消息承载；
-            // 总结 user 只保留纯指令，不能把这些结构化执行结果重新塞进用户消息。
-            return new AgentHandoff
-            {
-                Label = L["agent.edit.handoffAskLabel"],
-                TargetAgent = AgentType.Ask,
-                Prompt = L["agent.summary.handoffUserPrompt"],
-                AutoSend = true,
-                ShowContinueOn = false,
-            };
+            string prompt = plan.IsCancelled
+                ? L["edit.summary.cancelled"]
+                : L["agent.summary.handoffUserPrompt"];
+            return BuildAgent.CreateAskSummaryHandoff(prompt);
         }
 
         /// <summary>

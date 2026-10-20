@@ -171,6 +171,33 @@ public class EditAgentTests
     }
 
     [Fact]
+    public void BuildSummaryHandoff_UsesSameSummaryOnlyPathAsBuildAgent()
+    {
+        var agent = new EditAgent(_apiService);
+        var plan = new AgentTaskPlan
+        {
+            Intent = AgentIntent.CodeChange,
+            Steps = new List<AgentStep>
+            {
+                new() { Index = 1, Title = "修改代码", Status = AgentStepStatus.Completed },
+            },
+        };
+
+        var method = typeof(EditAgent).GetMethod(
+            "BuildSummaryHandoff",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        method.Should().NotBeNull();
+
+        var handoff = (AgentHandoff)method!.Invoke(agent, new object[] { plan })!;
+
+        handoff.TargetAgent.Should().Be(AgentType.Ask);
+        handoff.IsSummaryOnly.Should().BeTrue(
+            "Edit 和 Build 的终态总结必须统一进入 AskAgent.ExecuteSummaryOnlyAsync");
+        handoff.Prompt.Should().Be(
+            LocalizationService.Instance["agent.summary.handoffUserPrompt"]);
+    }
+
+    [Fact]
     public void ShouldSkipAskSummaryHandoff_ReadOnlyOutputWithoutChanges_ReturnsTrue()
     {
         var plan = new AgentTaskPlan

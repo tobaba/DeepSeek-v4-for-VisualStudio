@@ -708,6 +708,14 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                 return false;
             }
 
+            // 源 Agent 的行为 system prompt 位于请求尾部，不属于对话内容。
+            // build_solution 等路径保存的快照可能仍带着它；先移除，再追加最终 assistant 回答。
+            if (snapshot.Count > 0
+                && string.Equals(snapshot[snapshot.Count - 1].Role, "system", StringComparison.Ordinal))
+            {
+                snapshot.RemoveAt(snapshot.Count - 1);
+            }
+
             int lastAssistantIndex = snapshot.FindLastIndex(
                 m => string.Equals(m.Role, "assistant", StringComparison.Ordinal));
 

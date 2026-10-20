@@ -383,6 +383,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 int chainDepth = 0;
                 const int maxChainDepth = 10;
                 AgentHandoff? pendingChainBack = null;
+                bool parallelMemoryExtractionStarted = false;
                 while (agentResult.Handoff != null
                     && agentResult.Handoff.AutoSend
                     && !context.CancellationToken.IsCancellationRequested
@@ -413,6 +414,12 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     //     Edit→Build、Edit→Ask、Build→Ask 等切换每次都可能从 canonical history
                     //     重建前缀。必须在 SwitchActiveAgent 之前、_activeAgent 仍指向源 Agent 时捕获。
                     CaptureHandoffForwardedMessages(nextHandoff, agentResult);
+
+                    if (!parallelMemoryExtractionStarted && nextHandoff.IsSummaryOnly)
+                    {
+                        parallelMemoryExtractionStarted =
+                            TryStartParallelMemoryExtraction(nextHandoff, agentResult);
+                    }
 
                     var chainAgent = _agentFactory.GetAgent(nextHandoff.TargetAgent);
                     SwitchActiveAgent(chainAgent, context);
@@ -603,7 +610,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 await SyncAgentResponseToTreeAndContextAsync();
 
                 // ── 一次 Handoff 执行结束后根据需要自动记录 memory（此前该路径缺失）──
-                TryScheduleAutoMemoryRecord();
+                if (!parallelMemoryExtractionStarted)
+                    TryScheduleAutoMemoryRecord();
 
                 // ── 刷新右下角余额/Token 显示 ──
                 RefreshConsumptionDisplay();
