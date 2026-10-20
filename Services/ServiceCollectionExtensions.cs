@@ -82,15 +82,19 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             // ── 构建服务 ──
             services.AddSingleton<IBuildService, BuildService>();
 
+            // ── 测试服务 ──
+            services.AddSingleton<ITestService, TestService>();
+
             // ── 内置工具服务 ──
             services.AddSingleton<IBuiltInToolService>(sp =>
             {
                 var mcpManager = sp.GetService<IMcpManagerService>() as McpManagerService;
                 var webSearch = sp.GetService<IWebSearchService>() as WebSearchService;
                 var buildService = sp.GetService<IBuildService>();
+                var testService = sp.GetService<ITestService>();
                 var memoryService = sp.GetService<IMemoryService>();
                 var skillService = sp.GetRequiredService<ISkillService>();
-                return new BuiltInToolService(mcpManager, webSearch, buildService, memoryService, skillService);
+                return new BuiltInToolService(mcpManager, webSearch, buildService, memoryService, skillService, testService);
             });
 
             // ── 持久化服务（适配器包装静态类） ──

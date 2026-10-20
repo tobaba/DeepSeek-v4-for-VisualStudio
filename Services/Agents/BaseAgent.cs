@@ -39,6 +39,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         {
             "list_dir", "read_file", "file_search", "grep_search", "symbol_search", "get_file_symbols", "get_errors",
             "fetch_webpage", "web_search", "capture_window", "capture_webpage", "build_solution",
+            "run_tests",
             "replace_string_in_file", "multi_replace_string_in_file",
             "create_file", "delete_file", "apply_patch", "create_directory", "run_in_terminal",
             "get_terminal_output", "load_skill", "read_skill_resource",
@@ -3739,6 +3740,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                 or "create_file"
                 or "apply_patch"
                 or "build_solution"          // 构建时间不可预测，由 BuildService 内部控制超时
+                or "run_tests"               // 测试运行时间不可预测，由 TestService 内部控制超时
                 or "read_file"               // 可能触发项目外路径权限弹窗
                 or "list_dir"                // 同上
                 or "create_directory"        // 同上
@@ -4952,6 +4954,34 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             if (level == "ERROR") Logger.Error($"[{Definition.Name}] {message}");
             else if (level == "WARN") Logger.Warn($"[{Definition.Name}] {message}");
             else Logger.Info($"[{Definition.Name}] {message}");
+        }
+
+        /// <summary>
+        /// 把进入 Agent 的消息（用户请求或 Handoff 提示词）压缩成一行摘要，供**写日志文件**使用。
+        ///
+        /// 这类消息常达数 KB，且尾部会挂上给模型看的脚手架（例如「优先复用对话历史中已读取的文件内容…」）。
+        /// 它只能进日志文件，**不能进 <see cref="AddLog"/> 的时间线**——时间线会渲染进 UI，
+        /// 用户会看到本该给 AI 的提示词（Build/Plan/Explore 曾因此把整段 Handoff prompt 显示给用户）。
+        /// 时间线请改用各 Agent 的 *Short 文案键（不含 {0} 占位符）。
+        /// </summary>
+        /// <param name="message">原始用户消息或 Handoff 提示词。</param>
+        protected static string SummarizeForLog(string? message)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+                return "(empty)";
+
+            string normalized = message.Replace("\r\n", "\n").Trim();
+            int newlineIdx = normalized.IndexOf('\n');
+            string firstLine = newlineIdx >= 0 ? normalized.Substring(0, newlineIdx).Trim() : normalized;
+
+            const int maxFirstLine = 120;
+            if (firstLine.Length > maxFirstLine)
+                firstLine = firstLine.Substring(0, maxFirstLine) + "…";
+
+            int totalLines = normalized.Split('\n').Length;
+            return totalLines > 1
+                ? $"{firstLine} …(共 {normalized.Length} 字符 / {totalLines} 行)"
+                : firstLine;
         }
 
         #endregion

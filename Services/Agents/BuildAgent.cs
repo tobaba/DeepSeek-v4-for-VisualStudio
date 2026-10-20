@@ -38,6 +38,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         {
             // 构建与诊断
             "build_solution",
+            "run_tests",
             "get_errors",
             "file_search",      // 直接定位文件，构建错误路径/名称不完整时使用
             "grep_search",      // 直接定位符号/错误文本引用
@@ -110,7 +111,11 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             PendingHandoffRequest = null;
 
             var L = LocalizationService.Instance;
-            AddLog("INFO", string.Format(L["agent.log.buildStarted"], userMessage));
+            // 时间线只显示稳定短句：Handoff prompt 尾部带「优先复用对话历史…」等给模型的脚手架，
+            // 整段经过 AddLog 会渲染进 UI，把内部提示词显示给用户。
+            // 原文压缩后只写日志文件。
+            Logger.Info(string.Format(L["agent.log.buildStarted"], SummarizeForLog(userMessage)));
+            AddLog("INFO", L["agent.log.buildStartedShort"]);
 
             var result = new AgentResult
             {
