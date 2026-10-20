@@ -83,4 +83,75 @@ public class ApiDebugDumpServiceTests : IDisposable
             ApiDebugDumpService.Enabled = false;
         }
     }
+
+    [Fact]
+    public void WriteRequest_UnescapesUnicodeToReadableChinese()
+    {
+        ApiDebugDumpService.Enabled = true;
+        try
+        {
+            var scope = ApiDebugDumpService.BeginCall("DeepSeek");
+            ApiDebugDumpService.WriteRequest(scope, "{\"text\":\"\\u4e2d\\u6587\\u6d4b\\u8bd5\"}");
+
+            string content = File.ReadAllText(scope.RequestPath!);
+            content.Should().Contain("中文测试");
+            content.Should().NotContain("\\u4e2d");
+        }
+        finally
+        {
+            ApiDebugDumpService.Enabled = false;
+        }
+    }
+
+    [Fact]
+    public void UnescapeUnicodeForReadability_DecodesChineseAndEmoji()
+    {
+        ApiDebugDumpService.UnescapeUnicodeForReadability("\\u4e2d\\u6587")
+            .Should().Be("中文");
+
+        // emoji 以 UTF-16 代理对 \uD83D\uDE00 传输，必须还原为一个字符而不是两个孤立代理项。
+        ApiDebugDumpService.UnescapeUnicodeForReadability("\\uD83D\\uDE00")
+            .Should().Be("\U0001F600");
+    }
+
+    [Fact]
+    public void UnescapeUnicodeForReadability_KeepsJsonEscapesAndControlCharactersIntact()
+    {
+        // JSON 结构转义保持原样，确保转储仍是合法 JSON。
+        ApiDebugDumpService.UnescapeUnicodeForReadability("a\\\"b\\\\c\\nd")
+            .Should().Be("a\\\"b\\\\c\\nd");
+
+        // 控制字符（\u000A 换行）不还原，否则会把一行一个 SSE 事件的结构打散。
+        ApiDebugDumpService.UnescapeUnicodeForReadability("\\u000a")
+            .Should().Be("\\u000a");
+
+        // 转义的反斜杠后跟 u 序列是字面量，不得误判为转义符。
+        ApiDebugDumpService.UnescapeUnicodeForReadability("\\\\u4e2d")
+            .Should().Be("\\\\u4e2d");
+    }
+
+    [Fact]
+    public void WriteRequest_ProducesValidJson_AfterUnescaping()
+    {
+        ApiDebugDumpService.Enabled = true;
+        try
+        {
+            var scope = ApiDebugDumpService.BeginCall("DeepSeek");
+            ApiDebugDumpService.WriteRequest(
+                scope,
+                "{\"messages\":[{\"role\":\"user\",\"content\":\"\\u4f60\\u597d\\n\\u4e16\\u754c\"}]}");
+
+            // 还原中文后仍须能被 JSON 解析器接受（换行仍是 \n 转义，未被还原成真实控制字符）。
+            using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(scope.RequestPath!));
+            doc.RootElement
+                .GetProperty("messages")[0]
+                .GetProperty("content")
+                .GetString()
+                .Should().Be("你好\n世界");
+        }
+        finally
+        {
+            ApiDebugDumpService.Enabled = false;
+        }
+    }
 }

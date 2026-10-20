@@ -136,7 +136,10 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             {
                 // 每个 DumpScope 的文件路径唯一，单次调用内只有一个写入者（发起请求的线程 /
                 // 消费 SSE 的线程），因此不需要跨调用共享锁，也不会在长会话里累积锁对象。
-                File.WriteAllText(scope.RequestPath!, requestJson ?? string.Empty, Encoding.UTF8);
+                File.WriteAllText(
+                    scope.RequestPath!,
+                    UnescapeUnicodeForReadability(requestJson),
+                    Encoding.UTF8);
             }
             catch (Exception ex)
             {
@@ -164,12 +167,110 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             {
                 // 单次调用的响应流只有一个消费线程顺序写入，且文件路径在各调用间唯一，
                 // 因此无需加锁，也不会在长会话里累积锁对象。
-                File.AppendAllText(scope.ResponsePath!, text + Environment.NewLine, Encoding.UTF8);
+                File.AppendAllText(
+                    scope.ResponsePath!,
+                    UnescapeUnicodeForReadability(text) + Environment.NewLine,
+                    Encoding.UTF8);
             }
             catch (Exception ex)
             {
                 Logger.Warn($"[ApiDump] 写入响应流失败: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// 把 <c>\uXXXX</c> 转义（含 UTF-16 代理对）还原成真实字符，让转储文件里的中文
+        /// 直接可读，而不是满屏 <c>\u4e2d\u6587</c>。
+        ///
+        /// 只还原可打印字符：<c>\u0000</c>~<c>\u001F</c> 这类控制字符保持原样，
+        /// 否则还原出的真实换行 / 制表符会把「一行一个 SSE 事件」的响应流结构打散。
+        /// 其余转义（<c>\"</c> <c>\\</c> <c>\n</c> ...）一律原样保留，保证仍是合法 JSON。
+        /// </summary>
+        internal static string UnescapeUnicodeForReadability(string? text)
+        {
+            if (string.IsNullOrEmpty(text)) return string.Empty;
+
+            // 快速路径：没有反斜杠就不含任何转义。
+            if (text.IndexOf('\\') < 0) return text;
+
+            var sb = new StringBuilder(text.Length);
+            int i = 0;
+            while (i < text.Length)
+            {
+                char c = text[i];
+                if (c != '\\' || i + 1 >= text.Length)
+                {
+                    sb.Append(c);
+                    i++;
+                    continue;
+                }
+
+                char escape = text[i + 1];
+
+                // 转义的反斜杠：整体原样保留，避免把 "\\u4e2d"（字面量）误当成转义序列。
+                if (escape == '\\')
+                {
+                    sb.Append('\\').Append('\\');
+                    i += 2;
+                    continue;
+                }
+
+                if (escape == 'u' && TryReadHex4(text, i + 2, out int codePoint))
+                {
+                    // 代理对（如 emoji）：需要连同低位一起还原，否则会得到两个孤立代理项。
+                    if (char.IsHighSurrogate((char)codePoint)
+                        && TryReadHex4At(text, i + 6, '\\', 'u', out int low)
+                        && char.IsLowSurrogate((char)low))
+                    {
+                        sb.Append((char)codePoint).Append((char)low);
+                        i += 12;
+                        continue;
+                    }
+
+                    if (codePoint >= 0x20)
+                    {
+                        sb.Append((char)codePoint);
+                        i += 6;
+                        continue;
+                    }
+                }
+
+                // 其它转义序列原样保留。
+                sb.Append(c).Append(escape);
+                i += 2;
+            }
+
+            return sb.ToString();
+        }
+
+        private static bool TryReadHex4(string text, int start, out int value)
+        {
+            value = 0;
+            if (start < 0 || start + 4 > text.Length) return false;
+
+            for (int k = 0; k < 4; k++)
+            {
+                int digit = HexValue(text[start + k]);
+                if (digit < 0) return false;
+                value = (value << 4) | digit;
+            }
+            return true;
+        }
+
+        private static bool TryReadHex4At(string text, int start, char expectedFirst, char expectedSecond, out int value)
+        {
+            value = 0;
+            if (start + 1 >= text.Length) return false;
+            if (text[start] != expectedFirst || text[start + 1] != expectedSecond) return false;
+            return TryReadHex4(text, start + 2, out value);
+        }
+
+        private static int HexValue(char c)
+        {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
         }
 
         private static string SanitizeProviderName(string? provider)
