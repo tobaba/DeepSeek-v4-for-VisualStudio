@@ -54,6 +54,9 @@ public class RunInTerminalToolTests
 
     [Theory]
     [InlineData("format C:", DangerousCommandKind.SystemDestruction)]
+    [InlineData("format D: /q", DangerousCommandKind.SystemDestruction)]
+    [InlineData("format /fs:NTFS D:", DangerousCommandKind.SystemDestruction)]
+    [InlineData("Format-Volume -DriveLetter C", DangerousCommandKind.SystemDestruction)]
     [InlineData("diskpart clean", DangerousCommandKind.SystemDestruction)]
     [InlineData("shutdown /s", DangerousCommandKind.Shutdown)]
     [InlineData("Stop-Computer -Force", DangerousCommandKind.Shutdown)]
@@ -98,6 +101,12 @@ public class RunInTerminalToolTests
     [InlineData("git status")]
     [InlineData("pip list")]
     [InlineData("Remove-Item -Recurse -Force .\\build")]
+    // 回归：PowerShell -Format 参数里的 "HH:mm" 曾被当成盘符 "H:"，
+    // 使取时间这类普通命令被误判为「格式化磁盘」而拦下。
+    [InlineData("Write-Output (Get-Date -Format \"yyyy-MM-dd HH:mm:ss\")")]
+    [InlineData("Get-Date -Format \"HH:mm\"")]
+    [InlineData("Get-ChildItem | Format-Table -AutoSize")]
+    [InlineData("Get-Date -Format o")]
     public void DetectDangerousCommand_AllowsSafeCommand(string command)
     {
         RunInTerminalTool.DetectDangerousCommand(command).Should().Be(DangerousCommandKind.None);

@@ -135,8 +135,18 @@ namespace DeepSeek_v4_for_VisualStudio.Services.BuiltInTools
                 DangerousCommandKind.Shutdown),
 
             // ── 磁盘 / 引导区破坏 ──
+            // 仅匹配真正的"格式化"调用：format 必须是命令起始（行首或 ; | & ( 之后），
+            // 且紧跟盘符或 /fs 参数。
+            // 不能写成 `\bformat\b[^\r\n;|]{0,80}[A-Za-z]:`：
+            // PowerShell 的 `Get-Date -Format "yyyy-MM-dd HH:mm:ss"` 里 "Format" 之后
+            // 隔着引号出现 "HH:mm" 这种 X: 形态，会被误判成格式化磁盘，
+            // 使普通取时间命令被安全过滤器拦截。
             (new System.Text.RegularExpressions.Regex(
-                @"\b(?:format|format\.com)\b[^\r\n;|]{0,80}[A-Za-z]:",
+                @"(?<![\w\\/])(?:format\.com|format)(?![\w-])(?:\s+(?:/[a-z]+:(?:"".*?""|[^\s]+)|[A-Za-z]:))",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase),
+                DangerousCommandKind.SystemDestruction),
+            (new System.Text.RegularExpressions.Regex(
+                @"\bformat-volume\b",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase),
                 DangerousCommandKind.SystemDestruction),
             (new System.Text.RegularExpressions.Regex(
