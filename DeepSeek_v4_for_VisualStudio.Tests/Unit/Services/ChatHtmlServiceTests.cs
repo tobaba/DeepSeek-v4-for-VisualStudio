@@ -441,6 +441,8 @@ public class ChatHtmlServiceTests
     [Fact]
     public void BuildAskQuestionsJs_MultipleQuestions_MergesIntoPaginatedCardWithSubmitOnLastPage()
     {
+        using var _ = UseThemeMode(ThemeMode.Dark);
+
         var request = new AgentQuestionRequest
         {
             RequestId = "q-1",
@@ -492,6 +494,8 @@ public class ChatHtmlServiceTests
     [Fact]
     public void BuildAskQuestionsJs_SingleQuestion_HidesPagingAndShowsSubmitImmediately()
     {
+        using var _ = UseThemeMode(ThemeMode.Dark);
+
         var request = new AgentQuestionRequest
         {
             RequestId = "q-2",
@@ -510,8 +514,42 @@ public class ChatHtmlServiceTests
     }
 
     [Fact]
+    public void AgentCards_FollowTheme_NoHardcodedDarkOnlyColors()
+    {
+        // ── 浅色主题下的提问 / 审批 / 任务面板必须使用浅色配色，而不是深色硬编码 ──
+        using var _ = UseThemeMode(ThemeMode.Light);
+
+        var questionRequest = new AgentQuestionRequest
+        {
+            RequestId = "q-theme",
+            Questions = new List<AgentQuestion>
+            {
+                new AgentQuestion
+                {
+                    Header = "范围",
+                    Question = "要改哪些文件？",
+                    Options = new List<QuestionOption> { new QuestionOption { Label = "全部" } },
+                    AllowFreeformInput = true,
+                },
+            },
+        };
+        string questionsJs = ChatHtmlService.BuildAskQuestionsJs(questionRequest);
+
+        questionsJs.Should().Contain("#f0f7ff", "浅色主题的提问卡片应使用浅色背景");
+        questionsJs.Should().NotContain("#1a2a3a", "浅色主题不应出现深色卡片背景");
+        questionsJs.Should().NotContain("#1e1e1e", "浅色主题的输入框不应是深色背景");
+
+        var panelJs = ChatHtmlService.BuildAgentTaskPanelCompleteJs(
+            new AgentTaskPlan { PlanId = "p-theme", Title = "任务" });
+        panelJs.Should().NotContain("#4EC9B0", "浅色主题的状态色不应使用深色主题的亮青绿");
+        panelJs.Should().Contain("#2ea87a", "浅色主题应使用浅色主题的成功色");
+    }
+
+    [Fact]
     public void BuildAskQuestionsJs_OptionDescription_UsesReadableBodyTextStyle()
     {
+        using var _ = UseThemeMode(ThemeMode.Dark);
+
         var request = new AgentQuestionRequest
         {
             RequestId = "q-3",
@@ -789,5 +827,24 @@ public class ChatHtmlServiceTests
             idx += needle.Length;
         }
         return count;
+    }
+
+    /// <summary>
+    /// 临时切换主题模式，释放时恢复原值。
+    /// ThemeService 是进程级单例，测试内改主题必须恢复，避免影响其它用例。
+    /// </summary>
+    private static IDisposable UseThemeMode(ThemeMode mode) => new ThemeModeScope(mode);
+
+    private sealed class ThemeModeScope : IDisposable
+    {
+        private readonly ThemeMode _previous;
+
+        public ThemeModeScope(ThemeMode mode)
+        {
+            _previous = ThemeService.Instance.UserThemeMode;
+            ThemeService.Instance.UserThemeMode = mode;
+        }
+
+        public void Dispose() => ThemeService.Instance.UserThemeMode = _previous;
     }
 }
