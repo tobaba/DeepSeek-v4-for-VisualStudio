@@ -951,43 +951,31 @@ public class EditAgentTests
     }
 
     [Fact]
-    public void DetectAndAutoCompleteLaterSteps_ThinkingContent_DeclaresRange_CompletesAndAdvances()
+    public void DetectAndAutoCompleteLaterSteps_TakesOnlyAiResponse_NoThinkingInput()
     {
-        // 场景：正式输出未提及后续步骤，但思考内容中声明了范围式完成
-        var agent = new EditAgent(_apiService);
-        var plan = new AgentTaskPlan
-        {
-            Title = "Test Plan",
-            CurrentStepIndex = 1,
-            Steps = Enumerable.Range(1, 6)
-                .Select(i => new AgentStep
-                {
-                    Index = i,
-                    Title = $"步骤{i}",
-                    Status = AgentStepStatus.Pending,
-                })
-                .ToList(),
-        };
-        plan.Steps[0].Status = AgentStepStatus.InProgress;
-        plan.Steps[0].AiResponse = "第一步完成。";
-        const string thinking = "已经把所有文件都改好了，步骤1-6 已完成。";
+        // 契约：自动完成只依据正式输出（AiResponse）。
+        // 思考内容不得再作为输入，否则引述/假设会被当成真声明。
+        var method = typeof(EditAgent).GetMethod("DetectAndAutoCompleteLaterSteps",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
 
-        DetectAndAutoCompleteLaterStepsPublic(agent, plan.Steps[0], plan, thinking);
-
-        plan.Steps.Skip(1).Should().OnlyContain(s => s.Status == AgentStepStatus.Completed);
-        plan.CurrentStepIndex.Should().Be(6);
+        var parameters = method!.GetParameters();
+        parameters.Should().HaveCount(2, "签名只接收(AiResponse 所在的 step, plan)");
+        parameters.Should().NotContain(p =>
+            p.Name != null && p.Name.Contains("thinking", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
-    public void DetectAndAutoCompleteLaterSteps_ThinkingContent_ListDeclares_Completes()
+    public void DetectAndAutoCompleteLaterSteps_QuotedClaimInThinking_DoesNotSkipLaterStep()
     {
-        // 场景：逗号/顿号分隔列表声明出现在思考内容中
+        // 回归：真实的步骤 1 输出只说"步骤 1 完成，等待下一步执行删除"，
+        // 但思考里出现了引述"也完成了步骤2"。该引述曾被当成真声明，
+        // 使步骤 2 被标记完成并跳过（文件创建后未被删除）。
         var agent = new EditAgent(_apiService);
         var plan = new AgentTaskPlan
         {
             Title = "Test Plan",
             CurrentStepIndex = 1,
-            Steps = Enumerable.Range(1, 4)
+            Steps = Enumerable.Range(1, 2)
                 .Select(i => new AgentStep
                 {
                     Index = i,
@@ -997,43 +985,40 @@ public class EditAgentTests
                 .ToList(),
         };
         plan.Steps[0].Status = AgentStepStatus.InProgress;
-        plan.Steps[0].AiResponse = "第一步完成。";
-        const string thinking = "步骤2、3也完成了，可以直接跳到第4步。";
+        plan.Steps[0].AiResponse = "已在 test_temp.txt 创建测试文件。步骤 1 完成，等待下一步执行删除。";
 
-        DetectAndAutoCompleteLaterStepsPublic(agent, plan.Steps[0], plan, thinking);
+        DetectAndAutoCompleteLaterStepsPublic(agent, plan.Steps[0], plan);
 
-        plan.Steps[1].Status.Should().Be(AgentStepStatus.Completed); // 2
-        plan.Steps[2].Status.Should().Be(AgentStepStatus.Completed); // 3
-        plan.Steps[3].Status.Should().Be(AgentStepStatus.Pending);   // 4 不受影响
-        plan.CurrentStepIndex.Should().Be(3);
-    }
-
-    [Fact]
-    public void DetectAndAutoCompleteLaterSteps_ThinkingContent_NoDeclaration_DoesNotAdvance()
-    {
-        // 场景：思考内容只是计划性表述，不应被误判为完成
-        var agent = new EditAgent(_apiService);
-        var plan = new AgentTaskPlan
-        {
-            Title = "Test Plan",
-            CurrentStepIndex = 1,
-            Steps = Enumerable.Range(1, 4)
-                .Select(i => new AgentStep
-                {
-                    Index = i,
-                    Title = $"步骤{i}",
-                    Status = AgentStepStatus.Pending,
-                })
-                .ToList(),
-        };
-        plan.Steps[0].Status = AgentStepStatus.InProgress;
-        plan.Steps[0].AiResponse = "第一步完成。";
-        const string thinking = "接下来打算执行步骤2和步骤3，然后步骤4。";
-
-        DetectAndAutoCompleteLaterStepsPublic(agent, plan.Steps[0], plan, thinking);
-
-        plan.Steps.Skip(1).Should().OnlyContain(s => s.Status == AgentStepStatus.Pending);
+        plan.Steps[1].Status.Should().Be(AgentStepStatus.Pending, "步骤2必须留给主循环真正执行");
         plan.CurrentStepIndex.Should().Be(1);
+    }
+
+    [Fact]
+    public void DetectAndAutoCompleteLaterSteps_AiResponseAlsoCompletedStep2_CompletesIt()
+    {
+        // 反向校验：同一句话若真的出现在正式输出里，仍应被识别为声明
+        // （即回归修复来自"不读思考内容"，而非禁用自动完成本身）。
+        var agent = new EditAgent(_apiService);
+        var plan = new AgentTaskPlan
+        {
+            Title = "Test Plan",
+            CurrentStepIndex = 1,
+            Steps = Enumerable.Range(1, 4)
+                .Select(i => new AgentStep
+                {
+                    Index = i,
+                    Title = $"步骤{i}",
+                    Status = AgentStepStatus.Pending,
+                })
+                .ToList(),
+        };
+        plan.Steps[0].Status = AgentStepStatus.InProgress;
+        plan.Steps[0].AiResponse = "创建测试文件完成。也完成了步骤2。";
+
+        DetectAndAutoCompleteLaterStepsPublic(agent, plan.Steps[0], plan);
+
+        plan.Steps[1].Status.Should().Be(AgentStepStatus.Completed);
+        plan.CurrentStepIndex.Should().Be(2);
     }
 
     #endregion
@@ -1271,11 +1256,11 @@ public class EditAgentTests
 
     // ──────────── Reflection helpers for testing private methods ────────────
 
-    private static void DetectAndAutoCompleteLaterStepsPublic(EditAgent agent, AgentStep completedStep, AgentTaskPlan plan, string? thinkingContent = null)
+    private static void DetectAndAutoCompleteLaterStepsPublic(EditAgent agent, AgentStep completedStep, AgentTaskPlan plan)
     {
         var method = typeof(EditAgent).GetMethod("DetectAndAutoCompleteLaterSteps",
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        method!.Invoke(agent, new object[] { completedStep, plan, thinkingContent });
+        method!.Invoke(agent, new object[] { completedStep, plan });
     }
 
     private static AgentTaskPlan CreateSingleStepPlanPublic(string userMessage)

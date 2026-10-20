@@ -327,9 +327,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                     step.Status = AgentStepStatus.InProgress;
                     NotifyPlanUpdated();
 
-                    // ── 记录本步骤开始前的累积思考长度，用于提取本步骤思考增量（供完成声明检测）──
-                    int reasoningBaseLength = _accumulatedReasoning?.Length ?? 0;
-
                     var L = LocalizationService.Instance;
                     AddLog("INFO", string.Format(L["agent.log.editStepExec"], step.Index, plan.Steps.Count, step.Title));
 
@@ -378,11 +375,10 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                         // ── 将步骤摘要写入会话记忆（供 Ask Agent 最终汇总使用）──
                         await SaveStepSummaryToMemoryAsync(step, plan, context);
 
-                        // ── v1.1.10: 检测 AI 输出中声明的后续步骤完成情况（含思考内容）──
-                        string stepThinking = _accumulatedReasoning != null && _accumulatedReasoning.Length > reasoningBaseLength
-                            ? _accumulatedReasoning.Substring(reasoningBaseLength)
-                            : "";
-                        DetectAndAutoCompleteLaterSteps(step, plan, stepThinking);
+                        // ── v1.1.10: 检测 AI 输出中声明的后续步骤完成情况 ──
+                        // 只扫正式输出：思考内容里常出现引述/假设（如「并声明"也完成了步骤2"」），
+                        // 会被正则当成真声明，导致后续步骤被静默跳过。
+                        DetectAndAutoCompleteLaterSteps(step, plan);
                     }
                 }
 
@@ -1060,15 +1056,18 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         /// 从 AI 响应中检测是否声明了后续步骤也已完成（v1.1.10）。
         /// 解析 AI 输出中的步骤完成声明（如"步骤2和3也完成了"/"also completed step 2"），
         /// 自动将对应步骤标记为 Completed。比文件级启发式更可靠，尤其适用于同文件多步骤场景。
-        /// v1.1.12: 支持范围式声明（"步骤1-6 已完成"），并合并扫描思考内容（thinkingContent），
-        /// 因为 AI 可能在思考过程中声明步骤完成而正式输出未提及。
+        /// v1.1.12: 支持范围式声明（"步骤1-6 已完成"）。
+        ///
+        /// 只依据正式输出（<see cref="AgentStep.AiResponse"/>）判定，不再扫描思考内容：
+        /// 思考里经常出现引述、假设与自我反驳（如"我可以声明『也完成了步骤2』，但…"），
+        /// 正则只看字面短语，会把这类否定语境误判为真声明，从而静默跳过后续步骤。
         /// </summary>
-        private void DetectAndAutoCompleteLaterSteps(AgentStep completedStep, AgentTaskPlan plan, string? thinkingContent = null)
+        private void DetectAndAutoCompleteLaterSteps(AgentStep completedStep, AgentTaskPlan plan)
         {
-            if (string.IsNullOrWhiteSpace(completedStep.AiResponse) && string.IsNullOrWhiteSpace(thinkingContent)) return;
+            if (string.IsNullOrWhiteSpace(completedStep.AiResponse)) return;
 
-            // 检测范围：正式输出 + 思考内容（合并后同一套正则均生效）
-            string response = (completedStep.AiResponse ?? "") + "\n[思考内容]\n" + (thinkingContent ?? "");
+            // 检测范围：仅正式输出
+            string response = completedStep.AiResponse ?? "";
             var autoCompletedIndices = new HashSet<int>();
 
             // 模式1: 中文 "步骤2、3也完成了" / "步骤2和3已完成" / "也完成了步骤2,3"
