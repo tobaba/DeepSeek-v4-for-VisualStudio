@@ -94,12 +94,15 @@ public class GrepSearchToolTests
     }
 
     [Fact]
-    public async Task ExecuteAsync_PathOutsideWorkspace_ReturnsError()
+    public async Task ExecuteAsync_PathOutsideWorkspace_SearchesAbsolutePath()
     {
         var workspace = CreateTempWorkspace();
         var outside = CreateTempWorkspace();
         try
         {
+            string outsideFile = Path.Combine(outside, "outside.txt");
+            File.WriteAllText(outsideFile, "TOKEN outside workspace");
+
             var tool = new GrepSearchTool();
             var args = CreateArgs(new Dictionary<string, object?>
             {
@@ -110,8 +113,10 @@ public class GrepSearchToolTests
 
             var result = await tool.ExecuteAsync(args, workspace);
 
-            result.Should().StartWith("Error:");
-            result.Should().Contain("工作区");
+            // 工具层不再直接拒绝外部路径；是否放行由 BaseAgent 的统一越界审批决定。
+            result.Should().NotStartWith("Error:");
+            result.Should().Contain("outside.txt");
+            result.Should().Contain("TOKEN outside workspace");
         }
         finally
         {

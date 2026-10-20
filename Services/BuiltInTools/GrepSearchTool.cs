@@ -93,18 +93,14 @@ namespace DeepSeek_v4_for_VisualStudio.Services.BuiltInTools
             {
                 var results = new List<string>();
                 var searchOption = SearchOption.AllDirectories;
-                string normalizedRoot = Path.GetFullPath(searchRoot);
                 string searchDir = searchRoot;
                 string? scopedFile = null;
 
                 if (!string.IsNullOrWhiteSpace(scopePath))
                 {
+                    // 与 read_file 保持一致：工具层接受工作区外的绝对路径；
+                    // 是否允许越界由 BaseAgent 的统一权限审批层决定。
                     string resolvedScope = Path.GetFullPath(ResolvePath(scopePath, workspaceRoot));
-                    if (!IsWithinDirectory(resolvedScope, normalizedRoot))
-                    {
-                        return Task.FromResult(LocalizationService.Instance.Format(
-                            "tool.grepSearch.pathOutsideWorkspace", scopePath));
-                    }
 
                     if (File.Exists(resolvedScope))
                     {
@@ -156,7 +152,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services.BuiltInTools
                     }
                     catch
                     {
-                        filesToSearch = Directory.EnumerateFiles(searchRoot, "*.*", SearchOption.AllDirectories)
+                        // 保持调用方指定的搜索范围，失败时不得静默回退到工作区根目录。
+                        filesToSearch = Directory.EnumerateFiles(searchDir, "*.*", SearchOption.AllDirectories)
                             .Where(f => !IsExcludedDirectory(Path.GetDirectoryName(f) ?? ""))
                             .Take(maxFilesToSearch);
                     }
