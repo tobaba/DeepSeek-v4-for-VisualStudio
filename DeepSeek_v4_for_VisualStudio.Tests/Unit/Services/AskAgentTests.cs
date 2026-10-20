@@ -66,7 +66,7 @@ public class AskAgentTests
     [Fact]
     public void SummaryPrompts_AllowFreeMarkdownOutput()
     {
-        var handoffPrompt = global::DeepSeek_v4_for_VisualStudio.Services.LocalizationService.Instance["agent.edit.handoffAskPrompt"];
+        var handoffPrompt = global::DeepSeek_v4_for_VisualStudio.Services.LocalizationService.Instance["agent.summary.handoffUserPrompt"];
         var summaryOnlyPrompt = global::DeepSeek_v4_for_VisualStudio.Services.LocalizationService.Instance["agent.summaryOnlySystemPrompt"];
 
         handoffPrompt.Should().Contain("Markdown");
@@ -810,6 +810,8 @@ public class AskAgentTests
         prompt.Should().NotContain("步骤执行情况");
         prompt.Should().NotContain("修改的文件");
         prompt.Should().NotContain("链回原始请求");
+        prompt.Should().NotContain("以下资料仅供参考");
+        prompt.Should().NotContain("不是输出模板");
         prompt.Should().Contain("最终总结");
     }
 
