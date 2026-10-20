@@ -300,6 +300,83 @@ public class ConversationContextManagerExtendedTests
         toolMsg!.Content.Should().Be("File content here");
     }
 
+    [Fact]
+    public void AddToolResult_PreservesMultimodalContentAndClonesIt()
+    {
+        _manager.AddUserMessage("抓取网页并查看图片");
+        var parts = new List<ChatContentPart>
+        {
+            new() { Type = "text", Text = "=== 网页内容 ===" },
+            new()
+            {
+                Type = "image_url",
+                ImageUrl = new ChatImageUrl { Url = "data:image/png;base64,AAAA" },
+            },
+        };
+
+        _manager.AddToolResult("call_image", "fetch_webpage", "=== 网页内容 ===", parts);
+
+        // 调用方后续修改原集合，不得影响已经落库的历史。
+        parts.Clear();
+
+        var toolMsg = _manager.BuildApiMessages().Single(m => m.Role == "tool");
+        toolMsg.Content.Should().Be("=== 网页内容 ===");
+        toolMsg.MultimodalContent.Should().NotBeNull();
+        toolMsg.MultimodalContent.Should().HaveCount(2);
+        toolMsg.MultimodalContent![0].Type.Should().Be("text");
+        toolMsg.MultimodalContent[1].Type.Should().Be("image_url");
+        toolMsg.MultimodalContent[1].ImageUrl!.Url.Should().Be("data:image/png;base64,AAAA");
+
+        var payload = JsonSerializer.Serialize(toolMsg.ContentPayload);
+        payload.Should().Contain("\"type\":\"image_url\"", "多模态工具结果必须以 content 数组发送");
+    }
+
+    [Fact]
+    public void RestoreFullContext_PreservesToolMultimodalContent()
+    {
+        var history = new List<ChatApiMessage>
+        {
+            new() { Role = "user", Content = "查看网页图片" },
+            new()
+            {
+                Role = "assistant",
+                Content = null,
+                ToolCalls = new List<ToolCall>
+                {
+                    new()
+                    {
+                        Id = "call_restore",
+                        Type = "function",
+                        Function = new ToolCallFunction { Name = "fetch_webpage", Arguments = "{}" },
+                    },
+                },
+            },
+            new()
+            {
+                Role = "tool",
+                Content = "=== 网页内容 ===",
+                ToolCallId = "call_restore",
+                Name = "fetch_webpage",
+                MultimodalContent = new List<ChatContentPart>
+                {
+                    new() { Type = "text", Text = "=== 网页内容 ===" },
+                    new()
+                    {
+                        Type = "image_url",
+                        ImageUrl = new ChatImageUrl { Url = "data:image/png;base64,BBBB" },
+                    },
+                },
+            },
+        };
+
+        _manager.RestoreFullContext(history);
+
+        var toolMsg = _manager.BuildApiMessages().Single(m => m.Role == "tool");
+        toolMsg.MultimodalContent.Should().NotBeNull();
+        toolMsg.MultimodalContent.Should().HaveCount(2);
+        toolMsg.MultimodalContent![1].ImageUrl!.Url.Should().Be("data:image/png;base64,BBBB");
+    }
+
     #endregion
 
     #region UsagePercent
@@ -928,6 +1005,27 @@ public class ConversationContextManagerExtendedTests
         stats.MessageCount.Should().Be(0);
         stats.TurnCount.Should().Be(0);
         stats.EstimatedTokens.Should().Be(0);
+    }
+
+    [Fact]
+    public void GetStats_IgnoresNullEntries()
+    {
+        // 模拟 List<T> 在并发扩容期间被只读统计线程看到的未初始化空槽位。
+        var field = typeof(ConversationContextManager).GetField(
+            "_entries",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        field.Should().NotBeNull();
+
+        var entries = (System.Collections.IList)field!.GetValue(_manager)!;
+        entries.Add(null);
+
+        var stats = _manager.GetStats();
+
+        stats.Should().NotBeNull();
+        stats.MessageCount.Should().Be(0);
+        stats.TurnCount.Should().Be(0);
+        stats.ToolCallCount.Should().Be(0);
+        stats.ToolResultTokens.Should().Be(0);
     }
 
     #endregion

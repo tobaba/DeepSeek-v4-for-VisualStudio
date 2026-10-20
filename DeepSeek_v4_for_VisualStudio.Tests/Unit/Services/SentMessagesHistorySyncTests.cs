@@ -151,6 +151,45 @@ public class SentMessagesHistorySyncTests
     }
 
     [Fact]
+    public void Sync_TextOnlyToolResult_IsUpgradedFromSentMultimodalMessage()
+    {
+        var mgr = new ConversationContextManager();
+        mgr.AddUserMessage("抓取网页并分析图片");
+        var toolCall = new ToolCall
+        {
+            Id = "call_image",
+            Type = "function",
+            Function = new ToolCallFunction { Name = "fetch_webpage", Arguments = "{}" },
+        };
+        mgr.AddAssistantMessage(null, null, new List<ToolCall> { toolCall });
+
+        // 模拟旧版本/旧历史：ContextManager 只保存了文本。
+        mgr.AddToolResult("call_image", "fetch_webpage", "=== 网页内容 ===");
+
+        // 模拟实际发出的请求：同一 tool_call 带有图片块。
+        var sent = mgr.BuildApiMessages();
+        var sentTool = sent.Single(m => m.Role == "tool");
+        sentTool.MultimodalContent = new List<ChatContentPart>
+        {
+            new() { Type = "text", Text = "=== 网页内容 ===" },
+            new()
+            {
+                Type = "image_url",
+                ImageUrl = new ChatImageUrl { Url = "data:image/png;base64,CCCC" },
+            },
+        };
+
+        mgr.SyncSentMessagesToHistory(sent).Should().Be(0, "同一工具调用应修复原条目，而不是追加重复消息");
+
+        var rebuilt = mgr.BuildApiMessages();
+        rebuilt.Count(m => m.Role == "tool").Should().Be(1);
+        var rebuiltTool = rebuilt.Single(m => m.Role == "tool");
+        rebuiltTool.MultimodalContent.Should().NotBeNull();
+        rebuiltTool.MultimodalContent.Should().HaveCount(2);
+        rebuiltTool.MultimodalContent![1].ImageUrl!.Url.Should().Be("data:image/png;base64,CCCC");
+    }
+
+    [Fact]
     public void Sync_StructuralPrefix_IsNotRecordedAsHistory()
     {
         var mgr = new ConversationContextManager();

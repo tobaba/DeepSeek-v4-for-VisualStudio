@@ -1272,7 +1272,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
                         if (apiMsg.Role == "tool" && !string.IsNullOrEmpty(apiMsg.ToolCallId))
                         {
                             _contextManager.AddToolResult(apiMsg.ToolCallId,
-                                apiMsg.Name ?? "unknown", apiMsg.Content ?? string.Empty);
+                                apiMsg.Name ?? "unknown", apiMsg.Content ?? string.Empty,
+                                apiMsg.MultimodalContent);
                         }
                         else if (apiMsg.Role == "system")
                         {

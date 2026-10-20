@@ -2060,26 +2060,22 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                         // ── 裁剪工具结果以保护上下文（与 ContextManager.AddToolResult 保持一致）──
                         string contextResult = CompactToolResultForAgent(tc.Function.Name, resultText);
 
-                        // ── runSubagent 结果同样进入稳定工具历史区，
-                        //     与 ContextManager 中的持久化顺序保持一致。──
-                        if (tc.Function.Name == "runSubagent")
-                        {
-                            messages.Insert(toolInsertPos,
-                                BuildToolResultMessage(tc.Id, tc.Function.Name, contextResult, imageUrls));
-                            toolInsertPos++;
-                        }
-                        else
-                        {
-                            messages.Insert(toolInsertPos,
-                                BuildToolResultMessage(tc.Id, tc.Function.Name, contextResult, imageUrls));
-                            toolInsertPos++;
-                        }
+                        // 构建一次并复用同一对象：本次发送与历史落库必须保持完全一致的 content 形态。
+                        var toolResultMessage = BuildToolResultMessage(
+                            tc.Id, tc.Function.Name, contextResult, imageUrls);
+                        messages.Insert(toolInsertPos, toolResultMessage);
+                        toolInsertPos++;
 
                         // ── 同步 tool 结果到全局 ContextManager，确保重启后可恢复完整对话 ──
+                        //     图片等多模态块必须一并落库，否则下一次请求会把内容数组降级为字符串。
                         //     子任务（persistToHistory=false）不落库。
                         if (persistToHistory && Context?.ContextManager != null)
                         {
-                            Context.ContextManager.AddToolResult(tc.Id, tc.Function.Name, contextResult);
+                            Context.ContextManager.AddToolResult(
+                                tc.Id,
+                                tc.Function.Name,
+                                contextResult,
+                                toolResultMessage.MultimodalContent);
                         }
 
                         Logger.Info($"[Agent:{Definition.Name}] 工具 {tc.Function.Name} 返回: {(toolResult.Length > 200 ? toolResult.Substring(0, 200) + "..." : toolResult)}");
