@@ -47,6 +47,13 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Editing
         /// </summary>
         public Func<string, string?>? OpenDocumentContentProvider { get; set; }
 
+        /// <summary>
+        /// 某个文件首次进入撤销追踪时触发（参数为规范化后的绝对路径）。
+        /// 供文件改动列表在「每改完一个文件」时即时登记待处理项；
+        /// 回调在 _lock 之外触发，订阅方可以安全地回读 Workspace。
+        /// </summary>
+        public event Action<string>? FileTracked;
+
         /// <summary>当前追踪（有改动）的文件数</summary>
         public int StagedCount
         {
@@ -134,6 +141,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Editing
                 }
             }
 
+            bool newlyTracked = false;
             lock (_lock)
             {
                 // 确保目录存在
@@ -146,6 +154,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Editing
                 // 首次接触 → 登记 Baseline（用于撤销恢复）
                 if (!_trackedFiles.ContainsKey(normalizedPath))
                 {
+                    newlyTracked = true;
                     string baselineContent = isNewFile
                         ? string.Empty
                         : (openBufferContent ?? FileEncodingHelper.ReadAllText(normalizedPath));
@@ -167,6 +176,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Editing
                 {
                     WriteAllTextWithRetry(normalizedPath, content);
                     Logger.Info($"[StagedWorkspace] 写穿: {Path.GetFileName(normalizedPath)} ({content.Length} chars)");
+                    if (newlyTracked) RaiseFileTracked(normalizedPath);
                     return;
                 }
             }
@@ -174,6 +184,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Editing
             // ── writer 路径：锁外执行（内部切换 UI 线程，持锁等待会有死锁风险）──
             WriteViaOpenDocumentOrDisk(normalizedPath, content);
             Logger.Info($"[StagedWorkspace] 写穿: {Path.GetFileName(normalizedPath)} ({content.Length} chars)");
+            if (newlyTracked) RaiseFileTracked(normalizedPath);
         }
 
         /// <summary>
@@ -232,11 +243,13 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Editing
         public void DeleteFile(string filePath)
         {
             var normalizedPath = NormalizePath(filePath);
+            bool newlyTracked = false;
 
             lock (_lock)
             {
                 if (!_trackedFiles.ContainsKey(normalizedPath) && File.Exists(normalizedPath))
                 {
+                    newlyTracked = true;
                     // 首次接触 → 登记 Baseline，并落一份磁盘备份（用于删除操作崩溃后的恢复）
                     _trackedFiles[normalizedPath] = new StagedFile
                     {
@@ -256,6 +269,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Editing
                 if (File.Exists(normalizedPath))
                     File.Delete(normalizedPath);
             }
+
+            if (newlyTracked) RaiseFileTracked(normalizedPath);
         }
 
         /// <summary>
@@ -426,6 +441,180 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Editing
             }
         }
 
+        /// <summary>
+        /// 是否仍在追踪指定文件（即该文件尚有可撤销 / 待处理的改动）。
+        /// </summary>
+        public bool HasTrackedFile(string filePath)
+        {
+            var normalizedPath = NormalizePath(filePath);
+            lock (_lock)
+            {
+                return _trackedFiles.ContainsKey(normalizedPath);
+            }
+        }
+
+        /// <summary>
+        /// 当前仍在追踪（配置了待处理改动）的文件绝对路径快照。
+        /// </summary>
+        public System.Collections.Generic.IReadOnlyList<string> GetTrackedFilePaths()
+        {
+            lock (_lock)
+            {
+                return _trackedFiles.Keys.ToList();
+            }
+        }
+
+        /// <summary>
+        /// 获取指定文件的原始内容（Baseline）；未追踪时返回 null。
+        /// </summary>
+        public string? GetBaseline(string filePath)
+        {
+            var normalizedPath = NormalizePath(filePath);
+            lock (_lock)
+            {
+                return _trackedFiles.TryGetValue(normalizedPath, out var file)
+                    ? file.BaselineContent
+                    : null;
+            }
+        }
+
+        /// <summary>
+        /// 计算指定文件「待处理差异」的真实增删行数：
+        /// 以仅含未处理块的显示基线对比当前内容，已保留/已撤销的块不计入。
+        /// 未追踪或已无待处理块时返回 (0, 0)。
+        /// </summary>
+        public (int Added, int Removed) GetPendingLineStats(string filePath)
+        {
+            var normalizedPath = NormalizePath(filePath);
+            lock (_lock)
+            {
+                if (!_trackedFiles.TryGetValue(normalizedPath, out var file))
+                    return (0, 0);
+
+                // 直接复用已算好的差异块：待处理块的 Old/New 行数之和
+                // 就是「仅含待处理块的基线 vs 当前内容」的真实增删行数，
+                // 不必再拼一遍基线字符串并跑第二遍 diff（那正是 UI 线程卡顿的来源）。
+                RecomputeHunksLocked(file, normalizedPath);
+
+                int added = 0, removed = 0;
+                foreach (var hunk in file.Hunks)
+                {
+                    if (hunk.IsReverted || hunk.IsAccepted) continue;
+                    added += Math.Max(0, hunk.NewLineCount);
+                    removed += Math.Max(0, hunk.OldLineCount);
+                }
+                return (added, removed);
+            }
+        }
+
+        /// <summary>
+        /// 确认单个文件：磁盘内容即最终结果，仅清除该文件的撤销追踪。
+        /// 与 <see cref="ConfirmAll"/> 不同，不影响其它文件。
+        /// </summary>
+        public void ConfirmFile(string filePath)
+        {
+            var normalizedPath = NormalizePath(filePath);
+            string? backupPath = null;
+
+            lock (_lock)
+            {
+                if (_trackedFiles.TryGetValue(normalizedPath, out var file))
+                {
+                    backupPath = file.DiskBackupPath;
+                    _trackedFiles.Remove(normalizedPath);
+                }
+            }
+
+            if (!string.IsNullOrEmpty(backupPath))
+            {
+                try { BackupService.CleanupBackup(backupPath); }
+                catch (Exception ex) { Logger.Warn($"[StagedWorkspace] 清理确认文件备份失败: {backupPath} — {ex.Message}"); }
+            }
+            Logger.Info($"[StagedWorkspace] 已确认单个文件: {Path.GetFileName(normalizedPath)}");
+        }
+
+        /// <summary>
+        /// 撤销单个文件：把该文件恢复到 Baseline（写回磁盘），仅清除该文件的追踪。
+        /// 新建文件会被删除，被删除文件会被恢复。
+        /// </summary>
+        public void RestoreFileToBaseline(string filePath)
+        {
+            var normalizedPath = NormalizePath(filePath);
+
+            StagedFile? file;
+            lock (_lock)
+            {
+                if (!_trackedFiles.TryGetValue(normalizedPath, out file))
+                    return;
+                _trackedFiles.Remove(normalizedPath);
+            }
+
+            try
+            {
+                switch (file.Operation)
+                {
+                    case ProposedFileOperation.Add:
+                        if (File.Exists(file.FilePath))
+                            File.Delete(file.FilePath);
+                        break;
+                    case ProposedFileOperation.Delete:
+                        if (file.DiskBackupPath != null && File.Exists(file.DiskBackupPath))
+                            BackupService.RestoreFromBackup(file.FilePath, file.DiskBackupPath);
+                        else if (!string.IsNullOrEmpty(file.BaselineContent))
+                        {
+                            EnsureDirectoryExists(file.FilePath);
+                            WriteViaOpenDocumentOrDisk(file.FilePath, file.BaselineContent);
+                        }
+                        break;
+                    default:
+                        if (file.DiskBackupPath != null && File.Exists(file.DiskBackupPath))
+                            BackupService.RestoreFromBackup(file.FilePath, file.DiskBackupPath);
+                        else
+                            WriteViaOpenDocumentOrDisk(file.FilePath, file.BaselineContent);
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"[StagedWorkspace] 单文件撤销失败: {Path.GetFileName(file.FilePath)} — {ex.Message}");
+            }
+
+            if (!string.IsNullOrEmpty(file.DiskBackupPath))
+            {
+                try { BackupService.CleanupBackup(file.DiskBackupPath); }
+                catch (Exception ex) { Logger.Warn($"[StagedWorkspace] 清理撤销文件备份失败: {file.DiskBackupPath} — {ex.Message}"); }
+            }
+            Logger.Info($"[StagedWorkspace] 已恢复单个文件到 Baseline: {Path.GetFileName(normalizedPath)}");
+        }
+
+        private void RaiseFileTracked(string normalizedPath)
+        {
+            try { FileTracked?.Invoke(normalizedPath); }
+            catch (Exception ex) { Logger.Warn($"[StagedWorkspace] FileTracked 回调异常: {ex.Message}"); }
+        }
+
+        private static (int Added, int Removed) CountChangedLines(string oldText, string newText)
+        {
+            if (string.Equals(oldText, newText, StringComparison.Ordinal))
+                return (0, 0);
+
+            int added = 0, removed = 0;
+            try
+            {
+                foreach (var line in CodeDiffService.ComputeDiff(oldText ?? string.Empty, newText ?? string.Empty))
+                {
+                    if (line.Type == DiffLineType.Added) added++;
+                    else if (line.Type == DiffLineType.Deleted) removed++;
+                }
+            }
+            catch
+            {
+                added = Math.Max(0, SplitLines(newText ?? string.Empty).Length - SplitLines(oldText ?? string.Empty).Length);
+                removed = Math.Max(0, SplitLines(oldText ?? string.Empty).Length - SplitLines(newText ?? string.Empty).Length);
+            }
+            return (added, removed);
+        }
+
         private static string NormalizePath(string path)
             => Path.GetFullPath(path.Trim());
 
@@ -449,36 +638,51 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Editing
                 if (!_trackedFiles.TryGetValue(normalizedPath, out var file))
                     return Array.Empty<DiffHunkInfo>();
 
-                string currentContent = File.Exists(normalizedPath)
-                    ? FileEncodingHelper.ReadAllText(normalizedPath)
-                    : string.Empty;
+                RecomputeHunksLocked(file, normalizedPath);
+                return file.Hunks;
+            }
+        }
 
-                // 重算 hunks（若内容已变化如部分撤销后）
-                var previousHunks = file.Hunks;
-                file.Hunks = ComputeHunks(file.BaselineContent, currentContent);
+        /// <summary>
+        /// 重算指定文件的差异块并回填已保留/已撤销标记（调用方须持有 _lock）。
+        ///
+        /// 以「当前内容哈希」为缓存键：内容未变时直接复用上次结果，
+        /// 避免「文件改动列表」每次刷新都重跑 LCS。UI 线程会在编辑过程中
+        /// 被多次刷新触发，重算全量 diff 正是打开文档卡在「正在加载文档…」的元凶。
+        /// </summary>
+        private void RecomputeHunksLocked(StagedFile file, string normalizedPath)
+        {
+            string currentContent = File.Exists(normalizedPath)
+                ? FileEncodingHelper.ReadAllText(normalizedPath)
+                : string.Empty;
 
-                // ── 回填已撤销/已保留标记 ──
-                // 重算会新建实例，需按 OldText+NewText 精确匹配恢复状态：
-                // 已撤销块在重算后自然消失（内容已等于 Baseline），无需回填；
-                // 已保留块内容未变，按内容匹配即可恢复其标记。
-                foreach (var hunk in file.Hunks)
+            string contentHash = ComputeSha256(currentContent);
+            if (string.Equals(file.HunksContentHash, contentHash, StringComparison.Ordinal))
+                return; // 内容未变 → 复用缓存，跳过 LCS
+
+            var previousHunks = file.Hunks;
+            file.Hunks = ComputeHunks(file.BaselineContent, currentContent);
+            file.HunksContentHash = contentHash;
+
+            // ── 回填已撤销/已保留标记 ──
+            // 重算会新建实例，需按 OldText+NewText 精确匹配恢复状态：
+            // 已撤销块在重算后自然消失（内容已等于 Baseline），无需回填；
+            // 已保留块内容未变，按内容匹配即可恢复其标记。
+            foreach (var hunk in file.Hunks)
+            {
+                foreach (var prev in previousHunks)
                 {
-                    foreach (var prev in previousHunks)
-                    {
-                        if (!prev.IsReverted && !prev.IsAccepted)
-                            continue;
+                    if (!prev.IsReverted && !prev.IsAccepted)
+                        continue;
 
-                        if (HunkTextEquals(prev.OldText, hunk.OldText) &&
-                            HunkTextEquals(prev.NewText, hunk.NewText))
-                        {
-                            hunk.IsReverted = prev.IsReverted;
-                            hunk.IsAccepted = prev.IsAccepted;
-                            break;
-                        }
+                    if (HunkTextEquals(prev.OldText, hunk.OldText) &&
+                        HunkTextEquals(prev.NewText, hunk.NewText))
+                    {
+                        hunk.IsReverted = prev.IsReverted;
+                        hunk.IsAccepted = prev.IsAccepted;
+                        break;
                     }
                 }
-
-                return file.Hunks;
             }
         }
 
@@ -839,6 +1043,12 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Editing
 
             /// <summary>差异块列表（Baseline vs 当前，逐块撤销用）</summary>
             public List<DiffHunkInfo> Hunks { get; set; } = new();
+
+            /// <summary>
+            /// Hunks 对应的「当前内容」哈希：内容未变时复用 Hunks，跳过 LCS 重算。
+            /// 由 <see cref="RecomputeHunksLocked"/> / <see cref="AcceptSingleHunk"/> 维护。
+            /// </summary>
+            public string? HunksContentHash { get; set; }
         }
     }
 }

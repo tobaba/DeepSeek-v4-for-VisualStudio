@@ -78,9 +78,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
             var accentBlue = new SolidColorBrush(Color.FromRgb(0x6C, 0xAF, 0xD9));
             var accentGreen = new SolidColorBrush(Color.FromRgb(0x4E, 0xC9, 0xB0));
             var inputBg = new SolidColorBrush(Color.FromRgb(0x2D, 0x2D, 0x2D));
-            var diffBarBg = new SolidColorBrush(Color.FromRgb(0x1A, 0x3A, 0x20));
 
-            ApplyWpfColors(panelBg, panelBorder, textColor, mutedText, accentBlue, accentGreen, inputBg, diffBarBg);
+            ApplyWpfColors(panelBg, panelBorder, textColor, mutedText, accentBlue, accentGreen, inputBg);
         }
 
         /// <summary>
@@ -95,9 +94,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
             var accentBlue = new SolidColorBrush(Color.FromRgb(0x00, 0x78, 0xD4));
             var accentGreen = new SolidColorBrush(Color.FromRgb(0x2E, 0xA8, 0x7A));
             var inputBg = new SolidColorBrush(Color.FromRgb(0xF5, 0xF5, 0xF5));
-            var diffBarBg = new SolidColorBrush(Color.FromRgb(0xE8, 0xF5, 0xE9));
 
-            ApplyWpfColors(panelBg, panelBorder, textColor, mutedText, accentBlue, accentGreen, inputBg, diffBarBg);
+            ApplyWpfColors(panelBg, panelBorder, textColor, mutedText, accentBlue, accentGreen, inputBg);
         }
 
         /// <summary>
@@ -107,11 +105,12 @@ namespace DeepSeek_v4_for_VisualStudio.View
             SolidColorBrush panelBg, SolidColorBrush panelBorder,
             SolidColorBrush textColor, SolidColorBrush mutedText,
             SolidColorBrush accentBlue, SolidColorBrush accentGreen,
-            SolidColorBrush inputBg, SolidColorBrush diffBarBg)
+            SolidColorBrush inputBg)
         {
             try
             {
                 bool isLight = textColor.Color.R < 0x80;
+                var dangerText = new SolidColorBrush(Color.FromRgb(0xE0, 0x78, 0x78));
 
                 // ── 替换 ComboBox / ComboBoxItem / CheckBox 隐式样式 ──
                 ReplaceComboBoxStyles(isLight, panelBg, panelBorder, textColor, mutedText, accentBlue);
@@ -125,14 +124,22 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 if (StatusLabel != null) StatusLabel.Foreground = mutedText;
                 if (ConversationElapsedLabel != null) ConversationElapsedLabel.Foreground = mutedText;
 
-                // ── Diff 全局控制栏 ──
-                if (DiffGlobalBar != null) DiffGlobalBar.Background = diffBarBg;
-                if (DiffGlobalLabel != null) DiffGlobalLabel.Foreground = textColor;
-                if (DiffGlobalDetail != null) DiffGlobalDetail.Foreground = isLight
-                    ? new SolidColorBrush(Color.FromRgb(0x3A, 0x7A, 0x3A))
-                    : new SolidColorBrush(Color.FromRgb(0x90, 0xB0, 0x90));
-                if (UndoAllButton != null) UndoAllButton.Foreground = textColor;
-                if (AcceptAllButton != null) AcceptAllButton.Foreground = textColor;
+                // ── 文件改动列表（聊天区与状态行之间）──
+                if (ChangeSummaryArea != null)
+                {
+                    ChangeSummaryArea.Background = panelBg;
+                    ChangeSummaryArea.BorderBrush = panelBorder;
+                }
+                if (ChangeSummaryTitle != null) ChangeSummaryTitle.Foreground = textColor;
+                if (ChangeSummaryChevron != null) ChangeSummaryChevron.Foreground = mutedText;
+                if (ChangeFileListBox != null) ChangeFileListBox.Foreground = textColor;
+                if (ChangeSummaryApplyAllButton != null)
+                {
+                    ChangeSummaryApplyAllButton.Background = accentBlue;
+                    ChangeSummaryApplyAllButton.BorderBrush = accentBlue;
+                }
+                if (ChangeSummaryRevertAllButton != null)
+                    ChangeSummaryRevertAllButton.Foreground = dangerText;
 
                 // ── 输入区 ──
                 if (InputTextBox != null)

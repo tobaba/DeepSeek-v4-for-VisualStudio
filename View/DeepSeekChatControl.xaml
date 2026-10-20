@@ -216,13 +216,13 @@
 
     <Grid Margin="0">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="*" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" /> <!-- 0: 会话选择栏 -->
+            <RowDefinition Height="*" />    <!-- 1: 聊天 WebView2 -->
+            <RowDefinition Height="Auto" /> <!-- 2: 文件改动列表（聊天区与状态行之间） -->
+            <RowDefinition Height="Auto" /> <!-- 3: 状态行 -->
+            <RowDefinition Height="Auto" /> <!-- 4: 输入区 -->
+            <RowDefinition Height="Auto" /> <!-- 5: 追加消息队列 -->
+            <RowDefinition Height="Auto" /> <!-- 6: 审批区 -->
         </Grid.RowDefinitions>
 
         <!-- ═══ 会话选择栏 ═══ -->
@@ -440,57 +440,6 @@
             </StackPanel>
         </Border>
 
-        <!-- ═══ Diff 预览全局控制栏 ═══ -->
-        <Border Grid.Row="2"
-                x:Name="DiffGlobalBar"
-                Background="#1A3A20"
-                BorderBrush="#3F3F46" BorderThickness="0,1,0,0"
-                Padding="10,4"
-                Visibility="Collapsed">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <TextBlock Grid.Column="0"
-                           x:Name="DiffGlobalLabel"
-                           Foreground="#E0E0E0"
-                           FontSize="12"
-                           VerticalAlignment="Center"
-                           Text="检测到文件变更" />
-                <TextBlock Grid.Column="1"
-                           x:Name="DiffGlobalDetail"
-                           Foreground="#90B090"
-                           FontSize="11"
-                           VerticalAlignment="Center"
-                           Margin="10,0,0,0" />
-                <StackPanel Grid.Column="2" Orientation="Horizontal">
-                    <Button x:Name="UndoAllButton"
-                            Content="撤销全部"
-                            Click="UndoAllDiffButton_Click"
-                            Background="#5C2A2A"
-                            Foreground="#E0E0E0"
-                            BorderThickness="0"
-                            MinWidth="72" MinHeight="22"
-                            FontSize="11"
-                            Cursor="Hand"
-                            Padding="8,2"
-                            Margin="0,0,4,0" />
-                    <Button x:Name="AcceptAllButton"
-                            Content="接受全部"
-                            Click="AcceptAllDiffButton_Click"
-                            Background="#1A6A2A"
-                            Foreground="#E0E0E0"
-                            BorderThickness="0"
-                            MinWidth="72" MinHeight="22"
-                            FontSize="11"
-                            Cursor="Hand"
-                            Padding="8,2" />
-                </StackPanel>
-            </Grid>
-        </Border>
-
         <!-- ═══ 状态行 ═══ -->
         <Border Grid.Row="3"
                 x:Name="StatusAreaBorder"
@@ -557,6 +506,137 @@
                                Padding="8,0" />
                 </Border>
             </Grid>
+        </Border>
+
+        <!-- ═══ 文件改动列表（聊天区与状态行之间，默认折叠为总计） ═══ -->
+        <Border Grid.Row="2"
+                x:Name="ChangeSummaryArea"
+                Background="#2D2D2D"
+                BorderBrush="#3F3F46" BorderThickness="0,1,0,1"
+                Padding="12,3"
+                Visibility="Collapsed">
+            <StackPanel>
+                <!-- 总计行：点击展开/折叠 -->
+                <Grid x:Name="ChangeSummaryHeader"
+                      Background="Transparent"
+                      Cursor="Hand"
+                      MouseLeftButtonUp="ChangeSummaryHeader_MouseLeftButtonUp">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock x:Name="ChangeSummaryChevron"
+                               Grid.Column="0"
+                               Text="&#xE70D;"
+                               FontFamily="{StaticResource IconFontFamily}"
+                               FontSize="9"
+                               Foreground="#888888"
+                               VerticalAlignment="Center"
+                               Margin="0,0,6,0" />
+                    <TextBlock x:Name="ChangeSummaryTitle"
+                               Grid.Column="1"
+                               Foreground="#D4D4D4"
+                               FontSize="11"
+                               VerticalAlignment="Center" />
+                    <StackPanel Grid.Column="2"
+                                Orientation="Horizontal"
+                                HorizontalAlignment="Right"
+                                VerticalAlignment="Center">
+                        <TextBlock x:Name="ChangeSummaryAdded"
+                                   Foreground="#4EC9B0"
+                                   FontSize="11"
+                                   VerticalAlignment="Center"
+                                   Margin="0,0,8,0" />
+                        <TextBlock x:Name="ChangeSummaryRemoved"
+                                   Foreground="#E07878"
+                                   FontSize="11"
+                                   VerticalAlignment="Center"
+                                   Margin="0,0,10,0" />
+                        <Button x:Name="ChangeSummaryApplyAllButton"
+                                Style="{StaticResource AccentButton}"
+                                Content="{utils:I18n changeSummary.applyAll}"
+                                Click="ChangeSummaryApplyAllButton_Click"
+                                Padding="8,1"
+                                MinHeight="20"
+                                FontSize="11"
+                                Margin="0,0,6,0"
+                                Cursor="Hand"
+                                ToolTip="{utils:I18n changeSummary.applyAllTip}" />
+                        <Button x:Name="ChangeSummaryRevertAllButton"
+                                Style="{StaticResource TransparentButton}"
+                                Content="{utils:I18n changeSummary.revertAll}"
+                                Click="ChangeSummaryRevertAllButton_Click"
+                                Foreground="#E07878"
+                                Padding="8,1"
+                                FontSize="11"
+                                Cursor="Hand"
+                                ToolTip="{utils:I18n changeSummary.revertAllTip}" />
+                    </StackPanel>
+                </Grid>
+
+                <!-- 明细：每个文件一行，点击跳转到 IDE 中的文件 -->
+                <ListBox x:Name="ChangeFileListBox"
+                         Visibility="Collapsed"
+                         MaxHeight="150"
+                         Margin="0,2,0,0"
+                         Background="Transparent"
+                         BorderThickness="0"
+                         HorizontalContentAlignment="Stretch"
+                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                         VirtualizingPanel.ScrollUnit="Pixel"
+                         SelectionChanged="ChangeFileListBox_SelectionChanged">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <Grid Margin="14,1,0,1" Cursor="Hand" ToolTip="{Binding FilePath}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0"
+                                           Text="{Binding FileName}"
+                                           Foreground="#D4D4D4"
+                                           FontSize="11"
+                                           TextTrimming="CharacterEllipsis" />
+                                <TextBlock Grid.Column="1"
+                                           Text="{Binding AddedText}"
+                                           Foreground="#4EC9B0"
+                                           FontSize="11"
+                                           Margin="8,0,0,0" />
+                                <TextBlock Grid.Column="2"
+                                           Text="{Binding RemovedText}"
+                                           Foreground="#E07878"
+                                           FontSize="11"
+                                           Margin="6,0,0,0" />
+                            </Grid>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                    <ListBox.ItemContainerStyle>
+                        <Style TargetType="ListBoxItem">
+                            <Setter Property="Padding" Value="2,1" />
+                            <Setter Property="Background" Value="Transparent" />
+                            <Setter Property="Template">
+                                <Setter.Value>
+                                    <ControlTemplate TargetType="ListBoxItem">
+                                        <Border x:Name="CIB"
+                                                Background="{TemplateBinding Background}"
+                                                CornerRadius="3"
+                                                Padding="{TemplateBinding Padding}">
+                                            <ContentPresenter />
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="CIB" Property="Background" Value="#3C3C3C" />
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Setter.Value>
+                            </Setter>
+                        </Style>
+                    </ListBox.ItemContainerStyle>
+                </ListBox>
+            </StackPanel>
         </Border>
 
         <!-- ═══ 输入区 ═══ -->

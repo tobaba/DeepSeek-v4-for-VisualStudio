@@ -72,7 +72,6 @@ Services/ToolResultCompactor.cs
 Services/WebSearchService.cs
 View/DeepSeekChatControl.Agent.cs
 View/DeepSeekChatControl.Clipboard.cs
-View/DeepSeekChatControl.CodeActions.cs
 View/DeepSeekChatControl.Events.cs
 View/DeepSeekChatControl.Initialization.cs
 View/DeepSeekChatControl.Messaging.cs

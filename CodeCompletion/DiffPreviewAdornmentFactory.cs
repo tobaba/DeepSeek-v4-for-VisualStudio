@@ -1,5 +1,3 @@
-using DeepSeek_v4_for_VisualStudio.Services;
-using DeepSeek_v4_for_VisualStudio.Utils;
 using Microsoft.VisualStudio.Text.Editor;
 using Microsoft.VisualStudio.Utilities;
 using System.ComponentModel.Composition;
@@ -7,23 +5,12 @@ using System.ComponentModel.Composition;
 namespace DeepSeek_v4_for_VisualStudio.CodeCompletion
 {
     /// <summary>
-    /// MEF 导出：为每个 WPF 文本视图创建 <see cref="View.DiffPreviewAdornment"/> 实例，
-    /// 在 diff 预览激活时显示确认/撤销工具栏。
+    /// MEF 导出：注册内嵌 Inline Diff 所需的编辑器 adornment 图层定义。
+    /// Viewer 与逐块按钮的挂载由 <see cref="View.Hosts.EditorDiffHost"/> /
+    /// <see cref="View.InlineDiffHostControl"/> 负责，本类仅声明图层。
     /// </summary>
-    [Export(typeof(IWpfTextViewCreationListener))]
-    [ContentType("code")]
-    [TextViewRole(PredefinedTextViewRoles.Document)]
-    internal sealed class DiffPreviewAdornmentFactory : IWpfTextViewCreationListener
+    internal sealed class DiffPreviewAdornmentFactory
     {
-        /// <summary>
-        /// MEF 导出：将 "DeepSeekDiffPreviewAdornment" 层名注册到 VS 编辑器。
-        /// 必须在获取 adornment layer 之前存在此导出，否则 GetAdornmentLayer 抛出 ArgumentOutOfRangeException。
-        /// </summary>
-        [Export(typeof(AdornmentLayerDefinition))]
-        [Name(View.DiffPreviewAdornment.AdornmentLayerName)]
-        [Order(After = PredefinedAdornmentLayers.Selection, Before = PredefinedAdornmentLayers.Text)]
-        internal static AdornmentLayerDefinition DeepSeekDiffPreviewAdornmentLayer = null!;
-
         /// <summary>
         /// EditorDiffHost 兜底覆盖层：AdornerLayer 不可用时用于挂载编辑器内嵌 diff 覆盖层。
         /// </summary>
@@ -33,39 +20,11 @@ namespace DeepSeek_v4_for_VisualStudio.CodeCompletion
         internal static AdornmentLayerDefinition DeepSeekEditorDiffOverlayLayer = null!;
 
         /// <summary>
-        /// Inline diff 块级按钮使用独立层，避免被 DiffPreviewAdornment 的布局清理移除。
+        /// Inline diff 块级按钮使用独立层，避免被其他装饰器的布局清理移除。
         /// </summary>
         [Export(typeof(AdornmentLayerDefinition))]
         [Name(View.InlineDiffHostControl.HunkButtonsLayerName)]
         [Order(After = PredefinedAdornmentLayers.Text)]
         internal static AdornmentLayerDefinition DeepSeekHunkButtonsLayer = null!;
-
-        #region Public Methods
-
-        /// <summary>
-        /// 文本视图创建时，新建 <see cref="View.DiffPreviewAdornment"/> 并挂载，
-        /// 同时检查是否有为此文件注册的待处理 diff。
-        /// 每个视图绑定一个独立的装饰器实例。
-        /// </summary>
-        public void TextViewCreated(IWpfTextView textView)
-        {
-            if (textView == null)
-                return;
-
-            // ── 检查是否有待处理 diff，如有则激活预览 ──
-            bool activated = EditorDiffMarkerService.Instance.TryActivatePendingDiff(textView);
-
-            // 装饰器在构造函数中自动订阅服务事件和视图布局事件
-            textView.Properties.GetOrCreateSingletonProperty(
-                typeof(View.DiffPreviewAdornment),
-                () => new View.DiffPreviewAdornment(textView));
-
-            if (activated)
-                Logger.Info("[DiffPreview] 已为文件激活待处理 diff 预览");
-            else
-                Logger.Info("[DiffPreview] 装饰器已挂载到文本视图");
-        }
-
-        #endregion
     }
 }

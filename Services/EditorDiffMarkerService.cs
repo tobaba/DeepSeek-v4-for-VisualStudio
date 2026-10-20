@@ -1,7 +1,6 @@
 using DeepSeek_v4_for_VisualStudio.Models;
 using DeepSeek_v4_for_VisualStudio.Services.Editing;
 using DeepSeek_v4_for_VisualStudio.Utils;
-using DeepSeek_v4_for_VisualStudio.View;
 using DeepSeek_v4_for_VisualStudio.View.Hosts;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Text;
@@ -9,15 +8,16 @@ using Microsoft.VisualStudio.Text.Editor;
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
-using System.Threading;
 using System.Threading.Tasks;
 
 namespace DeepSeek_v4_for_VisualStudio.Services
 {
     /// <summary>
-    /// 编辑器 Diff 预览管理服务。
-    /// 支持两种模式：旧版 write-then-preview（兼容路径）和新的 preview-then-commit（InlineDiffSession）。
+    /// 编辑器内嵌 Diff 预览管理服务（preview-then-commit）。
+    ///
+    /// 单文件、单会话：预览阶段不修改 sourceBuffer，用户在 <see cref="View.Hosts.EditorDiffHost"/>
+    /// 上逐块「保留 / 撤销」，或整体接受/撤销；写穿模式下通过
+    /// <see cref="Editing.StagedEditWorkspace"/> 恢复/确认磁盘 Baseline。
     /// </summary>
     public class EditorDiffMarkerService
     {
@@ -45,114 +45,36 @@ namespace DeepSeek_v4_for_VisualStudio.Services
 
         #region Fields
 
-        // 每个 buffer 对应的活跃差异预览窗口（旧版 write-then-preview）
-        private readonly Dictionary<ITextBuffer, DiffViewerWindow> _activeWindows = new();
-        private readonly object _windowsLock = new();
-
-        // 待处理 diff 存储（按文件路径，用于未打开的文件）
-        private readonly Dictionary<string, PendingFileDiff> _pendingDiffs = new();
-        private readonly object _pendingLock = new();
-
-        // ── 新版 Session-based diff ──
         private readonly InlineDiffSessionManager _sessionManager = new();
         private readonly Dictionary<ITextBuffer, EditorDiffHost> _editorHosts = new();
         private readonly object _editorHostsLock = new();
 
-        /// <summary>待处理 diff 的默认过期时间（30 分钟）。</summary>
-        private static readonly TimeSpan PendingDiffTtl = TimeSpan.FromMinutes(30);
+        // ── 待处理改动追踪（供聊天区「文件改动列表」驱动）──
+        // 一轮编辑的多个文件共用同一个 StagedEditWorkspace；列表按 Workspace 的
+        // 实时追踪集合渲染，某文件被保留/撤销后自然从列表消失。
+        private readonly object _reviewLock = new();
+        private Editing.StagedEditWorkspace? _reviewWorkspace;
+        private int _reviewTurnUserMsgIndex = -1;
 
         /// <summary>
-        /// 当待处理 diff 数量变更时触发（用于 UI 刷新全局按钮）。
+        /// 待处理改动集合发生变化（文件新增/确认/撤销）时触发。
+        /// 供聊天区刷新文件改动列表；触发线程不固定，订阅方需自行切回 UI 线程。
         /// </summary>
-        public event Action? PendingDiffCountChanged;
+        public event EventHandler? PendingChangesChanged;
 
         #endregion
 
         #region Public API — Diff Preview
 
         /// <summary>
-        /// 开始 Diff 预览。弹出 VS SDK 原生差异查看浮窗，
-        /// 展示旧代码与新代码的差异（自动红绿着色、支持内联/并排切换）。
-        /// </summary>
-        /// <param name="textView">目标文本视图（其缓冲区应已包含新代码）</param>
-        /// <param name="originalContent">修改前的原始代码</param>
-        /// <param name="newContent">AI 生成的新代码（当前缓冲区内容）</param>
-        public void BeginDiffPreview(IWpfTextView textView, string originalContent, string newContent)
-        {
-            ThreadHelper.ThrowIfNotOnUIThread();
-
-            if (textView == null)
-                throw new ArgumentNullException(nameof(textView));
-
-            var buffer = textView.TextBuffer;
-
-            // 如果该 buffer 已有活跃预览窗口，先关闭
-            CloseExistingWindow(buffer);
-
-            if (string.IsNullOrEmpty(newContent) || originalContent == newContent)
-                return;
-
-            try
-            {
-                // 获取文件路径作为标题
-                string? filePath = null;
-                if (buffer.Properties.TryGetProperty(typeof(ITextDocument), out ITextDocument textDoc))
-                {
-                    filePath = System.IO.Path.GetFileName(textDoc.FilePath);
-                }
-
-                string title = filePath ?? "代码对比";
-
-                // 创建差异查看浮窗
-                var window = new DiffViewerWindow(
-                    oldContent: originalContent,
-                    newContent: newContent,
-                    title: title,
-                    onAccept: () =>
-                    {
-                        // 确认：新代码已写入缓冲区，无需额外操作
-                        Logger.Info($"[EditorDiff] 用户确认变更: {title}");
-                        RemoveWindow(buffer);
-                    },
-                    onUndo: () =>
-                    {
-                        // 撤销：回退缓冲区到原始代码
-                        UndoChangesInternal(buffer, originalContent);
-                        Logger.Info($"[EditorDiff] 用户撤销变更: {title}");
-                        RemoveWindow(buffer);
-                    });
-
-                // 注册并显示
-                lock (_windowsLock)
-                {
-                    _activeWindows[buffer] = window;
-                }
-
-                window.Closed += (s, e) =>
-                {
-                    RemoveWindow(buffer);
-                };
-
-                window.Show(); // 非模态浮窗
-
-                // ── 通知 UI 刷新全局 diff 控制栏 ──
-                PendingDiffCountChanged?.Invoke();
-                Logger.Info($"[EditorDiff] 活跃 diff 窗口已创建: {title} (活跃={_activeWindows.Count}, 待处理={GetPendingCount()})");
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"[EditorDiff] BeginDiffPreview 失败: {ex.Message}", ex);
-                RemoveWindow(buffer);
-            }
-        }
-
-        /// <summary>
-        /// 新版 Inline Diff 预览（preview-then-commit）。
+        /// 创建 Inline Diff 预览会话（preview-then-commit）。
         /// 预览阶段不修改 sourceBuffer，用户确认后才通过 ProposalCommitCoordinator 提交。
         /// </summary>
         /// <param name="textView">目标 WPF 文本视图（缓冲区应仍为原始内容）</param>
         /// <param name="originalContent">修改前的原始代码</param>
         /// <param name="proposedContent">AI 建议的新代码</param>
+        /// <param name="textChanges">结构化改动（可选，逐块撤销用）</param>
+        /// <param name="workspace">写穿编辑工作区（可选，撤销时恢复磁盘 Baseline）</param>
         public InlineDiffSession? CreateInlineDiffPreview(
             IWpfTextView textView, string originalContent, string proposedContent,
             IReadOnlyList<ProposedTextChange>? textChanges = null,
@@ -171,16 +93,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 ?? textView.TextBuffer.GetHashCode().ToString();
 
             // 构建 PreparedChangeSet
-            var change = new PreparedChangeSet
-            {
-                FilePath = filePath,
-                Operation = ProposedFileOperation.Modify,
-                BaselineText = originalContent,
-                ProposedText = proposedContent,
-                TextChanges = textChanges ?? Array.Empty<ProposedTextChange>(),
-                ContentTypeName = textView.TextBuffer.ContentType.TypeName,
-                SaveBehavior = ProposalSaveBehavior.KeepDocumentDirty,
-            };
+            var change = BuildChangeSet(
+                textView, filePath, originalContent, proposedContent, textChanges);
 
             // ── 同一文档已有活跃写穿会话（AI 在预览期间再次编辑同一文件）→ 原地刷新 ──
             // 旧会话的 Baseline / Hunks 已过期，直接创建会被单文档单 Session 约束拒绝。
@@ -206,20 +120,22 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             if (workspace != null)
             {
                 session.Workspace = workspace;
+                AttachReviewWorkspace(workspace);
             }
-
-            // 订阅 Session 事件，通知 UI
-            session.StateChanged += (s, state) =>
-            {
-                if (state == InlineDiffSessionState.Committed ||
-                    state == InlineDiffSessionState.Dismissed)
-                {
-                    PendingDiffCountChanged?.Invoke();
-                }
-            };
 
             // 显示：先登记宿主，待编辑器首帧渲染后再挂载覆盖层，避免阻塞视图创建
             var editorHost = new EditorDiffHost(textView);
+            editorHost.Closed += (_, __) =>
+            {
+                lock (_editorHostsLock)
+                {
+                    if (_editorHosts.TryGetValue(textView.TextBuffer, out var current) &&
+                        ReferenceEquals(current, editorHost))
+                    {
+                        _editorHosts.Remove(textView.TextBuffer);
+                    }
+                }
+            };
 
             lock (_editorHostsLock)
             {
@@ -234,11 +150,27 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 }),
                 System.Windows.Threading.DispatcherPriority.Loaded);
 
-            PendingDiffCountChanged?.Invoke();
             Logger.Info($"[EditorDiff] Inline Diff Session 已创建: {session.SessionId.Substring(0, 8)} ({Path.GetFileName(filePath)})");
 
             return session;
         }
+
+        /// <summary>
+        /// 构建写穿模式下的单文件变更提案（Baseline = 待处理基线，Proposed = 当前内容）。
+        /// </summary>
+        private static PreparedChangeSet BuildChangeSet(
+            IWpfTextView textView, string filePath, string baseline, string proposed,
+            IReadOnlyList<ProposedTextChange>? textChanges = null)
+            => new PreparedChangeSet
+            {
+                FilePath = filePath,
+                Operation = ProposedFileOperation.Modify,
+                BaselineText = baseline,
+                ProposedText = proposed,
+                TextChanges = textChanges ?? Array.Empty<ProposedTextChange>(),
+                ContentTypeName = textView.TextBuffer.ContentType.TypeName,
+                SaveBehavior = ProposalSaveBehavior.KeepDocumentDirty,
+            };
 
         /// <summary>
         /// 原地刷新已有写穿会话：把撤销追踪移交新 Workspace、替换变更内容，
@@ -257,22 +189,18 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             session.ReplaceChange(change);
             session.Workspace = workspace;
 
+            lock (_reviewLock)
+            {
+                if (ReferenceEquals(_reviewWorkspace, workspace))
+                    _reviewWorkspace = null;
+            }
+
             lock (_editorHostsLock)
             {
                 if (_editorHosts.TryGetValue(buffer, out var editorHost))
                     editorHost.RefreshSession(session);
             }
-        }
-
-        /// <summary>
-        /// 获取差异预览的数量（旧版活跃窗口 + 新版 Session）。
-        /// </summary>
-        public int GetActiveCount()
-        {
-            lock (_windowsLock)
-            {
-                return _activeWindows.Count;
-            }
+            AttachReviewWorkspace(workspace);
         }
 
         /// <summary>
@@ -297,8 +225,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             bool ok = session.Workspace.RestoreSingleHunk(session.Change.FilePath, hunkIndex);
             if (ok)
             {
-                // 同步 VS 编辑器缓冲区（写穿已落盘，此处刷新内存 buffer）
-                PendingDiffCountChanged?.Invoke();
                 Logger.Info($"[EditorDiff] 编辑器内嵌：已撤销块 [{hunkIndex}] ({System.IO.Path.GetFileName(session.Change.FilePath)})");
             }
             return ok;
@@ -315,7 +241,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             bool ok = session.Workspace.AcceptSingleHunk(session.Change.FilePath, hunkIndex);
             if (ok)
             {
-                PendingDiffCountChanged?.Invoke();
                 Logger.Info($"[EditorDiff] 编辑器内嵌：已保留块 [{hunkIndex}] ({System.IO.Path.GetFileName(session.Change.FilePath)})");
             }
             return ok;
@@ -343,7 +268,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         }
 
         /// <summary>
-        /// 编辑器内嵌挂件：撤销全部。恢复 Baseline 并关闭浮动 Diff 窗口。
+        /// 编辑器内嵌挂件：撤销全部（恢复 Baseline 并关闭内嵌 Diff 覆盖层）。
         /// </summary>
         public void DismissSessionForBuffer(ITextBuffer buffer)
         {
@@ -352,278 +277,344 @@ namespace DeepSeek_v4_for_VisualStudio.Services
 
             CloseEditorHost(buffer);
             session.Dismiss();
-        }
-        #endregion
-
-        #region Public API — Confirm / Undo
-
-        /// <summary>
-        /// 撤销变更：回退缓冲区到原始代码，关闭预览窗口。
-        /// 整个操作在 lock 内完成以避免竞态条件。
-        /// </summary>
-        public void UndoChanges(ITextBuffer buffer)
-        {
-            ThreadHelper.ThrowIfNotOnUIThread();
-
-            DiffViewerWindow? window;
-            lock (_windowsLock)
-            {
-                if (!_activeWindows.TryGetValue(buffer, out window))
-                    return;
-                _activeWindows.Remove(buffer);
-
-                // ── 在 lock 内执行撤销和关闭，防止 BeginDiffPreview 竞态覆盖 ──
-                try
-                {
-                    window.PerformUndo();
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error($"[EditorDiff] UndoChanges 回退失败: {ex.Message}", ex);
-                }
-
-                try
-                {
-                    window.Close();
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error($"[EditorDiff] UndoChanges 关闭窗口失败: {ex.Message}", ex);
-                }
-            }
-
-            PendingDiffCountChanged?.Invoke();
+            RaisePendingChangesChanged();
         }
 
         #endregion
 
-        #region Public API — Pending Diffs
+        #region Public API — Pending Change Tracking
 
         /// <summary>
-        /// 为未在编辑器中打开的文件注册待处理 diff。
-        /// 当用户稍后打开该文件时，会通过 <see cref="TryActivatePendingDiff"/> 自动激活预览。
-        /// 注册前清理过期条目，防止内存泄漏。
+        /// 登记本轮编辑的待处理 Workspace（Agent 每个文件完成写入时调用）。
+        /// 同一轮的多个文件共用一个 Workspace，重复登记幂等。
         /// </summary>
-        public void RegisterPendingDiff(string filePath, string originalContent, string newContent)
+        public void AttachReviewWorkspace(Editing.StagedEditWorkspace workspace)
         {
-            if (string.IsNullOrWhiteSpace(filePath))
-                return;
+            if (workspace == null) return;
 
-            lock (_pendingLock)
+            Editing.StagedEditWorkspace? previous;
+            lock (_reviewLock)
             {
-                // 清理过期条目
-                var now = DateTime.UtcNow;
-                var expiredKeys = _pendingDiffs
-                    .Where(kv => now - kv.Value.RegisteredAt > PendingDiffTtl)
-                    .Select(kv => kv.Key)
-                    .ToList();
-                foreach (var key in expiredKeys)
-                    _pendingDiffs.Remove(key);
-
-                _pendingDiffs[filePath] = new PendingFileDiff
-                {
-                    FilePath = filePath,
-                    OriginalContent = originalContent ?? string.Empty,
-                    NewContent = newContent ?? string.Empty,
-                    RegisteredAt = now,
-                };
+                if (ReferenceEquals(_reviewWorkspace, workspace)) return;
+                previous = _reviewWorkspace;
+                DetachReviewWorkspaceLocked();
+                _reviewWorkspace = workspace;
+                workspace.FileTracked += OnReviewFileTracked;
             }
-
-            PendingDiffCountChanged?.Invoke();
-            Logger.Info($"[EditorDiff] 已注册待处理 diff: {System.IO.Path.GetFileName(filePath)}");
+            // 新一轮编辑接管后，关闭上一轮残留的预览覆盖层（磁盘内容保持不变）。
+            CloseReviewSessions(previous);
+            // 上一轮未处理完的改动默认保留（磁盘已是最终内容），同时清理其撤销备份。
+            try { previous?.ConfirmAll(); } catch (Exception ex) { Logger.Warn($"[EditorDiff] 清理上一轮 Review Workspace 失败: {ex.Message}"); }
+            RaisePendingChangesChanged();
         }
 
         /// <summary>
-        /// 当文件在编辑器中打开时调用。检查是否有待处理 diff，如果有则激活预览。
+        /// 记录本轮待处理改动归属的用户消息索引（会话切换清空时使用）。
         /// </summary>
-        public bool TryActivatePendingDiff(IWpfTextView textView)
+        public void SetReviewTurn(int userMsgIndex)
         {
-            ThreadHelper.ThrowIfNotOnUIThread();
+            lock (_reviewLock) { _reviewTurnUserMsgIndex = userMsgIndex; }
+        }
 
-            if (textView == null)
-                return false;
-
-            // 获取文件路径
-            string? filePath = null;
-            if (textView.TextDataModel.DocumentBuffer.Properties.TryGetProperty(
-                typeof(ITextDocument), out ITextDocument textDocument))
-            {
-                filePath = textDocument.FilePath;
-            }
-
-            if (string.IsNullOrWhiteSpace(filePath))
-                return false;
-
-            PendingFileDiff? pending;
-            lock (_pendingLock)
-            {
-                if (!_pendingDiffs.TryGetValue(filePath, out pending))
-                    return false;
-
-                _pendingDiffs.Remove(filePath);
-            }
-
-            // 激活预览（当前 buffer 中已是新内容，从磁盘读取的）
-            BeginDiffPreview(textView, pending.OriginalContent, pending.NewContent);
-
-            PendingDiffCountChanged?.Invoke();
-            Logger.Info($"[EditorDiff] 已激活待处理 diff: {System.IO.Path.GetFileName(filePath)}");
-            return true;
+        /// <summary>本轮待处理改动归属的用户消息索引；无活动轮时为 -1。</summary>
+        public int ReviewTurnUserMsgIndex
+        {
+            get { lock (_reviewLock) return _reviewTurnUserMsgIndex; }
         }
 
         /// <summary>
-        /// 获取待处理 diff 数量。
+        /// 当前仍有待处理改动的文件路径快照（相对/绝对取决于写入方，通常为绝对路径）。
         /// </summary>
-        public int GetPendingCount()
+        public IReadOnlyList<string> GetPendingFilePaths()
         {
-            lock (_pendingLock)
+            lock (_reviewLock)
             {
-                return _pendingDiffs.Count;
+                return _reviewWorkspace != null
+                    ? _reviewWorkspace.GetTrackedFilePaths()
+                    : (IReadOnlyList<string>)Array.Empty<string>();
             }
         }
 
-        #endregion
-
-        #region Public API — Batch Operations
+        /// <summary>指定文件当前是否仍有待处理改动。</summary>
+        public bool HasPendingFile(string filePath)
+        {
+            lock (_reviewLock)
+            {
+                return _reviewWorkspace != null && _reviewWorkspace.HasTrackedFile(filePath);
+            }
+        }
 
         /// <summary>
-        /// 全局确认：接受所有新版 Session 的变更，关闭所有旧版 diff 窗口，
-        /// 丢弃所有待处理 diff。
+        /// 指定文件「待处理差异」的真实增删行数（仅统计未保留/未撤销的块）。
         /// </summary>
-        public async void AcceptAllChanges()
+        public (int Added, int Removed) GetPendingLineStats(string filePath)
         {
+            lock (_reviewLock)
+            {
+                return _reviewWorkspace != null
+                    ? _reviewWorkspace.GetPendingLineStats(filePath)
+                    : (0, 0);
+            }
+        }
+
+        /// <summary>
+        /// 为指定文件打开（或聚焦）内嵌 Diff 预览。
+        /// 从「文件改动列表」点击条目时调用：已打开的文件直接复用其活跃会话，
+        /// 未打开的文件按需打开编辑器后再创建会话。
+        /// </summary>
+        public async Task<bool> OpenDiffPreviewForFileAsync(string filePath)
+        {
+            if (string.IsNullOrWhiteSpace(filePath)) return false;
+
             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
 
-            // 新版：接受所有 Session
-            await _sessionManager.AcceptAllAsync(CancellationToken.None);
+            Editing.StagedEditWorkspace? workspace;
+            lock (_reviewLock) { workspace = _reviewWorkspace; }
 
-            // 旧版：关闭所有活跃窗口
-            List<DiffViewerWindow> windows;
-            lock (_windowsLock)
+            // 只显示「尚未处理」的块：已保留/已撤销的块并入基线，不再重复出现在预览里。
+            string baseline = workspace != null && workspace.HasTrackedFile(filePath)
+                ? workspace.BuildPendingOnlyBaseline(filePath)
+                : (workspace?.GetBaseline(filePath) ?? string.Empty);
+            string proposed = File.Exists(filePath)
+                ? Utils.FileEncodingHelper.ReadAllText(filePath)
+                : string.Empty;
+
+            IWpfTextView? view = FindWpfTextViewForFile(filePath);
+            if (view == null)
             {
-                windows = _activeWindows.Values.ToList();
-                _activeWindows.Clear();
+                view = await OpenDocumentAndGetViewAsync(filePath);
+            }
+            if (view == null) return false;
+
+            // 已有活跃会话 → 复用，但先确认覆盖层还挂在编辑器上
+            // （切换文档标签会把可视树卸载/重载，Adorner 可能已被 WPF 丢弃）。
+            if (_sessionManager.TryGetSession(view.TextBuffer, out var existing) && existing != null)
+            {
+                EnsureEditorHostOverlay(view.TextBuffer);
+                return true;
             }
 
-            foreach (var window in windows)
-            {
-                try { window.PerformAccept(); }
-                catch { /* ignore */ }
-                try { window.Close(); }
-                catch { /* ignore */ }
-            }
-
-            int pendingCount;
-            lock (_pendingLock)
-            {
-                pendingCount = _pendingDiffs.Count;
-                _pendingDiffs.Clear();
-            }
-
-            if (pendingCount > 0)
-                PendingDiffCountChanged?.Invoke();
-
-            Logger.Info($"[EditorDiff] 已全局确认: {windows.Count} 个旧版窗口 + {pendingCount} 个待处理 diff");
+            var session = CreateInlineDiffPreview(
+                view, baseline, proposed, textChanges: null, workspace: workspace);
+            return session != null;
         }
 
         /// <summary>
-        /// 全局撤销：新版 Session(s) + 旧版窗口 + 待处理 diff。
+        /// 全部应用：确认所有待处理文件（清除撤销追踪，保留磁盘内容）并收起预览。
         /// </summary>
-        public void UndoAllChanges()
+        public void ApplyAllPending()
         {
             ThreadHelper.ThrowIfNotOnUIThread();
 
-            // 新版：撤销所有 Session
-            _sessionManager.DismissAll();
+            Editing.StagedEditWorkspace? workspace;
+            lock (_reviewLock) { workspace = _reviewWorkspace; }
 
-            // 旧版：关闭所有活跃窗口
-            List<DiffViewerWindow> windows;
-            lock (_windowsLock)
+            // 先关闭本轮所有编辑器覆盖层，再确认文件，避免覆盖层挂在已确认的文件上。
+            CloseReviewSessions(workspace);
+            workspace?.ConfirmAll();
+            RaisePendingChangesChanged();
+        }
+
+        /// <summary>
+        /// 全部撤销：把所有待处理文件恢复到 Baseline（写回磁盘）并收起预览。
+        /// </summary>
+        public void RevertAllPending()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+
+            Editing.StagedEditWorkspace? workspace;
+            lock (_reviewLock) { workspace = _reviewWorkspace; }
+
+            CloseReviewSessions(workspace);
+            workspace?.RestoreToBaseline();
+            RaisePendingChangesChanged();
+        }
+
+        /// <summary>
+        /// 清空待处理追踪（切换会话 / 新建 / 回退整轮后调用）。
+        /// 不修改磁盘：调用方需自行决定是否先确认或撤销。
+        /// </summary>
+        public void ClearPendingTracking()
+        {
+            Editing.StagedEditWorkspace? workspace;
+            lock (_reviewLock)
             {
-                windows = _activeWindows.Values.ToList();
-                _activeWindows.Clear();
+                workspace = _reviewWorkspace;
+                DetachReviewWorkspaceLocked();
+            }
+            CloseReviewSessions(workspace);
+            try { workspace?.ConfirmAll(); } catch (Exception ex) { Logger.Warn($"[EditorDiff] 清理 Review Workspace 失败: {ex.Message}"); }
+            RaisePendingChangesChanged();
+        }
+
+        /// <summary>
+        /// 某文件被单独保留/撤销后主动通知列表刷新（逐块操作收尾时调用）。
+        /// </summary>
+        public void NotifyPendingChanged()
+        {
+            RaisePendingChangesChanged();
+        }
+
+        #endregion
+
+        #region Private — Pending Change Tracking
+
+        private void OnReviewFileTracked(string filePath)
+        {
+            RaisePendingChangesChanged();
+
+            // 文件已在 IDE 打开时，恢复「被修改即自动弹出 Diff 预览」的既有行为；
+            // 未打开的文件不主动打开，留在文件改动列表里由用户点击查看。
+            TryAutoPreviewOpenFile(filePath);
+        }
+
+        /// <summary>
+        /// 若目标文件此刻已在编辑器中打开，则立即为其弹出内嵌 Diff 预览。
+        /// 已打开文档在 Agent 写穿后 buffer 已是新内容，这里用待处理块构建只读预览。
+        /// 未打开 / 已有活跃会话 / 用户关闭了预览设置时静默跳过。
+        /// </summary>
+        public void TryAutoPreviewOpenFile(string filePath)
+        {
+            if (string.IsNullOrWhiteSpace(filePath)) return;
+            if (!(Settings.DeepSeekOptionsPage.Instance?.ShowDiffMarkersInEditor ?? true)) return;
+
+            // Agent 在线程池线程写入，这里必须切回 UI 线程再创建宿主。
+            _ = ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
+            {
+                try
+                {
+                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+
+                    var view = FindWpfTextViewForFile(filePath);
+                    if (view == null) return; // 未在 IDE 打开 → 不主动打开
+
+                    Editing.StagedEditWorkspace? workspace;
+                    lock (_reviewLock) { workspace = _reviewWorkspace; }
+                    if (workspace == null || !workspace.HasTrackedFile(filePath)) return;
+
+                    string baseline = workspace.BuildPendingOnlyBaseline(filePath);
+                    string proposed = workspace.ReadFile(filePath);
+                    if (string.Equals(baseline, proposed, StringComparison.Ordinal)) return;
+
+                    // 同一文件再次被写入 → 原地刷新既有会话，保持预览与最新内容一致。
+                    if (_sessionManager.TryGetSession(view.TextBuffer, out var existing) && existing != null)
+                    {
+                        RefreshWriteThroughSession(
+                            existing,
+                            BuildChangeSet(view, filePath, baseline, proposed),
+                            workspace,
+                            view.TextBuffer);
+                        return;
+                    }
+
+                    CreateInlineDiffPreview(
+                        view, baseline, proposed, textChanges: null, workspace: workspace);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn($"[EditorDiff] 自动弹出 Diff 预览失败 ({Path.GetFileName(filePath)}): {ex.Message}");
+                }
+            });
+        }
+
+        private void DetachReviewWorkspaceLocked()
+        {
+            if (_reviewWorkspace != null)
+            {
+                _reviewWorkspace.FileTracked -= OnReviewFileTracked;
+                _reviewWorkspace = null;
+            }
+            _reviewTurnUserMsgIndex = -1;
+        }
+
+        /// <summary>关闭属于指定 Workspace 的编辑器覆盖层并释放对应 Session。</summary>
+        private void CloseReviewSessions(Editing.StagedEditWorkspace? workspace)
+        {
+            if (workspace == null) return;
+
+            if (!ThreadHelper.CheckAccess())
+            {
+                // EditorDiffHost.Close 有 UI 线程亲和性，必须切回 UI 线程。
+                // 这里用 RunAsync 而不是 Run：调用方可能正持有其它锁（例如会话切换路径），
+                // 同步等待 UI 线程会与文档加载 / 编辑器写入互相阻塞，表现为「正在加载文档…」卡死。
+                _ = ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
+                {
+                    try
+                    {
+                        await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                        CloseReviewSessionsCore(workspace);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Warn($"[EditorDiff] 异步关闭预览失败: {ex.Message}");
+                    }
+                });
+                return;
             }
 
-            foreach (var window in windows)
+            CloseReviewSessionsCore(workspace);
+        }
+
+        private void CloseReviewSessionsCore(Editing.StagedEditWorkspace workspace)
+        {
+            foreach (var session in _sessionManager.GetActiveSessions())
             {
-                try { window.PerformUndo(); }
-                catch { /* ignore */ }
-            }
+                if (!ReferenceEquals(session.Workspace, workspace)) continue;
+                try
+                {
+                    if (session.SourceBuffer != null)
+                        CloseEditorHost(session.SourceBuffer);
+                }
+                catch (Exception ex) { Logger.Warn($"[EditorDiff] 关闭全部应用/撤销覆盖层失败: {ex.Message}"); }
 
-            foreach (var window in windows)
+                try { session.Dispose(); }
+                catch (Exception ex) { Logger.Warn($"[EditorDiff] 释放全部应用/撤销会话失败: {ex.Message}"); }
+            }
+        }
+
+        private void RaisePendingChangesChanged()
+        {
+            try { PendingChangesChanged?.Invoke(this, EventArgs.Empty); }
+            catch (Exception ex) { Logger.Warn($"[EditorDiff] PendingChangesChanged 订阅异常: {ex.Message}"); }
+        }
+
+        private static IWpfTextView? FindWpfTextViewForFile(string filePath)
+            => ToolWindows.TerminalWindowHelper.FindWpfTextViewForFile(filePath);
+
+        private static async Task<IWpfTextView?> OpenDocumentAndGetViewAsync(string filePath)
+        {
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+            try
             {
-                try { window.Close(); }
-                catch { /* ignore */ }
-            }
+                var openDoc = (Microsoft.VisualStudio.Shell.Interop.IVsUIShellOpenDocument?)
+                    Package.GetGlobalService(typeof(Microsoft.VisualStudio.Shell.Interop.SVsUIShellOpenDocument));
+                if (openDoc == null) return null;
 
-            int pendingCount;
-            lock (_pendingLock)
+                var logicalView = Microsoft.VisualStudio.VSConstants.LOGVIEWID_Primary;
+                openDoc.OpenDocumentViaProject(
+                    filePath, ref logicalView, out _, out _, out _,
+                    out Microsoft.VisualStudio.Shell.Interop.IVsWindowFrame frame);
+                frame?.Show();
+
+                // 等待编辑器首帧装载后再取视图
+                for (int i = 0; i < 20; i++)
+                {
+                    var view = FindWpfTextViewForFile(filePath);
+                    if (view != null) return view;
+                    await Task.Delay(100);
+                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                }
+            }
+            catch (Exception ex)
             {
-                pendingCount = _pendingDiffs.Count;
-                _pendingDiffs.Clear();
+                Logger.Warn($"[EditorDiff] 打开文档并获取视图失败 ({filePath}): {ex.Message}");
             }
-
-            if (pendingCount > 0)
-                PendingDiffCountChanged?.Invoke();
-
-            Logger.Info($"[EditorDiff] 已全局撤销: {windows.Count} 个旧版窗口 + {pendingCount} 个待处理 diff");
+            return null;
         }
 
         #endregion
 
         #region Private Methods
-
-        private void CloseExistingWindow(ITextBuffer buffer)
-        {
-            DiffViewerWindow? existing;
-            lock (_windowsLock)
-            {
-                if (!_activeWindows.TryGetValue(buffer, out existing))
-                    return;
-                _activeWindows.Remove(buffer);
-            }
-
-            try { existing.Close(); }
-            catch { /* ignore */ }
-
-            // ── 通知 UI 刷新 ──
-            PendingDiffCountChanged?.Invoke();
-        }
-
-        private void RemoveWindow(ITextBuffer buffer)
-        {
-            lock (_windowsLock)
-            {
-                _activeWindows.Remove(buffer);
-            }
-
-            // ── 通知 UI 刷新 ──
-            PendingDiffCountChanged?.Invoke();
-        }
-
-        private void UndoChangesInternal(ITextBuffer buffer, string originalContent)
-        {
-            ThreadHelper.ThrowIfNotOnUIThread();
-
-            try
-            {
-                using (var edit = buffer.CreateEdit())
-                {
-                    var snapshot = buffer.CurrentSnapshot;
-                    if (snapshot.Length > 0)
-                        edit.Replace(0, snapshot.Length, originalContent);
-                    else
-                        edit.Insert(0, originalContent);
-                    edit.Apply();
-                }
-
-                Logger.Info("[EditorDiff] 缓冲区已回退到原始内容");
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"[EditorDiff] 回退缓冲区失败: {ex.Message}", ex);
-            }
-        }
 
         /// <summary>
         /// 从 ITextBuffer 获取关联的文件路径。
@@ -636,7 +627,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         }
 
         /// <summary>
-        /// Close the editor-embedded diff host (remove from adornment layer).
+        /// 关闭编辑器内嵌 Diff 宿主（从 adornment 层移除）。
         /// </summary>
         private void CloseEditorHost(ITextBuffer buffer)
         {
@@ -650,29 +641,25 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             }
         }
 
+        /// <summary>
+        /// 确保指定 buffer 的覆盖层仍在可视树上（标签切回 / 再次点击条目时调用）。
+        /// </summary>
+        private void EnsureEditorHostOverlay(ITextBuffer buffer)
+        {
+            try
+            {
+                lock (_editorHostsLock)
+                {
+                    if (_editorHosts.TryGetValue(buffer, out var host))
+                        host.EnsureOverlayVisible();
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"[EditorDiff] 重新挂载 Diff 覆盖层失败: {ex.Message}");
+            }
+        }
 
         #endregion
     }
-
-    #region Supporting Types
-
-    /// <summary>
-    /// 待处理文件 diff（文件尚未在编辑器中打开）。
-    /// </summary>
-    public class PendingFileDiff
-    {
-        /// <summary>文件完整路径。</summary>
-        public string FilePath { get; set; } = string.Empty;
-
-        /// <summary>修改前的原始代码。</summary>
-        public string OriginalContent { get; set; } = string.Empty;
-
-        /// <summary>AI 生成的新代码。</summary>
-        public string NewContent { get; set; } = string.Empty;
-
-        /// <summary>注册时间（UTC），用于 TTL 过期清理。</summary>
-        public DateTime RegisteredAt { get; set; } = DateTime.UtcNow;
-    }
-
-    #endregion
 }

@@ -35,7 +35,12 @@ namespace DeepSeek_v4_for_VisualStudio.View.Hosts
         private Border? _fallbackContainer;
         private bool _isShown;
         private bool _loadedHandlerAttached;
+        private bool _unloadedHandlerAttached;
+        private bool _visibilityHandlerAttached;
         private bool _overlayRetryHandlerAttached;
+
+        /// <summary>宿主关闭后触发（供服务清理 _editorHosts 索引）。</summary>
+        public event EventHandler? Closed;
 
         public EditorDiffHost(IWpfTextView textView)
         {
@@ -51,6 +56,8 @@ namespace DeepSeek_v4_for_VisualStudio.View.Hosts
             _hostControl = new InlineDiffHostControl();
             _hostControl.SetViewerHandle(session.ViewerHandle);
             // diff 各子视图的缩放跟随宿主编辑器页面的 ZoomLevel
+            // 必须在 SetViewerHandle 之后赋值：控件在注入 viewer 时才会应用缩放，
+            // 先设 HostTextView 会因为 _viewer 仍为空而丢掉首次同步。
             _hostControl.HostTextView = _textView;
 
             _hostControl.OnAccept = () => FinishSession(session);
@@ -59,6 +66,7 @@ namespace DeepSeek_v4_for_VisualStudio.View.Hosts
             {
                 session.Dismiss();
                 Close();
+                EditorDiffMarkerService.Instance.NotifyPendingChanged();
             };
 
             WireHunkHandlers(session);
@@ -69,6 +77,40 @@ namespace DeepSeek_v4_for_VisualStudio.View.Hosts
         }
 
         public void Activate() { }
+
+        /// <summary>
+        /// 确保覆盖层处于挂载状态（点列表条目重新打开、标签切回时调用）。
+        /// 若 Adorner 已被 WPF 随可视树重载丢弃，则重新挂载；
+        /// 仍挂在当前 AdornerLayer 上时保持不变，避免闪烁。
+        /// </summary>
+        public void EnsureOverlayVisible()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (!_isShown || _hostControl == null) return;
+
+            var visualElement = _textView.VisualElement;
+            if (visualElement == null) return;
+
+            if (_adorner != null)
+            {
+                var layer = AdornerLayer.GetAdornerLayer(visualElement);
+                var adorners = layer?.GetAdorners(visualElement);
+                if (adorners != null)
+                {
+                    foreach (var adorner in adorners)
+                    {
+                        if (ReferenceEquals(adorner, _adorner)) return; // 仍在层里
+                    }
+                }
+            }
+            else if (_fallbackLayer != null && _fallbackContainer != null)
+            {
+                return; // fallback 覆盖层仍在
+            }
+
+            ClearHostOverlay();
+            AttachHostOverlay();
+        }
 
         /// <summary>
         /// 绑定 hunk 撤销/保留回调并装载当前待处理块。
@@ -95,6 +137,7 @@ namespace DeepSeek_v4_for_VisualStudio.View.Hosts
                     return;
                 }
 
+                EditorDiffMarkerService.Instance.NotifyPendingChanged();
                 RebuildViewerForPendingHunks(session);
             };
 
@@ -112,6 +155,7 @@ namespace DeepSeek_v4_for_VisualStudio.View.Hosts
                     return;
                 }
 
+                EditorDiffMarkerService.Instance.NotifyPendingChanged();
                 RebuildViewerForPendingHunks(session);
             };
         }
@@ -149,6 +193,12 @@ namespace DeepSeek_v4_for_VisualStudio.View.Hosts
         private void AttachHostOverlay()
         {
             var visualElement = _textView.VisualElement;
+
+            // 无论如何都武装 editor 生命周期回调：
+            // 切换文档标签时 VS 会卸载 / 重新加载编辑器的可视树，
+            // Adorner 随宿主一起被移除；切回来必须能重新挂载，否则 diff 预览会消失。
+            EnsureLifecycleHandlersAttached(visualElement);
+
             var adornerLayer = AdornerLayer.GetAdornerLayer(visualElement);
             if (adornerLayer != null)
             {
@@ -163,21 +213,64 @@ namespace DeepSeek_v4_for_VisualStudio.View.Hosts
 
             if (!visualElement.IsLoaded)
             {
-                visualElement.Loaded += OnVisualElementLoaded;
-                _loadedHandlerAttached = true;
                 return;
             }
 
             ShowFallbackOverlay();
         }
 
+        /// <summary>
+        /// 武装编辑器生命周期回调（幂等）：Loaded / Unloaded / IsVisibleChanged。
+        /// 标签切换会触发 Unloaded → Loaded，切回时必须重新挂载覆盖层。
+        /// </summary>
+        private void EnsureLifecycleHandlersAttached(FrameworkElement visualElement)
+        {
+            if (!_loadedHandlerAttached)
+            {
+                visualElement.Loaded += OnVisualElementLoaded;
+                _loadedHandlerAttached = true;
+            }
+            if (!_unloadedHandlerAttached)
+            {
+                visualElement.Unloaded += OnVisualElementUnloaded;
+                _unloadedHandlerAttached = true;
+            }
+            if (!_visibilityHandlerAttached)
+            {
+                visualElement.IsVisibleChanged += OnVisualElementIsVisibleChanged;
+                _visibilityHandlerAttached = true;
+            }
+        }
+
         private void OnVisualElementLoaded(object sender, RoutedEventArgs e)
         {
-            if (!_loadedHandlerAttached) return;
-
-            _textView.VisualElement.Loaded -= OnVisualElementLoaded;
-            _loadedHandlerAttached = false;
             if (!_isShown) return;
+
+            // 文档标签切回 → 可视树重新加载：清掉旧引用并重新挂载覆盖层。
+            ClearHostOverlay();
+            AttachHostOverlay();
+        }
+
+        /// <summary>
+        /// 文档标签切走时 VS 会卸载编辑器可视树，Adorner 随之失效。
+        /// 这里只清理已失效的挂载引用，保留 _hostControl 与 _isShown，
+        /// 等 Loaded / IsVisibleChanged 时再重新挂载。
+        /// </summary>
+        private void OnVisualElementUnloaded(object sender, RoutedEventArgs e)
+        {
+            if (!_isShown) return;
+            ClearHostOverlay();
+        }
+
+        /// <summary>
+        /// 某些 VS 版本切标签只改可见性、不触发 Unloaded/Loaded：
+        /// 重新可见且当前没有挂载时补挂一次。
+        /// </summary>
+        private void OnVisualElementIsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
+        {
+            if (!_isShown) return;
+            if (e.NewValue is not bool visible || !visible) return;
+            if (_adorner != null || _fallbackLayer != null) return;
 
             ClearHostOverlay();
             AttachHostOverlay();
@@ -331,6 +424,7 @@ namespace DeepSeek_v4_for_VisualStudio.View.Hosts
             else
                 _ = session.CommitAsync(System.Threading.CancellationToken.None);
             Close();
+            EditorDiffMarkerService.Instance.NotifyPendingChanged();
         }
 
         /// <summary>
@@ -382,6 +476,18 @@ namespace DeepSeek_v4_for_VisualStudio.View.Hosts
                 _loadedHandlerAttached = false;
             }
 
+            if (_unloadedHandlerAttached)
+            {
+                _textView.VisualElement.Unloaded -= OnVisualElementUnloaded;
+                _unloadedHandlerAttached = false;
+            }
+
+            if (_visibilityHandlerAttached)
+            {
+                _textView.VisualElement.IsVisibleChanged -= OnVisualElementIsVisibleChanged;
+                _visibilityHandlerAttached = false;
+            }
+
             DetachOverlayRetryHandlers(_textView.VisualElement);
 
             if (_fallbackLayer != null)
@@ -395,10 +501,12 @@ namespace DeepSeek_v4_for_VisualStudio.View.Hosts
                 _fallbackContainer = null;
             }
 
+            _hostControl?.DisposeZoomSync();
             _hostControl?.DetachViewer();
             _hostControl = null;
             _isShown = false;
             Logger.Info("[EditorDiffHost] Inline diff closed");
+            try { Closed?.Invoke(this, EventArgs.Empty); } catch { }
         }
 
         private void DetachOverlayRetryHandlers(System.Windows.UIElement visualElement)

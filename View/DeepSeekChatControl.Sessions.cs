@@ -915,6 +915,10 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     _activeSession.Title = string.Empty;
                 }
 
+                // 文件改动列表随会话清空：丢弃上一会话残留的待处理追踪
+                EditorDiffMarkerService.Instance.ClearPendingTracking();
+                RefreshChangeSummary();
+
                 var welcomeMsg = new ChatMessage
                 {
                     Role = "assistant",

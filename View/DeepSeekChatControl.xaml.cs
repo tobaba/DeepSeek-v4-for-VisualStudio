@@ -560,6 +560,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
             ModelComboBox.ItemsSource = BuildModelListItems();
             ModelComboBox.SelectedIndex = 0;
 
+            // ── 文件改动列表：订阅待处理改动变更 ──
+            SubscribeChangeSummary();
+
             // 官方模型的 effort 档位由 /models 声明，接口拉到前先用兜底列表。
             EffortComboBox.ItemsSource = DeepSeekOptionsPage.DefaultReasoningEfforts.ToList();
             // 推理强度初始值稍后在 StartControl 中从设置恢复（此时 _options 尚未赋值）
@@ -919,9 +922,6 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
             // Subscribe first so user edits are not lost while persisted options are loading.
             DeepSeekOptionsPage.SettingsChanged += OnSettingsChanged;
-
-            // ── 订阅 diff 预览状态事件，刷新全局控制栏 ──
-            EditorDiffMarkerService.Instance.PendingDiffCountChanged += RefreshDiffGlobalBar;
 
             // VS 可以在布局恢复时创建工具窗格。此时不能使用 package.Options 的内存默认值，
             // 否则空 API Key / 默认缩放会一直留在已创建的聊天控件里。
@@ -1632,6 +1632,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 Logger.Warn($"[Dispose] 退订语言变更事件失败: {ex.Message}");
             }
 
+            // ── 退订待处理改动变更事件 ──
+            UnsubscribeChangeSummary();
+
             // ── 取消主题事件订阅 ──
             _themeService.ThemeChanged -= OnThemeChanged;
             _contextManager.CompressionStateChanged -= OnCompressionStateChanged;
@@ -1891,18 +1894,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 if (SkillPopupTitle != null)
                     SkillPopupTitle.Text = L["popup.skillTitle"];
 
-                // ── Diff 全局控制栏按钮 ──
-                if (AcceptAllButton != null)
-                    AcceptAllButton.Content = L["diff.global.acceptAll"];
-                if (UndoAllButton != null)
-                    UndoAllButton.Content = L["diff.global.undoAll"];
-
                 // ── 状态栏默认文本 ──
                 if (StatusLabel != null && string.IsNullOrEmpty(StatusLabel.Text))
                     StatusLabel.Text = L["status.ready"];
-
-                // ── 刷新 diff 栏（如果当前可见，更新文本为当前语言）──
-                RefreshDiffGlobalBar();
 
                 // ── 审批控制栏：I18n 扩展不会自动跟随语言切换，需手动刷新标签与下拉框 ──
                 if (ApprovalModeLabel != null)
@@ -1911,6 +1905,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
                 // ── 当前计价时段徽标 ──
                 UpdatePricingPeriodBadge();
+
+                // ── 文件改动列表：标题文案随语言切换 ──
+                RefreshChangeSummary();
             }
             catch (Exception ex)
             {

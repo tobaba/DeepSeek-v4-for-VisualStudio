@@ -97,7 +97,13 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 }
             }
 
-            Unloaded += (_, __) => DetachZoomSource();
+            // 注意：不要在这里 DetachZoomSource。
+            // 切换文档标签会触发 Unloaded，若此时清掉宿主视图引用，
+            // 重新挂载后缩放就再也无法跟随编辑器（表现为 diff 缩放与 IDE 不一致）。
+            // 缩放订阅随控件生命周期存在，控件真正废弃时由 SetViewer/Dispose 路径清理。
+
+            // 切换标签重新加载后，diff 子视图会按默认缩放渲染，需要重新对齐一次。
+            Loaded += (_, __) => SyncZoomFromHostEditor();
 
             // 语言变更后刷新本控件的本地化文案：工具栏标签、diff 统计与逐块按钮。
             // 逐块按钮在 LayoutHunkButtons 中重建（会 RemoveAllAdornments），
@@ -299,6 +305,10 @@ namespace DeepSeek_v4_for_VisualStudio.View
         private void LayoutHunkButtons()
         {
             if (_viewer == null || _viewer.IsClosed) return;
+
+            // 每次布局都重新对齐一次缩放；编辑器缩放可能在预览打开后变化，
+            // 而 diff 子视图不会自动跟随（它们是独立于编辑器的 view）。
+            ApplyZoom(_hostTextView?.ZoomLevel ?? 100d);
 
             var inlineView = _viewer.InlineView;
             if (inlineView == null) return;
@@ -525,6 +535,13 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 {
                     switch (lineDiff.DifferenceType)
                     {
+                        // 注意：整行替换在 VS 里是 Change，而不是 Add + Remove。
+                        // 之前只处理 Add/Remove，导致修改块既不计新增也不计删除，
+                        // 摘要才会显示成 «+0 行新增 -1 行删除»。
+                        case DifferenceType.Change:
+                            addedCount += lineDiff.Right.Length;
+                            removedCount += lineDiff.Left.Length;
+                            break;
                         case DifferenceType.Add:
                             addedCount += lineDiff.Right.Length;
                             break;
@@ -574,9 +591,9 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
                 try
                 {
-                    if (!ReferenceEquals(view.Options.Parent, source.Options))
-                        view.Options.Parent = source.Options;
-
+                    // 只同步外观分类（字体 / 配色随编辑器主题），不要整体挂到源选项上：
+                    // 挂 Parent 会让 diff 视图继承编辑器 ZoomLevel，与紧随其后的显式
+                    // 缩放写入互相覆盖，出现「缩放和 IDE 不一致」。
                     view.Options.SetOptionValue(
                         DefaultWpfViewOptions.AppearanceCategory,
                         source.Options.GetOptionValue<string>(
@@ -591,8 +608,11 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
         private void OnHostZoomChanged(object? sender, EditorOptionChangedEventArgs e)
         {
-            if (    e.OptionId == DefaultWpfViewOptions.ZoomLevelId.Name)
-                ApplyZoom(_hostTextView?.ZoomLevel ?? 100d);
+            if (e.OptionId != DefaultWpfViewOptions.ZoomLevelId.Name) return;
+
+            ApplyZoom(_hostTextView?.ZoomLevel ?? 100d);
+            // 缩放改变行高，逐块按钮需要按新行高重排。
+            QueueLayoutHunkButtons();
         }
 
         private void ApplyZoom(double zoomLevel)
@@ -610,7 +630,13 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
         private static void TrySetZoom(IWpfTextView view, double zoomLevel)
         {
-            try { view.ZoomLevel = (float)zoomLevel; }
+            try
+            {
+                // 已一致就不写回：LayoutHunkButtons 每次布局都会对齐一次缩放，
+                // 重复写入会再次触发布局，形成无谓的重排抖动。
+                if (Math.Abs(view.ZoomLevel - zoomLevel) < 0.01) return;
+                view.ZoomLevel = (float)zoomLevel;
+            }
             catch (Exception ex) { Logger.Warn($"[DiffHost] 同步缩放失败: {ex.Message}"); }
         }
 
@@ -620,6 +646,11 @@ namespace DeepSeek_v4_for_VisualStudio.View
             _hostTextView.Options.OptionChanged -= OnHostZoomChanged;
             _hostTextView = null;
         }
+
+        /// <summary>
+        /// 控件真正废弃时调用：解除对宿主编辑器选项的订阅，避免宿主视图长期持有本控件。
+        /// </summary>
+        public void DisposeZoomSync() => DetachZoomSource();
 
         /// <summary>
         /// 若元素已有逻辑/可视化父级，则从父级中解除。WPF 中同一元素不能是多个宿主的孩子。

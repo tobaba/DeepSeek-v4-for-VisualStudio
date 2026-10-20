@@ -773,10 +773,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Providers
             LastSentMessages = ChatMessageCloner.CloneAll(request.Messages);
 
             // ── 预序列化请求体，供重试时复用 ──
-            var requestJson = JsonSerializer.Serialize(request, new JsonSerializerOptions
-            {
-                DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
-            });
+            var requestJson = SerializeRequest(request);
             var requestBodyBytes = Encoding.UTF8.GetBytes(requestJson);
 
             // ── 记录请求元数据 + 消息结构诊断 ──
@@ -889,6 +886,10 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Providers
             HttpResponseMessage? response = null;
             int sendAttempt = 0;
             const int maxSendAttempts = 4;
+
+            // 图片加载类 400 的降级重试：只允许剥离一次，避免无限循环。
+            bool imageBlocksStripped = false;
+
             while (sendAttempt < maxSendAttempts)
             {
                 string requestContext =
@@ -936,6 +937,31 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Providers
                             ?? (response != null
                                 ? await BuildHttpErrorDetailsAsync(response, requestContext)
                                 : $"请求: {requestContext}\n异常: {ex.GetType().Name}: {ex.Message}");
+
+                        // ── 图片加载类 400 的兜底降级 ──
+                        // 服务端取图失败（代理不可达 / 图床限制 / 源站防盗链）会以
+                        // "An exception occurred while loading IMAGE data at index N" 返回 400，
+                        // 且 400 不重试 → 一张配图直接打断整轮对话。
+                        // 此处剥离全部 image_url 内容块后重试一次（纯文本仍可作答），
+                        // 保证对话不中断；不影响任何非图片类 400（原样抛出）。
+                        if (!imageBlocksStripped
+                            && IsImageLoadingError(details)
+                            && TryStripImageBlocks(request.Messages, out int strippedCount))
+                        {
+                            imageBlocksStripped = true;
+                            response?.Dispose();
+                            response = null;
+
+                            // 剥离后请求体变化，需重新序列化并重算字节数（前缀缓存诊断用）。
+                            requestBodyBytes = SerializeRequestBody(request);
+                            Logger.Warn(
+                                $"[API] 检测到服务端图片加载失败（HTTP {statusCode}），" +
+                                $"已剥离 {strippedCount} 张图片后重试一次（不中断本轮对话）。\n{details}");
+
+                            // 不递增 sendAttempt：这是同一次逻辑尝试的降级重发。
+                            continue;
+                        }
+
                         Logger.Error($"[API] HTTP {statusCode} 是客户端错误，放弃重试。\n{details}");
                         response?.Dispose();
                         throw new HttpRequestException(
@@ -1179,6 +1205,103 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Providers
 
             return result;
         }
+
+        #region 请求序列化与图片降级
+
+        /// <summary>序列化请求体（统一选项，供首发与降级重发复用）。</summary>
+        private static string SerializeRequest(DeepSeekChatRequest request)
+            => JsonSerializer.Serialize(request, RequestJsonOptions);
+
+        private static readonly JsonSerializerOptions RequestJsonOptions = new JsonSerializerOptions
+        {
+            DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+        };
+
+        /// <summary>按当前消息重新序列化请求体（降级重发前调用）。</summary>
+        private static byte[] SerializeRequestBody(DeepSeekChatRequest request)
+            => Encoding.UTF8.GetBytes(SerializeRequest(request));
+
+        /// <summary>
+        /// 判断 400 响应体是否为「服务端加载图片失败」。
+        /// 服务端在无法下载 image_url 指向的图片时返回该错误，
+        /// 典型文案：An exception occurred while loading IMAGE data at index N。
+        /// 这类错误与请求结构无关，剥离图片后重发即可恢复。
+        /// </summary>
+        public static bool IsImageLoadingError(string? details)
+        {
+            if (string.IsNullOrWhiteSpace(details))
+                return false;
+
+            return details.IndexOf("loading IMAGE data", StringComparison.OrdinalIgnoreCase) >= 0
+                || details.IndexOf("while loading image", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        /// <summary>
+        /// 剥离消息中所有 image_url 内容块（保留文本块）。
+        /// 消息剥离后若无文本内容，用占位文本占位，避免出现空 content 导致新的 400。
+        /// </summary>
+        /// <param name="messages">待处理消息（原地修改）。</param>
+        /// <param name="strippedCount">被剥离的图片块数量。</param>
+        /// <returns>确实剥离了图片时返回 true。</returns>
+        public static bool TryStripImageBlocks(
+            List<ChatApiMessage> messages, out int strippedCount)
+        {
+            strippedCount = 0;
+            if (messages == null || messages.Count == 0)
+                return false;
+
+            foreach (var message in messages)
+            {
+                if (message.MultimodalContent is not { Count: > 0 } parts)
+                    continue;
+
+                var kept = new List<ChatContentPart>(parts.Count);
+                int removedInMessage = 0;
+                foreach (var part in parts)
+                {
+                    if (part.Type == "image_url")
+                    {
+                        removedInMessage++;
+                        continue;
+                    }
+                    kept.Add(part);
+                }
+
+                // 本消息没有图片：原样保留（不能用累计值判断，否则后续消息会被误改）。
+                if (removedInMessage == 0)
+                    continue;
+
+                strippedCount += removedInMessage;
+
+                if (kept.Count == 0)
+                {
+                    // 原本只有图片：改为纯文本占位，避免空 content 触发新的 400。
+                    message.MultimodalContent = null;
+                    if (string.IsNullOrWhiteSpace(message.Content))
+                        message.Content = "[图片已省略：服务端无法加载该图片]";
+                }
+                else
+                {
+                    message.MultimodalContent = kept;
+
+                    // 多模态消息若同时带有字符串 Content，序列化时会与新内容块冲突，
+                    // 这里把文本统一收敛到内容块中。
+                    if (!string.IsNullOrWhiteSpace(message.Content))
+                    {
+                        bool hasTextPart = kept.Any(p => p.Type == "text");
+                        if (!hasTextPart)
+                        {
+                            kept.Insert(0, new ChatContentPart { Type = "text", Text = message.Content });
+                        }
+                        message.Content = null;
+                    }
+                }
+            }
+
+            return strippedCount > 0;
+        }
+
+        #endregion
 
         private static void AddContentPartsDeduplicated(
             List<ChatContentPart> target,
