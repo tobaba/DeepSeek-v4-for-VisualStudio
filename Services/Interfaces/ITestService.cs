@@ -11,6 +11,10 @@ namespace DeepSeek_v4_for_VisualStudio.Services
     /// 与 <see cref="IBuildService"/> 的分工：本服务自带构建，跑测试时会先编译测试项目
     /// （含其依赖项目）再执行用例，因此"验证"可以一步完成，无需在计划里单列构建步骤。
     /// 需要 VS SDK 原生编译（例如修复编译错误）时仍走 build_solution。
+    ///
+    /// 支持两类测试工程：
+    /// - .NET：dotnet test（VSTest + TRX 日志）
+    /// - C++：CMake / CTest（JUnit 输出），构建目录沿用 CMakePresets.json 里已配置的 preset
     /// </summary>
     public interface ITestService
     {
@@ -20,6 +24,14 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// <param name="solutionPath">解决方案文件或工作区目录</param>
         /// <returns>测试项目绝对路径列表（有序）</returns>
         IReadOnlyList<string> FindTestProjects(string? solutionPath);
+
+        /// <summary>
+        /// 在当前工作区中查找 C++/CMake 测试工程目录
+        /// （CMakeLists.txt 含 enable_testing / include(CTest) / add_test / gtest_discover_tests 等测试注册）。
+        /// </summary>
+        /// <param name="solutionPath">解决方案文件或工作区目录</param>
+        /// <returns>CMake 工程根目录绝对路径列表（有序）</returns>
+        IReadOnlyList<string> FindCppTestProjects(string? solutionPath);
 
         /// <summary>
         /// 运行测试并返回结构化结果。
@@ -57,8 +69,21 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// <summary>运行超时或被用户取消。</summary>
         Timeout,
 
+        /// <summary>测试工程构建（或 CMake 配置）失败，未能进入用例执行阶段。</summary>
+        BuildFailed,
+
         /// <summary>进程结束但没有产出测试结果（通常是测试程序集尚未构建）。</summary>
         NoResultProduced,
+    }
+
+    /// <summary>本次实际使用的测试技术栈，用于工具层渲染与文案区分。</summary>
+    public enum TestProjectKind
+    {
+        /// <summary>.NET 测试项目（dotnet test / VSTest）。</summary>
+        DotNet = 0,
+
+        /// <summary>C++ 测试工程（CMake / CTest）。</summary>
+        Cpp = 1,
     }
 
     /// <summary>单个失败测试的信息。</summary>
@@ -76,8 +101,14 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// <summary>失败分类；None 表示测试流程正常跑完（测试本身仍可能有失败用例）。</summary>
         public TestRunErrorKind Error { get; set; } = TestRunErrorKind.None;
 
-        /// <summary>实际运行的测试项目（绝对路径）。</summary>
+        /// <summary>实际使用的测试技术栈。</summary>
+        public TestProjectKind Kind { get; set; } = TestProjectKind.DotNet;
+
+        /// <summary>实际运行的测试项目（.NET 项目文件或 CMake 工程目录，绝对路径）。</summary>
         public string ProjectPath { get; set; } = string.Empty;
+
+        /// <summary>本次运行的测试名称过滤器（CTest 为 -R 正则；.NET 为 --filter 表达式）。</summary>
+        public string Filter { get; set; } = string.Empty;
 
         /// <summary>多个候选项目（Error == MultipleProjects 时填充）。</summary>
         public List<string> CandidateProjects { get; } = new();

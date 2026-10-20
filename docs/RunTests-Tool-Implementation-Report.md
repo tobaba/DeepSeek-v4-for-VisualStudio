@@ -1,8 +1,8 @@
 # run_tests 工具实现进度报告
 
 > 日期：2026-10-20　分支：`feature/run-tests-tool`　范围：新增测试工具 + 验证策略改为「测试优先」
-> 结论速览：**.NET 测试已可用**（自动发现项目、自带构建、结构化结果、终端拦截、验证流程接入）；
-> **C++ 尚未覆盖**（CMake/CTest 与各家 test adapter 未接），仍是本阶段的主要缺口。
+> 结论速览：**.NET 与 C++ 测试均已可用**。.NET 走 `dotnet test`（VSTest + TRX），
+> C++ 走 CMake/CTest（JUnit 输出）；两者共用同一套工具、结果渲染与验证流程。
 
 ---
 
@@ -16,7 +16,8 @@
 | （不存在）专用测试工具 | — |
 
 VS 侧没有等价于 `IVsSolutionBuildManager` 的公开测试接口，因此实现上复用 **VS Test Platform 的同一引擎**
-（`dotnet test` → VSTest），结果从 **TRX 日志**取结构化数据，不解析控制台文本（避免受本地化输出影响）。
+（`dotnet test` → VSTest）；C++ 侧没有等价接口，改走 **CMake/CTest**。
+两边的结果都从结构化日志取（.NET 用 **TRX**、C++ 用 **JUnit XML**），不解析控制台文本（避免受本地化输出影响）。
 
 ## 二、已完成
 
@@ -27,6 +28,8 @@ VS 侧没有等价于 `IVsSolutionBuildManager` 的公开测试接口，因此�
 | [ITestService.cs](../Services/Interfaces/ITestService.cs) | 101 | 接口 + `TestRunResult` / `TestRunErrorKind` / `FailedTestInfo` 模型 |
 | [TestService.cs](../Services/TestService.cs) | 482 | 项目发现、dotnet 定位、执行、超时与进程树清理 |
 | [TestService.Trx.cs](../Services/TestService.Trx.cs) | 101 | TRX（XML）解析：计数、失败明细、耗时 |
+| [TestService.CMake.cs](../Services/TestService.CMake.cs) | 1220 | C++ 支持：CMake 工程发现、preset 解析、构建目录选择、ctest 执行、MSVC/ASan 环境注入 |
+| [TestService.JUnit.cs](../Services/TestService.JUnit.cs) | 305 | CTest JUnit（XML）解析：计数、失败明细（含从 `system-out` 摘取断言详情）、耗时 |
 | [RunTestsTool.cs](../Services/BuiltInTools/RunTestsTool.cs) | 237 | 工具定义、结果渲染、失败判定 |
 
 **项目发现**：按内容特征匹配 `Microsoft.NET.Test.Sdk`、`xUnit`、`NUnit`、`MSTest`，
@@ -97,36 +100,86 @@ dotnet test <项目> --nologo --logger "trx;LogFileName=<临时文件>"
 
 ## 三、测试与验证
 
-- 新增单测 21 项：项目发现（含 `obj/` 排除、`.sln` 入参）、多项目/无项目分支、
+- 新增单测 46 项：项目发现（含 `obj/` 排除、`.sln` 入参）、多项目/无项目分支、
   TRX 计数与失败明细（含 `StackTrace` 回退、超长截断）、结果渲染与摘要、
-  测试优先的移交判定（7 组组合）、步骤许可测试意图矩阵
+  测试优先的移交判定（7 组组合）、步骤许可测试意图矩阵；
+  以及 C++ 侧的 CMake 工程发现/排除、preset 继承与宏展开、构建目录选择、
+  MSVC 环境判断与环境块解析、JUnit 与 ctest 文本结果解析、`ctest` 终端拦截
 - 端到端实测：对真实测试项目从零构建 + 运行，`total=13 passed=12`（1 项为并行竞态导致，
   已确认与本工具无关），耗时约 17~20s
-- 全量回归 **2071 项通过**；两个语言文件通过 `System.Text.Json` 严格解析
+- 全量回归 **2117 项通过**；两个语言文件通过 `System.Text.Json` 严格解析
 
-## 四、未完成 / 后续
+## 四、C++ 测试（已实现）
 
-### 4.1 C++ 测试（主要缺口）
+实测项目 `F:\CPP\database`（C++ + CMake(Ninja/cl.exe) + GoogleTest，`gtest_discover_tests` 注册）
+已能直接走 `run_tests`，不再需要终端。
 
-实测项目 `F:\CPP\database`（C++ + CMake(Ninja/cl.exe) + GoogleTest，`gtest_discover_tests` 注册）当前
-**只能走 `run_in_terminal`**，因为它没有 .NET 测试项目特征，`run_tests` 会返回 `NO_TESTS:`。
+### 4.1 实现方式
 
-计划做法：
+1. **识别**：扫描工作区内的 `CMakeLists.txt`，内容命中
+   `enable_testing(` / `include(ctest)` / `add_test(` / `gtest_discover_tests(` /
+   `catch_discover_tests(` / `doctest_discover_tests(` / `qt_add_test` 之一即认定为测试工程。
+   跳过 `build/`、`out/`、`cmake-build-*`、`_deps/`、`third_party/` 等构建产物与依赖目录；
+   子目录工程若被根工程 `add_subdirectory` 引入，只保留最外层工程根，
+   否则项目数虚高、每次都要显式指定 `project`。
+2. **选构建目录**（`ResolveCmakeBuildTarget`）：
+   - `configuration` 参数显式点名的 preset（同时支持把 `Debug` / `Release` 当配置名）
+   - `CMakePresets.json` 里**已经配置过**（含 `CMakeCache.txt`）的非 hidden preset
+   - 首个非 hidden preset
+   - 既有 `build/`、`out/build/*`、`cmake-build-*` 目录
+   - 兜底 `<工程根>/build`（首次运行时触发一次 `cmake --preset` / `-S -B` 配置）
+   - preset 的 `inherits` 链会被展开，`${sourceDir}` / `${presetName}` 等宏按**子 preset 名**展开，
+     这样 `binaryDir` 为 `${sourceDir}/out/build/${presetName}` 时不会落到父 preset 的目录
+3. **执行**：
+   ```
+   cmake --preset <preset>            # 仅当目标构建目录尚未配置时
+   cmake --build <buildDir> [--config <cfg>]   # 自带增量构建，失败即判定 BuildFailed
+   ctest --test-dir <buildDir> --output-on-failure
+         --output-junit <临时文件> [-R <filter>] [-C <cfg>]
+   ```
+   `--output-junit` 需要 CMake 3.21+；探测不到时退回解析 ctest 的汇总文本
+   （`N% tests passed, M tests failed out of T` 等，ctest 输出不随语言本地化，匹配是稳定的）。
+4. **MSVC / AddressSanitizer 环境**：检测到构建缓存或预设使用 `cl.exe`，或者开启了
+   `/fsanitize=address` 时，执行 `vcvars64.bat` 并捕获其环境变量注入 configure/build/ctest 进程。
+   实测该项目的 157 个用例原本会全部以 `0xc0000135` STATUS_DLL_NOT_FOUND 失败
+   （ASan 运行时 `clang_rt.asan_dynamic-x86_64.dll` 就在 MSVC `bin` 目录下、不在默认 PATH），
+   注入后正常。
+5. **收口**：终端拦截 `ctest`（按词边界匹配，`ctest_failed.log` 这类文件名不会误伤），
+   指引改用 `run_tests`；`tool.run_tests.desc` 里「C++ 请用终端」的说法已删除。
 
-1. 识别：工作区含 `CMakeLists.txt` / `CMakePresets.json`，且出现 `enable_testing()`、
-   `include(CTest)` 或 `gtest_discover_tests` / `add_test`
-2. 选预设：从 `CMakePresets.json` 读 `configurePresets` / `testPresets`，沿用已配置好的构建目录
-3. 执行：`ctest --test-dir <buildDir> --output-on-failure --output-junit <file>`（JUnit 输出 ≡ .NET 侧的 TRX）
-4. 收口：终端拦截 `ctest`，删掉文档里「C++ 请用终端」的说明
-5. 可选：检测到 `/fsanitize=address` 时把 MSVC ASan 运行时目录注入测试进程 `PATH`
-   （实测该项目的 157 个用例全部以 `0xc0000135` STATUS_DLL_NOT_FOUND 失败，正是缺这个）
+### 4.2 与 .NET 路径的一致性
 
-### 4.2 其他
+两条路径都归一到同一份 `TestRunResult`，因此上层的渲染与判定完全共用：
+
+- 首行稳定摘要 `total=N passed=N failed=N skipped=N elapsed=Ns` 不随语言/技术栈变化
+- `TestRunErrorKind.BuildFailed` 表示构建/配置失败（.NET 的构建失败、C++ 的 cmake configure/build 失败）
+- `TestRunErrorKind.MultipleProjects` 同样要求显式指定工程（C++ 用 `CMakeLists.txt` 或工程根目录）
+- `IsTestRunFailure`、`GetResultSummary`、`EditAgent` 的「测试优先、构建兜底」流程对 C++ 工作区同样成立
+- CTest 的 JUnit 里 `message` 常是占位符（`"Failed"`），真正的断言详情写在 `<system-out>`
+  （gtest 的 `error: Expected equality of these values:` 等）；解析器会从输出里摘取失败片段，
+  否则模型看到的失败原因就只是一句无意义的 `Failed`
+
+### 4.3 实测结果
+
+- 参考工程 `F:\CPP\database`：不带过滤器全量 **157 个用例**，`total=157 passed=145 failed=12`
+  （12 项失败为用户工程自身的真实缺陷/环境问题：如 `sql_parser` 未剥离尾分号、
+  部分用例依赖非中文用户名下的临时目录；与本工具无关）
+- `-R SQLParserTest` 过滤：`total=38 passed=36 failed=2`，失败用例的断言详情被正确带出：
+
+  ```
+  SQLParserTest.ParseStripsTrailingSemicolon :: ...sql_parser_test.cpp(304): error: Expected equality of these values:
+    static_cast<SelectStmt*>(stmt.get())->table_name Which is: "users;" "users"
+  ```
+- 全量回归 **2117 项通过**（其中新增 46 项 C++ 相关单测）；两个语言文件通过 `System.Text.Json` 严格解析
+
+### 4.4 其他后续项
 
 - 只读 Agent（Ask / Explore）目前不提供 `run_tests`；是否放行留给后续决策（跑测试本身不改文件）
 - 覆盖率：VS 安装目录已有 `Microsoft.CodeCoverage.IO.dll` + `datacollector.exe`，
   但产物 vsix 未打包它们，若要出覆盖率需一并处理打包
-- 多测试项目场景目前要求显式指定 `project`；后续可考虑按变更文件反查相关测试项目
+- 多测试项目场景（.NET 与 C++ 同样）目前要求显式指定 `project`；
+  后续可考虑按变更文件反查相关测试项目
+- CTest 的 `--output-junit` 需要 CMake 3.21+，更老的 CMake 只能拿到文本汇总（无每用例消息）
 
 ## 五、分支状态
 
@@ -138,6 +191,9 @@ a4c4ed6  feat(agent): 改动后优先跑测试，无测试才构建
 07a4bac  fix(agent): run_tests 自带构建，并修掉工具服务漏注入
 00f2699  feat(agent): 步骤级许可同时覆盖测试，标题含测试意图即放行 run_tests
 ```
+
+第四章的 C++ 测试支持（`TestService.CMake.cs` / `TestService.JUnit.cs`、
+接口与终端拦截调整、双语本地化、46 项新增单测）目前是工作区改动，尚未提交。
 
 另外两个修复在本分支一并完成（与测试工具无直接依赖，来自实际使用反馈）：
 

@@ -12,13 +12,14 @@ using System.Threading.Tasks;
 namespace DeepSeek_v4_for_VisualStudio.Services
 {
     /// <summary>
-    /// 测试服务实现 — 通过 dotnet test（VSTest + TRX 日志）运行 .NET 单元测试。
+    /// 测试服务实现 — 运行 .NET（dotnet test / VSTest + TRX）与 C++（CMake / ctest + JUnit）单元测试。
     ///
     /// 设计取舍：
-    /// - 只跑 .NET 测试项目。C++ 测试需要按框架指定 test adapter 路径，留待后续扩展。
+    /// - .NET 走 dotnet test；C++ 走 ctest（见 TestService.CMake.cs）。
     /// - 自带构建：dotnet test 会先编译测试项目（含其依赖项目）再运行用例，
-    ///   这样"跑测试"本身就是一次完整验证，不需要额外先调 build_solution。
-    /// - 不解析控制台文本，而是用 TRX 日志（XML）取结构化结果，避免被本地化输出影响。
+    ///   C++ 侧在 ctest 前先做一次增量 cmake --build；这样"跑测试"本身就是一次完整验证，
+    ///   不需要额外先调 build_solution。
+    /// - 不解析控制台文本，而是用结构化日志（TRX / JUnit XML）取结果，避免被本地化输出影响。
     /// </summary>
     public partial class TestService : ITestService
     {
@@ -166,11 +167,41 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         {
             var result = new TestRunResult();
 
+            // ── 0. 技术栈分派：显式传入 CMakeLists.txt / CMake 工程目录时直接按 C++ 处理 ──
+            if (IsCppProjectRequest(projectPath))
+            {
+                string cppDir = ResolveCppProjectDirectory(projectPath!, solutionPath);
+                if (!Directory.Exists(cppDir))
+                {
+                    result.Error = TestRunErrorKind.NoTestProject;
+                    return result;
+                }
+
+                await RunCmakeTestsAsync(cppDir, filter, configuration, result, ct);
+                return result;
+            }
+
             // ── 1. 解析要运行的测试项目 ──
             string? project = ResolveProject(solutionPath, projectPath, result);
             if (project == null)
+            {
+                // .NET 侧已经给出明确结论（多项目 / 显式路径无效）时不再改走 C++，
+                // 只有「没找到 .NET 测试项目」才继续尝试 CMake/CTest。
+                if (result.Error != TestRunErrorKind.NoTestProject)
+                    return result;
+
+                // 没有 .NET 测试项目时，退而检查 CMake/CTest 测试工程。
+                // NO_TESTS 的稳定标记只在两类工程都不存在时返回，
+                // 这样 EditAgent 的「测试优先、构建兜底」流程对 C++ 工作区同样成立。
+                string? cppProject = ResolveCppTestProject(solutionPath, result);
+                if (cppProject == null)
+                    return result;
+
+                await RunCmakeTestsAsync(cppProject, filter, configuration, result, ct);
                 return result;
+            }
             result.ProjectPath = project;
+            result.Filter = filter ?? string.Empty;
 
             // ── 2. 定位 dotnet 运行器 ──
             string? dotnet = FindDotnetExecutable();

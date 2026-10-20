@@ -203,6 +203,52 @@ public class RunInTerminalToolTests
         result.Should().Contain("build_solution");
     }
 
+    /// <summary>
+    /// C++ 测试命令必须被引导到 run_tests（而不是 build_solution），
+    /// 同时文件名里含 "ctest" 的普通命令不能被误伤。
+    /// </summary>
+    [Theory]
+    [InlineData("ctest --output-on-failure", true)]
+    [InlineData("ctest -R Suite.Name", true)]
+    [InlineData("& \"D:\\Cmake\\bin\\ctest.exe\" -C Debug", true)]
+    [InlineData("cd out/build/x64-debug; ctest --test-dir .", true)]
+    [InlineData("cmake --build out/build/x64-debug", false)]
+    [InlineData("Get-Content ctest_failed.log", false)]
+    [InlineData("Select-String -Path ctest_full.log -Pattern failed", false)]
+    public async Task ExecuteAsync_CtestCommandRedirectsToRunTests(string command, bool expectTestBlock)
+    {
+        var tool = new RunInTerminalTool();
+        var args = ParseArgs(JsonSerializer.Serialize(new Dictionary<string, string>
+        {
+            ["command"] = command,
+            ["explanation"] = "test",
+        }));
+
+        string result = await tool.ExecuteAsync(args, null);
+
+        if (expectTestBlock)
+        {
+            result.Should().Contain("run_tests");
+            result.Should().Contain("[BLOCKED]");
+        }
+        else
+        {
+            result.Should().NotContain("run_tests");
+        }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_DotnetTestRedirectsToRunTestsNotBuild()
+    {
+        var tool = new RunInTerminalTool();
+        var args = ParseArgs("{\"command\":\"dotnet test\",\"explanation\":\"test\"}");
+
+        string result = await tool.ExecuteAsync(args, null);
+
+        result.Should().Contain("run_tests");
+        result.Should().NotContain("build_solution");
+    }
+
     [Theory]
     [InlineData("dotnet run --project Eventask.ApiService", true)]
     [InlineData("Start-Process -FilePath dotnet -ArgumentList @('run')", true)]

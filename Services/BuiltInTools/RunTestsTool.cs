@@ -9,7 +9,7 @@ using System.Threading.Tasks;
 namespace DeepSeek_v4_for_VisualStudio.Services.BuiltInTools
 {
     /// <summary>
-    /// run_tests 工具 — 运行工作区中的 .NET 单元测试并返回结构化结果。
+    /// run_tests 工具 — 运行工作区中的 .NET 或 C++ 单元测试并返回结构化结果。
     /// 委托给 <see cref="ITestService"/> 执行实际测试。
     /// </summary>
     public class RunTestsTool : BuiltInToolBase
@@ -145,6 +145,19 @@ namespace DeepSeek_v4_for_VisualStudio.Services.BuiltInTools
 
                 case TestRunErrorKind.Timeout:
                     return L["tool.runTests.timeout"];
+
+                case TestRunErrorKind.BuildFailed:
+                    var buildFailed = new StringBuilder(result.Kind == TestProjectKind.Cpp
+                        ? L["tool.runTests.cmakeBuildFailed"]
+                        : L["tool.runTests.buildFailed"]);
+                    if (!string.IsNullOrWhiteSpace(result.OutputTail))
+                    {
+                        buildFailed.AppendLine();
+                        buildFailed.AppendLine("```");
+                        buildFailed.AppendLine(result.OutputTail);
+                        buildFailed.Append("```");
+                    }
+                    return buildFailed.ToString();
 
                 case TestRunErrorKind.NoResultProduced:
                     var noResult = new StringBuilder(L["tool.runTests.noResultProduced"]);

@@ -131,6 +131,66 @@ public class RunTestsToolTests
         text.Should().Contain("MSB1003");
     }
 
+    /// <summary>
+    /// C++ 测试的构建失败要给出 CMake 专属文案，并带上输出尾部便于定位。
+    /// </summary>
+    [Fact]
+    public void FormatResult_CppBuildFailed_ReportsCmakeFailureWithOutput()
+    {
+        var result = new TestRunResult
+        {
+            Kind = TestProjectKind.Cpp,
+            Error = TestRunErrorKind.BuildFailed,
+            OutputTail = "ninja: error: unknown target 'concurrency_test'",
+        };
+
+        string text = RunTestsTool.FormatResult(result);
+
+        text.Should().StartWith("Error: ");
+        text.Should().Contain("CMake");
+        text.Should().Contain("unknown target");
+        RunTestsTool.IsTestRunFailure(text).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// C++ 正常跑完时沿用同一套稳定摘要（total=/passed=/failed=），
+    /// EditAgent 的失败判定与构建兜底不依赖语言或技术栈。
+    /// </summary>
+    [Fact]
+    public void FormatResult_CppAllPassed_ReportsStableSummary()
+    {
+        var result = new TestRunResult
+        {
+            Kind = TestProjectKind.Cpp,
+            Total = 157,
+            Passed = 157,
+            Duration = TimeSpan.FromSeconds(2.5),
+        };
+
+        string text = RunTestsTool.FormatResult(result);
+
+        text.Should().Contain("total=157 passed=157 failed=0 skipped=0");
+        RunTestsTool.IsTestRunFailure(text).Should().BeFalse();
+    }
+
+    [Fact]
+    public void FormatResult_CppWithFailures_ListsNamesAndMessages()
+    {
+        var result = new TestRunResult { Kind = TestProjectKind.Cpp, Total = 3, Passed = 1, Failed = 2 };
+        result.FailedTests.Add(new FailedTestInfo
+        {
+            Name = "SQLParserTest.ParseStripsTrailingSemicolon",
+            Message = "error: Expected equality of these values: Which is: \"users;\" \"users\"",
+        });
+
+        string text = RunTestsTool.FormatResult(result);
+
+        text.Should().Contain("failed=2");
+        text.Should().Contain("SQLParserTest.ParseStripsTrailingSemicolon");
+        text.Should().Contain("Expected equality");
+        RunTestsTool.IsTestRunFailure(text).Should().BeTrue();
+    }
+
     [Theory]
     [InlineData("total=4 passed=4 failed=0 skipped=0 elapsed=1.0s", "全部通过")]
     [InlineData("total=4 passed=3 failed=1 skipped=0 elapsed=1.0s", "1")]
