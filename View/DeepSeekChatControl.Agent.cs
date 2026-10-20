@@ -663,10 +663,16 @@ namespace DeepSeek_v4_for_VisualStudio.View
         /// 所有 Handoff 路径（自动链、按钮触发、链回）必须共用同一入口，否则目标 Agent
         /// 会改从 ContextManager 重建历史，导致当前请求的 tool_calls/tool 结果与缓存前缀脱节。
         /// </summary>
-        private void CaptureHandoffForwardedMessages(AgentHandoff handoff)
+        private void CaptureHandoffForwardedMessages(
+            AgentHandoff handoff,
+            AgentResult? completedSourceResult = null)
         {
-            if (handoff.ForwardedMessages == null)
-                handoff.ForwardedMessages = _activeAgent?.SnapshotHandoffCacheMessages();
+            if (handoff.ForwardedMessages != null)
+                return;
+
+            handoff.ForwardedMessages = completedSourceResult == null
+                ? _activeAgent?.SnapshotHandoffCacheMessages()
+                : _activeAgent?.SnapshotHandoffCacheMessages(completedSourceResult);
         }
 
         private async Task RunAgentWorkflowAsync(
@@ -972,7 +978,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     if (incomingHandoff.ChainBack && incomingHandoff.SourceAgent.HasValue)
                         pendingChainBack = incomingHandoff;
                     handoffChainDepth++;
-                    CaptureHandoffForwardedMessages(incomingHandoff);
+                    CaptureHandoffForwardedMessages(incomingHandoff, agentResult);
 
                     if (handoffChainDepth > maxHandoffChainDepth)
                     {

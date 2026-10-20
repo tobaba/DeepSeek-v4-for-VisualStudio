@@ -412,7 +412,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     //     RetryEdit 的链式路径此前遗漏了 ForwardedMessages 捕获，导致
                     //     Edit→Build、Edit→Ask、Build→Ask 等切换每次都可能从 canonical history
                     //     重建前缀。必须在 SwitchActiveAgent 之前、_activeAgent 仍指向源 Agent 时捕获。
-                    CaptureHandoffForwardedMessages(nextHandoff);
+                    CaptureHandoffForwardedMessages(nextHandoff, agentResult);
 
                     var chainAgent = _agentFactory.GetAgent(nextHandoff.TargetAgent);
                     SwitchActiveAgent(chainAgent, context);

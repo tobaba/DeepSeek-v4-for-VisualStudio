@@ -677,6 +677,56 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         }
 
         /// <summary>
+        /// 获取 Handoff 缓存前缀，并把源 Agent 已完成但尚未落库的最终 assistant 回答追加进去。
+        /// 标准顺序应为：... tool result → assistant 最终回答 → 目标 Agent 的 user/system。
+        /// 若源 Agent 最后一步本身是 request_handoff 工具链，则不再追加移交提示，避免重复。
+        /// </summary>
+        /// <param name="completedResult">源 Agent 已完成的执行结果。</param>
+        /// <returns>可直接交给目标 Agent 复用的缓存前缀。</returns>
+        public List<ChatApiMessage>? SnapshotHandoffCacheMessages(AgentResult? completedResult)
+        {
+            var snapshot = SnapshotHandoffCacheMessages();
+            if (snapshot == null
+                || completedResult == null
+                || string.IsNullOrWhiteSpace(completedResult.Content))
+            {
+                return snapshot;
+            }
+
+            int lastAssistantIndex = snapshot.FindLastIndex(
+                m => string.Equals(m.Role, "assistant", StringComparison.Ordinal));
+
+            // request_handoff 的 assistant(tool_calls)+tool 结果已经表达完本轮动作；
+            // 其结果正文通常是 HANDOFF_REQUESTED，不应再伪装成一条 assistant 回答。
+            for (int i = lastAssistantIndex + 1; i < snapshot.Count; i++)
+            {
+                var message = snapshot[i];
+                if (string.Equals(message.Role, "tool", StringComparison.Ordinal)
+                    && string.Equals(message.Name, "request_handoff", StringComparison.OrdinalIgnoreCase))
+                {
+                    return snapshot;
+                }
+            }
+
+            if (lastAssistantIndex >= 0
+                && string.Equals(
+                    snapshot[lastAssistantIndex].Content?.Trim(),
+                    completedResult.Content.Trim(),
+                    StringComparison.Ordinal))
+            {
+                return snapshot;
+            }
+
+            snapshot.Add(new ChatApiMessage
+            {
+                Role = "assistant",
+                Content = completedResult.Content,
+                ReasoningContent = completedResult.ReasoningContent,
+            });
+            return snapshot;
+        }
+
+        /// <summary>
         /// 准备 Handoff 转发的完整消息历史。只移除源 Agent 末尾的身份提示词，
         /// 保留当前 user 及其全部 assistant/tool_calls + tool result 历史。
         /// </summary>

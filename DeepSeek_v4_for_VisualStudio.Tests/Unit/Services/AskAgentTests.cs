@@ -639,6 +639,95 @@ public class AskAgentTests
     }
 
     [Fact]
+    public void SnapshotHandoffCacheMessages_WithCompletedResult_AppendsFinalAssistantBeforeTargetPrompt()
+    {
+        var sentMessages = new List<ChatApiMessage>
+        {
+            new() { Role = "system", Content = "stable system" },
+            new() { Role = "user", Content = "补齐执行器测试" },
+            new()
+            {
+                Role = "assistant",
+                ToolCalls = new List<ToolCall>
+                {
+                    new()
+                    {
+                        Id = "call_1",
+                        Type = "function",
+                        Function = new ToolCallFunction { Name = "replace_string_in_file", Arguments = "{}" },
+                    },
+                },
+            },
+            new() { Role = "tool", ToolCallId = "call_1", Name = "replace_string_in_file", Content = "编辑应用并验证成功。" },
+            new() { Role = "system", Content = "source agent prompt" },
+        };
+
+        typeof(DeepSeek_v4_for_VisualStudio.Services.Providers.OpenAiCompatibleProvider)
+            .GetField("<LastSentMessages>k__BackingField",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(_apiService, sentMessages);
+
+        var agent = new AskAgent(_apiService);
+        var result = new AgentResult
+        {
+            Content = "执行器单元测试已补齐并验证。",
+            ReasoningContent = "完成测试和验证。",
+        };
+
+        var snapshot = agent.SnapshotHandoffCacheMessages(result);
+
+        snapshot.Should().NotBeNull();
+        snapshot.Should().HaveCount(5);
+        snapshot![snapshot.Count - 1].Role.Should().Be("assistant");
+        snapshot[snapshot.Count - 1].Content.Should().Be(result.Content);
+        snapshot[snapshot.Count - 1].ReasoningContent.Should().Be(result.ReasoningContent);
+        snapshot.Should().Contain(m => m.Role == "tool" && m.ToolCallId == "call_1");
+        snapshot.Should().NotContain(m => m.Content == "source agent prompt");
+    }
+
+    [Fact]
+    public void SnapshotHandoffCacheMessages_RequestHandoffToolChain_DoesNotAppendSyntheticNotice()
+    {
+        var sentMessages = new List<ChatApiMessage>
+        {
+            new() { Role = "system", Content = "stable system" },
+            new() { Role = "user", Content = "排查测试失败" },
+            new()
+            {
+                Role = "assistant",
+                Content = "遵照选择，我把排查任务移交 Build Agent。",
+                ToolCalls = new List<ToolCall>
+                {
+                    new()
+                    {
+                        Id = "call_handoff",
+                        Type = "function",
+                        Function = new ToolCallFunction { Name = "request_handoff", Arguments = "{}" },
+                    },
+                },
+            },
+            new() { Role = "tool", ToolCallId = "call_handoff", Name = "request_handoff", Content = "HANDOFF_REQUESTED" },
+            new() { Role = "system", Content = "source agent prompt" },
+        };
+
+        typeof(DeepSeek_v4_for_VisualStudio.Services.Providers.OpenAiCompatibleProvider)
+            .GetField("<LastSentMessages>k__BackingField",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(_apiService, sentMessages);
+
+        var agent = new AskAgent(_apiService);
+        var snapshot = agent.SnapshotHandoffCacheMessages(new AgentResult
+        {
+            Content = "任务已移交给 Build Agent。",
+        });
+
+        snapshot.Should().NotBeNull();
+        snapshot.Should().HaveCount(4);
+        snapshot![snapshot.Count - 1].Role.Should().Be("tool");
+        snapshot[snapshot.Count - 1].Name.Should().Be("request_handoff");
+    }
+
+    [Fact]
     public void BuildContextualPrompt_WithFileContext_IncludesItWithoutQuestionWrapper()
     {
         var context = new AgentContext
