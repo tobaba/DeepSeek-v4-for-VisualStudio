@@ -1605,13 +1605,19 @@ return "<!DOCTYPE html><html lang='" + htmlLang + "'><head><meta charset='UTF-8'
                     foreach (var opt in q.Options)
                     {
                         string escapedLabel = EscapeHtml(opt.Label);
-                        string escapedDesc = opt.Description != null ? EscapeHtml(opt.Description) : "";
+                        // 描述与选项标签同级可读性：正常字号 + 正常文本色，用「: 」分隔主次。
+                        string escapedDesc = EscapeHtmlWithBreaks(opt.Description);
                         string descHtml = !string.IsNullOrEmpty(escapedDesc)
-                            ? $"<span style='color:#888;font-size:10px;margin-left:4px'>{escapedDesc}</span>"
+                            ? $" <span style='color:#D4D4D4'>{escapedDesc}</span>"
                             : "";
-                        pagesHtml.Append($"<label style='display:flex;align-items:center;gap:6px;margin:2px 0;cursor:pointer;font-size:11px;color:#ccc'>");
+                        // align-items:flex-start 让多行描述与选项首行对齐，而不是整体垂直居中。
+                        pagesHtml.Append($"<label style='display:flex;align-items:flex-start;gap:6px;margin:2px 0;cursor:pointer;font-size:11px;color:#D4D4D4'>");
                         pagesHtml.Append($"<input type='{inputType}' name='{qId}' value='{EscapeHtmlAttribute(opt.Label)}' style='accent-color:#4fc1ff'>");
-                        pagesHtml.Append($"{escapedLabel}{descHtml}</label>");
+                        // 标签 + 「: 描述」同处一个排版容器，长描述才能自然换行而不是各自成为 flex 项。
+                        string optText = descHtml.Length > 0
+                            ? $"{escapedLabel}<span style='color:#D4D4D4'>:</span>{descHtml}"
+                            : escapedLabel;
+                        pagesHtml.Append($"<span style='min-width:0;color:#D4D4D4'>{optText}</span></label>");
                     }
                 }
 

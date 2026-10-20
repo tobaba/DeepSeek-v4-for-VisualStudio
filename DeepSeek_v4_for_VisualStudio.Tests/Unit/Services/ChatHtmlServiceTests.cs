@@ -510,6 +510,43 @@ public class ChatHtmlServiceTests
     }
 
     [Fact]
+    public void BuildAskQuestionsJs_OptionDescription_UsesReadableBodyTextStyle()
+    {
+        var request = new AgentQuestionRequest
+        {
+            RequestId = "q-3",
+            Questions = new List<AgentQuestion>
+            {
+                new AgentQuestion
+                {
+                    Header = "范围",
+                    Question = "要改哪些文件？",
+                    Options = new List<QuestionOption>
+                    {
+                        new QuestionOption { Label = "全部", Description = "包含 <b>测试</b> 与文档\n第二行" },
+                        new QuestionOption { Label = "仅当前" },
+                    },
+                },
+            },
+        };
+
+        string js = ChatHtmlService.BuildAskQuestionsJs(request);
+
+        // 选项描述不再降级为更暗的 #888 / 10px
+        js.Should().NotContain("#888;font-size:10px");
+        js.Should().NotContain("font-size:10px");
+
+        // 标签与描述同处一个排版容器，用「: 」分隔（视觉分隔，不进入选项值）
+        js.Should().Contain("全部<span style='color:#D4D4D4'>:</span>");
+
+        // 描述保留换行且仍做 HTML 转义
+        js.Should().Contain("包含 &lt;b&gt;测试&lt;/b&gt; 与文档<br>第二行");
+
+        // 没有描述的选项不追加多余分隔符
+        js.Should().NotContain("仅当前<span");
+    }
+
+    [Fact]
     public void BuildInitialPage_DefinesAskQuestionsPagingFunctionsAndCollectsAnswersPerPage()
     {
         string html = ChatHtmlService.BuildInitialPage(new List<ChatMessage>());
