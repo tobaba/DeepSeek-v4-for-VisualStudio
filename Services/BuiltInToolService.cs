@@ -23,6 +23,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         private McpManagerService? _mcpManager;
         private readonly WebSearchService? _webSearchService;
         private readonly IBuildService? _buildService;
+        private readonly ITestService? _testService;
         private readonly IMemoryService? _memoryService;
         private readonly ISkillService _skillService;
         private DeepSeekApiService? _apiService;
@@ -273,11 +274,13 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             WebSearchService? webSearchService = null,
             IBuildService? buildService = null,
             IMemoryService? memoryService = null,
-            ISkillService? skillService = null)
+            ISkillService? skillService = null,
+            ITestService? testService = null)
         {
             _mcpManager = mcpManager;
             _webSearchService = webSearchService;
             _buildService = buildService;
+            _testService = testService;
             _memoryService = memoryService;
             _skillService = skillService ?? SkillService.Instance;
             ToolResultCompactor ??= new ToolResultCompactor();
@@ -319,6 +322,9 @@ namespace DeepSeek_v4_for_VisualStudio.Services
 
             // 构建工具
             Register(new BuildSolutionTool(_buildService));
+
+            // 测试工具
+            Register(new RunTestsTool(_testService));
 
             // 编辑工具
             Register(new ReplaceStringInFileTool());
@@ -461,6 +467,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 new CaptureWindowTool(),
                 new CaptureWebpageTool(),
                 new BuildSolutionTool(),
+                new RunTestsTool(),
                 new ReplaceStringInFileTool(),
                 new MultiReplaceStringInFileTool(),
                 new CreateFileTool(),
@@ -608,7 +615,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             return toolName switch
             {
                 "list_dir" or "read_file" or "file_search" or "grep_search" or "symbol_search" or "get_file_symbols" or "get_errors"
-                    or "fetch_webpage" or "web_search" or "capture_window" or "capture_webpage" or "build_solution"
+                    or "fetch_webpage" or "web_search" or "capture_window" or "capture_webpage" or "build_solution" or "run_tests"
                     or "replace_string_in_file" or "multi_replace_string_in_file" or "create_file" or "delete_file"
                     or "apply_patch" or "create_directory"
                     or "load_skill" or "read_skill_resource"

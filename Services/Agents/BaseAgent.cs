@@ -39,6 +39,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         {
             "list_dir", "read_file", "file_search", "grep_search", "symbol_search", "get_file_symbols", "get_errors",
             "fetch_webpage", "web_search", "capture_window", "capture_webpage", "build_solution",
+            "run_tests",
             "replace_string_in_file", "multi_replace_string_in_file",
             "create_file", "delete_file", "apply_patch", "create_directory", "run_in_terminal",
             "get_terminal_output", "load_skill", "read_skill_resource",
@@ -3739,6 +3740,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                 or "create_file"
                 or "apply_patch"
                 or "build_solution"          // 构建时间不可预测，由 BuildService 内部控制超时
+                or "run_tests"               // 测试运行时间不可预测，由 TestService 内部控制超时
                 or "read_file"               // 可能触发项目外路径权限弹窗
                 or "list_dir"                // 同上
                 or "create_directory"        // 同上

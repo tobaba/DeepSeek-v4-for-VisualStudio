@@ -110,6 +110,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             "runSubagent",
             // 终端、构建与 Git
             "build_solution",
+            "run_tests",
             "run_in_terminal",
             "get_terminal_output",
             "git",
@@ -540,10 +541,13 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             // ── 步骤级构建许可：非"要求构建"的中间步骤禁用 build_solution ──
             // 只裁剪客户端拦截白名单，tools JSON 仍发送完整集（保持 Prefix Cache 稳定）。
             // 模型若仍调用 build_solution，会收到白名单拒绝消息并据此调整。
+            // run_tests 依赖已构建产物，与 build_solution 绑定同一开关：
+            // 未编译就跑去跑测试只会得到"测试程序集不存在"，没有意义。
             if (!IsBuildAllowedForStep(step, plan, out string? buildAllowedReason))
             {
                 stepToolWhitelist.RemoveAll(t =>
-                    string.Equals(t, "build_solution", StringComparison.OrdinalIgnoreCase));
+                    string.Equals(t, "build_solution", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(t, "run_tests", StringComparison.OrdinalIgnoreCase));
                 AddLog("INFO", string.Format(
                     LocalizationService.Instance["agent.log.editStepBuildBlocked"], step.Index));
             }

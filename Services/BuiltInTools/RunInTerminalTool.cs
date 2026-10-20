@@ -808,6 +808,13 @@ namespace DeepSeek_v4_for_VisualStudio.Services.BuiltInTools
 
             if (IsBuildCommand(command))
             {
+                // .NET 测试命令单独提示，引导到 run_tests 工具
+                if (IsTestCommand(command))
+                {
+                    return LocalizationService.Instance["tool.runTerminal.testBlocked"] + "\n\n" +
+                        LocalizationService.Instance.Format("tool.runInTerminal.testBlockedExtra", command);
+                }
+
                 return LocalizationService.Instance["tool.runTerminal.buildBlocked"] + "\n\n" +
                     LocalizationService.Instance.Format("tool.runInTerminal.buildBlockedExtra", command);
             }
@@ -1317,6 +1324,21 @@ namespace DeepSeek_v4_for_VisualStudio.Services.BuiltInTools
         /// <summary>
         /// 检测命令是否为编译/构建命令。
         /// </summary>
+        /// <summary>
+        /// 判定是否为 .NET 测试命令（引导到 run_tests 工具而非 build_solution）。
+        /// </summary>
+        private static bool IsTestCommand(string command)
+        {
+            if (string.IsNullOrWhiteSpace(command)) return false;
+
+            string normalized = command.Trim();
+            if (normalized.StartsWith("&"))
+                normalized = normalized.Substring(1).Trim();
+
+            return normalized.Contains("dotnet test", StringComparison.OrdinalIgnoreCase) ||
+                   normalized.Contains("vstest.console", StringComparison.OrdinalIgnoreCase);
+        }
+
         private static bool IsBuildCommand(string command)
         {
             if (string.IsNullOrWhiteSpace(command)) return false;
@@ -1329,7 +1351,11 @@ namespace DeepSeek_v4_for_VisualStudio.Services.BuiltInTools
                 normalized.Contains("dotnet msbuild", StringComparison.OrdinalIgnoreCase) ||
                 normalized.Contains("dotnet publish", StringComparison.OrdinalIgnoreCase) ||
                 normalized.Contains("dotnet restore", StringComparison.OrdinalIgnoreCase) ||
-                normalized.Contains("dotnet pack", StringComparison.OrdinalIgnoreCase))
+                normalized.Contains("dotnet pack", StringComparison.OrdinalIgnoreCase) ||
+                // dotnet test 默认先构建再跑测试；.NET 测试请统一走 run_tests 工具
+                // （dotnet test 本身不是构建命令，但在 --no-build 缺失时会隐式构建）
+                normalized.Contains("dotnet test", StringComparison.OrdinalIgnoreCase) ||
+                normalized.Contains("vstest.console", StringComparison.OrdinalIgnoreCase))
                 return true;
 
             if (normalized.Contains("msbuild", StringComparison.OrdinalIgnoreCase) ||
