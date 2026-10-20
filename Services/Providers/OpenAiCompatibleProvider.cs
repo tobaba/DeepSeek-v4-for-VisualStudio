@@ -776,6 +776,63 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Providers
             var requestJson = SerializeRequest(request);
             var requestBodyBytes = Encoding.UTF8.GetBytes(requestJson);
 
+            // ── 开发者调试：为本次调用分配转储文件（未开启时零开销）──
+            var dumpScope = ApiDebugDumpService.BeginCall(ProviderName);
+            var callStopwatch = System.Diagnostics.Stopwatch.StartNew();
+            // LastUsage 承载的是「上一次调用」的值，转储摘要必须只认本次真正收到的 usage。
+            bool usageCaptured = false;
+            if (dumpScope.Enabled)
+            {
+                ApiDebugDumpService.WriteRequest(dumpScope, requestJson);
+                Logger.Info($"[ApiDump] 已开启报文转储: {Path.GetFileName(dumpScope.RequestPath)}");
+            }
+
+            // ── 本地函数：把本次调用的 usage / finish_reason / 耗时写成转储摘要。
+            //     定义在重试循环之前，使 HTTP 失败等提前退出的路径也能留下记录。──
+            void FlushDumpSummary(string outcome)
+            {
+                if (!dumpScope.Enabled) return;
+
+                try
+                {
+                    var sb = new StringBuilder();
+                    sb.AppendLine($"outcome={outcome}");
+                    sb.AppendLine($"provider={ProviderName}");
+                    sb.AppendLine($"model={request.Model}");
+                    sb.AppendLine($"endpoint={BuildRequestUri(ChatEndpoint)}");
+                    sb.AppendLine($"requestBytes={requestBodyBytes.Length}");
+                    sb.AppendLine($"messages={request.Messages.Count}");
+                    sb.AppendLine($"tools={normalizedTools?.Count ?? 0}");
+                    sb.AppendLine($"elapsedMs={callStopwatch.ElapsedMilliseconds}");
+                    sb.AppendLine($"finishReason={LastFinishReason ?? "<none>"}");
+
+                    var usage = usageCaptured ? LastUsage : null;
+                    if (usage == null)
+                    {
+                        sb.Append("usage=<none>");
+                    }
+                    else
+                    {
+                        sb.AppendLine($"promptTokens={usage.PromptTokens}");
+                        sb.AppendLine($"completionTokens={usage.CompletionTokens}");
+                        sb.AppendLine($"cacheHitTokens={usage.EffectiveHitTokens}");
+                        sb.AppendLine($"cacheMissTokens={usage.EffectiveMissTokens}");
+
+                        int cacheableTotal = usage.EffectiveHitTokens + usage.EffectiveMissTokens;
+                        double hitRate = cacheableTotal > 0
+                            ? (double)usage.EffectiveHitTokens / cacheableTotal
+                            : 0;
+                        sb.Append($"cacheHitRate={hitRate:P1}");
+                    }
+
+                    ApiDebugDumpService.WriteSummary(dumpScope, sb.ToString());
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn($"[ApiDump] 写入调用摘要失败: {ex.Message}");
+                }
+            }
+
             // ── 记录请求元数据 + 消息结构诊断 ──
             int diagSys = request.Messages.Count(m => m.Role == "system");
             int diagUser = request.Messages.Count(m => m.Role == "user");
@@ -953,7 +1010,9 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Providers
                             response = null;
 
                             // 剥离后请求体变化，需重新序列化并重算字节数（前缀缓存诊断用）。
-                            requestBodyBytes = SerializeRequestBody(request);
+                            string strippedRequestJson = SerializeRequest(request);
+                            requestBodyBytes = Encoding.UTF8.GetBytes(strippedRequestJson);
+                            ApiDebugDumpService.WriteRequest(dumpScope, strippedRequestJson);
                             Logger.Warn(
                                 $"[API] 检测到服务端图片加载失败（HTTP {statusCode}），" +
                                 $"已剥离 {strippedCount} 张图片后重试一次（不中断本轮对话）。\n{details}");
@@ -964,6 +1023,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Providers
 
                         Logger.Error($"[API] HTTP {statusCode} 是客户端错误，放弃重试。\n{details}");
                         response?.Dispose();
+                        ApiDebugDumpService.AppendResponseLine(dumpScope, $"===== HTTP {statusCode} (no retry) =====\n{details}");
+                        FlushDumpSummary($"http-error-{statusCode}");
                         throw new HttpRequestException(
                             $"{ProviderName} API 返回 HTTP {statusCode}。\n{details}", ex);
                     }
@@ -1001,6 +1062,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Providers
                             : $"请求: {requestContext}\n异常: {ex.GetType().Name}: {ex.Message}");
                     Logger.Error($"[API] HTTP {statusCode} 请求失败，已停止重试。\n{details}");
                     response?.Dispose();
+                    ApiDebugDumpService.AppendResponseLine(dumpScope, $"===== HTTP {statusCode} (retries exhausted) =====\n{details}");
+                    FlushDumpSummary($"http-failed-{statusCode}");
                     throw new HttpRequestException(
                         $"{ProviderName} API 请求失败 (HTTP {statusCode})。\n{details}", ex);
                 }
@@ -1013,6 +1076,19 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Providers
             {
             using var stream = await response.Content.ReadAsStreamAsync();
             using var reader = new StreamReader(stream, Encoding.UTF8);
+
+            // ── 开发者调试：响应流就绪，记录 HTTP 状态与响应头 ──
+            if (dumpScope.Enabled)
+            {
+                ApiDebugDumpService.AppendResponseLine(
+                    dumpScope,
+                    $"===== HTTP {(int)response.StatusCode} {response.ReasonPhrase} =====");
+                foreach (var header in response.Headers)
+                {
+                    ApiDebugDumpService.AppendResponseLine(
+                        dumpScope, $"# {header.Key}: {string.Join(", ", header.Value)}");
+                }
+            }
 
             // ── 缓冲聚合：减少 yield return 迭代次数 ──
             var contentBatch = new StringBuilder(512);
@@ -1087,6 +1163,10 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Providers
                 // 每次成功读到数据，重置无数据超时计时器
                 readTimeoutCts.CancelAfter(TimeSpan.FromSeconds(sseReadTimeoutSeconds));
 
+                // ── 开发者调试：原样记录每一条响应行（含空行与 event: 行）──
+                if (dumpScope.Enabled)
+                    ApiDebugDumpService.AppendResponseLine(dumpScope, line);
+
                 if (string.IsNullOrEmpty(line) || !line.StartsWith("data: "))
                     continue;
 
@@ -1101,6 +1181,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Providers
                     }
                     // ── 在 [DONE] 处立即输出缓存诊断 + 磁盘转储 ──
                     FlushCacheDiagnostics();
+                    FlushDumpSummary("stream-done");
                     RaiseRequestCompleted();
                     yield break;
                 }
@@ -1136,6 +1217,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Providers
                     if (chunk?.Usage != null)
                     {
                         LastUsage = chunk.Usage;
+                        usageCaptured = true;
                         AccumulateStats(chunk.Usage, model);
                         cacheInfo = $"{chunk.Usage.EffectiveHitTokens}|{chunk.Usage.EffectiveMissTokens}|{chunk.Usage.PromptTokens}|{chunk.Usage.CompletionTokens}";
                     }
@@ -1177,6 +1259,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Providers
 
             // ── 流正常结束（无 [DONE] 时）输出缓存诊断 ──
             FlushCacheDiagnostics();
+            FlushDumpSummary("stream-end");
             RaiseRequestCompleted();
             } // using(response) — 重试块闭合
         }

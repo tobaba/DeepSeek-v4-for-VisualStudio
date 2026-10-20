@@ -66,19 +66,13 @@ public class AskAgentTests
     [Fact]
     public void SummaryPrompts_AllowFreeMarkdownOutput()
     {
-        var handoffPrompt = global::DeepSeek_v4_for_VisualStudio.Services.LocalizationService.Instance["agent.edit.handoffAskPrompt"];
-        var polishPrompt = global::DeepSeek_v4_for_VisualStudio.Services.AiPrompts.SummaryPolishSystemPrompt;
+        var handoffPrompt = global::DeepSeek_v4_for_VisualStudio.Services.LocalizationService.Instance["agent.summary.handoffUserPrompt"];
         var summaryOnlyPrompt = global::DeepSeek_v4_for_VisualStudio.Services.LocalizationService.Instance["agent.summaryOnlySystemPrompt"];
 
         handoffPrompt.Should().Contain("Markdown");
         handoffPrompt.Should().Contain("Mermaid");
         handoffPrompt.Should().Contain("LaTeX");
         handoffPrompt.Should().Contain("不要求固定结构");
-
-        polishPrompt.Should().Contain("Markdown");
-        polishPrompt.Should().Contain("Mermaid");
-        polishPrompt.Should().Contain("LaTeX");
-        polishPrompt.Should().Contain("不要求固定结构");
 
         summaryOnlyPrompt.Should().Contain("禁止调用任何工具");
         summaryOnlyPrompt.Should().Contain("DSML");
@@ -171,6 +165,57 @@ public class AskAgentTests
         AskAgent.AskTools.Should().NotContain("create_directory");
         AskAgent.AskTools.Should().NotContain("delete_file");
         AskAgent.AskTools.Should().NotContain("apply_patch");
+
+        // 执行类工具同样不能在 Ask 工具集里：
+        // Ask 无法跑测试/构建，缺失的 run_tests 曾让模型在"能不能调用"上反复摇摆。
+        AskAgent.AskTools.Should().NotContain("run_tests");
+        AskAgent.AskTools.Should().NotContain("build_solution");
+    }
+
+    #endregion
+
+    #region Execution Boundary Prompt
+
+    /// <summary>
+    /// 回归：Ask 系统提示词必须显式说明"没有 run_tests / build_solution，遇到执行类请求直接移交"。
+    /// 否则模型会看到用户要求跑测试、又找不到对应工具，进而在思考里反复自我说服。
+    /// </summary>
+    [Fact]
+    public void SystemPrompt_StatesExecutionToolsAreUnavailableAndHandoffIsRequired()
+    {
+        string prompt = LocalizationService.Instance["agent.ask.systemPromptFragment"]
+            + LocalizationService.Instance["system.agent.askPromptFragment"];
+
+        // 只断言语言无关的标识符：工具名与移交目标，避免在非中文语言环境下误报。
+        prompt.Should().Contain("run_tests");
+        prompt.Should().Contain("build_solution");
+        prompt.Should().Contain("request_handoff");
+        prompt.Should().Contain("Edit");
+        // 明确禁止用终端顶替专用工具（否则模型会用 run_in_terminal 绕一圈）
+        prompt.Should().Contain("run_in_terminal");
+    }
+
+    /// <summary>
+    /// 回归：单纯的构建/测试请求要交给 Build Agent（它同时持有 build_solution 与 run_tests），
+    /// 而不是 Edit —— 前者只需一个结果，后者才是改代码的场景。
+    /// </summary>
+    [Fact]
+    public void SystemPrompt_RoutesPlainBuildAndTestRequestsToBuildAgent()
+    {
+        string prompt = LocalizationService.Instance["system.agent.askPromptFragment"];
+
+        // 移交清单里，构建/测试两项的目标必须是 Build
+        prompt.Should().Contain("Build");
+        prompt.Should().Contain("run_tests");
+        prompt.Should().Contain("build_solution");
+
+        // 移交清单里「运行测试」那一条必须指向 Build（断言语言无关：只找含 run_tests 的清单项）
+        var testLine = prompt
+            .Split('\n')
+            .FirstOrDefault(l => l.TrimStart().StartsWith("- ") && l.Contains("run_tests"));
+        testLine.Should().NotBeNull("移交清单必须给出运行测试的目标 Agent");
+        testLine!.Should().Contain("Build", "运行测试应移交给 Build Agent");
+        testLine.Should().NotContain("Edit", "运行测试不应再移交给 Edit Agent");
     }
 
     #endregion
@@ -588,6 +633,189 @@ public class AskAgentTests
     }
 
     [Fact]
+    public void SnapshotHandoffCacheMessages_WithCompletedResult_AppendsFinalAssistantBeforeTargetPrompt()
+    {
+        var sentMessages = new List<ChatApiMessage>
+        {
+            new() { Role = "system", Content = "stable system" },
+            new() { Role = "user", Content = "补齐执行器测试" },
+            new()
+            {
+                Role = "assistant",
+                ToolCalls = new List<ToolCall>
+                {
+                    new()
+                    {
+                        Id = "call_1",
+                        Type = "function",
+                        Function = new ToolCallFunction { Name = "replace_string_in_file", Arguments = "{}" },
+                    },
+                },
+            },
+            new() { Role = "tool", ToolCallId = "call_1", Name = "replace_string_in_file", Content = "编辑应用并验证成功。" },
+            new() { Role = "system", Content = "source agent prompt" },
+        };
+
+        typeof(DeepSeek_v4_for_VisualStudio.Services.Providers.OpenAiCompatibleProvider)
+            .GetField("<LastSentMessages>k__BackingField",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(_apiService, sentMessages);
+
+        var agent = new AskAgent(_apiService);
+        var result = new AgentResult
+        {
+            Content = "执行器单元测试已补齐并验证。",
+            ReasoningContent = "完成测试和验证。",
+        };
+
+        var snapshot = agent.SnapshotHandoffCacheMessages(result);
+
+        snapshot.Should().NotBeNull();
+        snapshot.Should().HaveCount(5);
+        snapshot![snapshot.Count - 1].Role.Should().Be("assistant");
+        snapshot[snapshot.Count - 1].Content.Should().Be(result.Content);
+        snapshot[snapshot.Count - 1].ReasoningContent.Should().Be(result.ReasoningContent);
+        snapshot.Should().Contain(m => m.Role == "tool" && m.ToolCallId == "call_1");
+        snapshot.Should().NotContain(m => m.Content == "source agent prompt");
+    }
+
+    [Fact]
+    public void SnapshotHandoffCacheMessages_RequestHandoffToolChain_DoesNotAppendSyntheticNotice()
+    {
+        var sentMessages = new List<ChatApiMessage>
+        {
+            new() { Role = "system", Content = "stable system" },
+            new() { Role = "user", Content = "排查测试失败" },
+            new()
+            {
+                Role = "assistant",
+                Content = "遵照选择，我把排查任务移交 Build Agent。",
+                ToolCalls = new List<ToolCall>
+                {
+                    new()
+                    {
+                        Id = "call_handoff",
+                        Type = "function",
+                        Function = new ToolCallFunction { Name = "request_handoff", Arguments = "{}" },
+                    },
+                },
+            },
+            new() { Role = "tool", ToolCallId = "call_handoff", Name = "request_handoff", Content = "HANDOFF_REQUESTED" },
+            new() { Role = "system", Content = "source agent prompt" },
+        };
+
+        typeof(DeepSeek_v4_for_VisualStudio.Services.Providers.OpenAiCompatibleProvider)
+            .GetField("<LastSentMessages>k__BackingField",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(_apiService, sentMessages);
+
+        var agent = new AskAgent(_apiService);
+        var snapshot = agent.SnapshotHandoffCacheMessages(new AgentResult
+        {
+            Content = "任务已移交给 Build Agent。",
+        });
+
+        snapshot.Should().NotBeNull();
+        snapshot.Should().HaveCount(4);
+        snapshot![snapshot.Count - 1].Role.Should().Be("tool");
+        snapshot[snapshot.Count - 1].Name.Should().Be("request_handoff");
+    }
+
+    [Fact]
+    public void EnsureCompletedAssistantInHandoffPrefix_AppendsToExistingSnapshot()
+    {
+        var snapshot = new List<ChatApiMessage>
+        {
+            new() { Role = "system", Content = "stable system" },
+            new() { Role = "user", Content = "补齐执行器测试" },
+            new()
+            {
+                Role = "assistant",
+                Content = "构建验证中",
+                ToolCalls = new List<ToolCall>
+                {
+                    new()
+                    {
+                        Id = "call_build",
+                        Type = "function",
+                        Function = new ToolCallFunction { Name = "build_solution", Arguments = "{}" },
+                    },
+                },
+            },
+            new() { Role = "tool", ToolCallId = "call_build", Name = "build_solution", Content = "构建成功" },
+        };
+
+        bool appended = BaseAgent.EnsureCompletedAssistantInHandoffPrefix(
+            snapshot,
+            new AgentResult { Content = "源 Agent 最终回答", ReasoningContent = "完成验证。" });
+
+        appended.Should().BeTrue();
+        snapshot.Should().HaveCount(5);
+        snapshot[snapshot.Count - 1].Role.Should().Be("assistant");
+        snapshot[snapshot.Count - 1].Content.Should().Be("源 Agent 最终回答");
+    }
+
+    [Fact]
+    public void BuildMemoryExtractionMessages_ReusesSummaryPrefixAndAppendsMemoryTail()
+    {
+        var handoff = new AgentHandoff
+        {
+            IsSummaryOnly = true,
+            ForwardedMessages = new List<ChatApiMessage>
+            {
+                new() { Role = "system", Content = "stable system" },
+                new() { Role = "user", Content = "原用户请求" },
+                new()
+                {
+                    Role = "assistant",
+                    Content = "构建验证中",
+                    ToolCalls = new List<ToolCall>
+                    {
+                        new()
+                        {
+                            Id = "call_build",
+                            Type = "function",
+                            Function = new ToolCallFunction { Name = "build_solution", Arguments = "{}" },
+                        },
+                    },
+                },
+                new() { Role = "tool", ToolCallId = "call_build", Name = "build_solution", Content = "构建成功" },
+                new() { Role = "system", Content = "Edit 模式行为提示" },
+            },
+        };
+
+        var messages = DeepSeek_v4_for_VisualStudio.View.DeepSeekChatControl
+            .BuildMemoryExtractionMessages(handoff, new AgentResult
+            {
+                Content = "源 Agent 最终回答",
+                ReasoningContent = "完成执行。",
+            });
+
+        messages.Should().HaveCount(7);
+        messages[4].Role.Should().Be("assistant");
+        messages[4].Content.Should().Be("源 Agent 最终回答");
+        messages[4].ReasoningContent.Should().Be("完成执行。");
+        messages[5].Role.Should().Be("user");
+        messages[5].Content.Should().Be(AiPrompts.MemoryAutoRecordUserPrompt);
+        messages[6].Role.Should().Be("system");
+        messages[6].Content.Should().Be(AiPrompts.MemoryAutoRecordSystemPrompt);
+        messages.Should().NotContain(m => m.Content == "Edit 模式行为提示");
+    }
+
+    [Fact]
+    public void SummaryHandoffUserPrompt_IsInstructionOnly()
+    {
+        string prompt = LocalizationService.Instance["agent.summary.handoffUserPrompt"];
+
+        prompt.Should().NotContain("步骤执行情况");
+        prompt.Should().NotContain("修改的文件");
+        prompt.Should().NotContain("链回原始请求");
+        prompt.Should().NotContain("以下资料仅供参考");
+        prompt.Should().NotContain("不是输出模板");
+        prompt.Should().Contain("最终总结");
+    }
+
+    [Fact]
     public void BuildContextualPrompt_WithFileContext_IncludesItWithoutQuestionWrapper()
     {
         var context = new AgentContext
@@ -628,73 +856,6 @@ public class AskAgentTests
 
     #endregion
 
-    #region IsSummaryHandoff — 计划结束时也应出总结
-
-    /// <summary>
-    /// 回归：IsSummaryHandoff 原先要求 plan.IsCompleted，但只要有步骤失败或被取消，
-    /// IsCompleted 就是 false，整个摘要处理会被跳过、落到普通问答分支；
-    /// 而 Handoff 传来的 prompt 本就是「请生成最终总结」。
-    /// 实测一轮 6 步计划中步骤 6 失败后命中该路径，最终气泡 content 为空、总结丢失。
-    /// </summary>
-    [Fact]
-    public void IsSummaryHandoff_PlanWithFailedStep_IsTreatedAsSummary()
-    {
-        var plan = new AgentTaskPlan { Title = "含失败步骤的计划" };
-        plan.Steps.Add(new AgentStep { Index = 1, Title = "第一步", Status = AgentStepStatus.Completed });
-        plan.Steps.Add(new AgentStep { Index = 2, Title = "第二步", Status = AgentStepStatus.Failed });
-
-        plan.IsCompleted.Should().BeFalse("有失败步骤时 IsCompleted 为 false，这正是原先漏判的原因");
-
-        var context = new AgentContext { ActivePlan = plan };
-
-        IsSummaryHandoffPublic(context).Should().BeTrue(
-            "计划已停止推进（含失败步骤），仍应生成变更总结");
-    }
-
-    [Fact]
-    public void IsSummaryHandoff_CompletedPlan_IsTreatedAsSummary()
-    {
-        // 注：IsCompleted 是可写属性（不是按步骤推导的），须显式置位
-        var plan = new AgentTaskPlan { Title = "全部完成的计划", IsCompleted = true };
-        plan.Steps.Add(new AgentStep { Index = 1, Title = "第一步", Status = AgentStepStatus.Completed });
-
-        var context = new AgentContext { ActivePlan = plan };
-
-        IsSummaryHandoffPublic(context).Should().BeTrue();
-    }
-
-    [Fact]
-    public void IsSummaryHandoff_CancelledPlan_IsTreatedAsSummary()
-    {
-        var plan = new AgentTaskPlan { Title = "已取消的计划", IsCancelled = true };
-        plan.Steps.Add(new AgentStep { Index = 1, Title = "第一步", Status = AgentStepStatus.Pending });
-
-        var context = new AgentContext { ActivePlan = plan };
-
-        IsSummaryHandoffPublic(context).Should().BeTrue("取消的计划同样需要给用户结论");
-    }
-
-    [Fact]
-    public void IsSummaryHandoff_NoPlan_IsNotSummary()
-    {
-        // 纯问答没有计划，必须保持普通问答路径，不受本次放宽影响
-        IsSummaryHandoffPublic(new AgentContext()).Should().BeFalse();
-    }
-
-    [Fact]
-    public void IsSummaryHandoff_PlanStillRunning_IsNotSummary()
-    {
-        // 仍在推进（有 Pending 步骤、无失败）不应提前被当成收尾总结
-        var plan = new AgentTaskPlan { Title = "进行中的计划" };
-        plan.Steps.Add(new AgentStep { Index = 1, Title = "第一步", Status = AgentStepStatus.Completed });
-        plan.Steps.Add(new AgentStep { Index = 2, Title = "第二步", Status = AgentStepStatus.Pending });
-
-        var context = new AgentContext { ActivePlan = plan };
-
-        IsSummaryHandoffPublic(context).Should().BeFalse("计划尚未结束，不应提前总结");
-    }
-
-    #endregion
 
     #region ParseCodeChangesFromResult (inherited from BaseAgent)
 
@@ -774,93 +935,15 @@ const y = 2;
 
     #endregion
 
-    #region BuildSummaryMarkdown
-
-    [Fact]
-    public void BuildSummaryMarkdown_WithChanges_UsesAiSummaryDirectly()
-    {
-        var plan = new AgentTaskPlan
-        {
-            Title = "测试计划",
-            ChangedFiles =
-            {
-                new FileChangeSummary { FilePath = "src/a.ts", LinesAdded = 10, LinesRemoved = 2 },
-                new FileChangeSummary { FilePath = "src/b.ts", LinesAdded = 5, LinesRemoved = 0 },
-            },
-        };
-
-        var result = BuildSummaryMarkdownPublic(plan, "AI 生成的变更摘要");
-
-        result.Should().Contain("AI 生成的变更摘要");
-        result.Should().NotContain("测试计划");
-        result.Should().NotContain("a.ts");
-        result.Should().NotContain("b.ts");
-    }
-
-    [Fact]
-    public void BuildSummaryMarkdown_WithAiSummary_UsesAiSummaryDirectly()
-    {
-        var plan = new AgentTaskPlan
-        {
-            Title = "测试计划",
-            ChangedFiles =
-            {
-                new FileChangeSummary { FilePath = "src/a.ts", LinesAdded = 10, LinesRemoved = 2 },
-            },
-        };
-
-        string aiSummary = """
-            ## 自由总结
-
-            本次实现了完整登录流程。
-
-            ```mermaid
-            flowchart LR
-                A[登录] --> B[令牌]
-            ```
-            """;
-
-        var result = BuildSummaryMarkdownPublic(plan, aiSummary);
-
-        result.Should().Be(aiSummary);
-        result.Should().NotContain("测试计划");
-        result.Should().NotContain("a.ts");
-        result.Should().NotContain("步骤执行详情");
-    }
-
-    [Fact]
-    public void BuildSummaryMarkdown_NoChanges_ShowsEmptyMessage()
-    {
-        var plan = new AgentTaskPlan { Title = "空计划" };
-
-        var result = BuildSummaryMarkdownPublic(plan, null);
-
-        result.Should().Contain("空计划");
-    }
-
-    #endregion
 
     // ──────────── Reflection helpers for testing private methods ────────────
 
     private static string SummarizeForLogPublic(string? message)
     {
-        var method = typeof(AskAgent).GetMethod("SummarizeForLog",
+        // SummarizeForLog 已提升到 BaseAgent，供 Ask/Build/Plan/Explore 共用
+        var method = typeof(BaseAgent).GetMethod("SummarizeForLog",
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
         return (string)method!.Invoke(null, new object?[] { message })!;
-    }
-
-    private static bool IsSummaryHandoffPublic(AgentContext context)
-    {
-        var method = typeof(AskAgent).GetMethod("IsSummaryHandoff",
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
-        return (bool)method!.Invoke(null, new object[] { context })!;
-    }
-
-    private static string BuildSummaryMarkdownPublic(AgentTaskPlan plan, string? aiSummary)
-    {
-        var method = typeof(AskAgent).GetMethod("BuildSummaryMarkdown",
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
-        return (string)method!.Invoke(null, new object?[] { plan, aiSummary })!;
     }
 
     private static string BuildContextualPromptPublic(string userMessage, AgentContext context)
@@ -915,6 +998,29 @@ const y = 2;
         result.Should().NotContain("**任务**");
         // 首行本身被保留（它是提示词的入口句），但整段不得原样透出
         result.Length.Should().BeLessThan(prompt.Length);
+    }
+
+    /// <summary>
+    /// 回归：Agent 启动行必须走不带 {0} 的 *Short 键写时间线。
+    ///
+    /// 原实现把整段 Handoff prompt 经 AddLog("INFO", ...) 广播 → 渲染进 UI 过程折叠块，
+    /// 用户会看到本该给 AI 的指令（例如 Build 收到测试请求时那条
+    /// 「优先复用对话历史中已读取的文件内容…」）。
+    /// 现在长文案只写日志文件，时间线固定用短句。
+    /// </summary>
+    [Theory]
+    [InlineData("agent.log.buildStartedShort")]
+    [InlineData("agent.log.planStartedShort")]
+    [InlineData("agent.log.exploreStartedShort")]
+    [InlineData("agent.log.askStartedShort")]
+    public void AgentStartTimelineKeys_AreStaticAndHaveNoPromptPlaceholder(string key)
+    {
+        string text = LocalizationService.Instance[key];
+
+        // 有值（键存在），且不含 {0} 占位符——否则仍会把输入拼进 UI 时间线
+        text.Should().NotStartWith("[", "本地化键必须存在");
+        text.Should().NotContain("{0}", "时间线文案不得包含提示词占位符");
+        text.Length.Should().BeLessThan(120);
     }
 
     [Fact]

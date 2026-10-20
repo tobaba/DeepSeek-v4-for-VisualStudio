@@ -39,6 +39,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         {
             "list_dir", "read_file", "file_search", "grep_search", "symbol_search", "get_file_symbols", "get_errors",
             "fetch_webpage", "web_search", "capture_window", "capture_webpage", "build_solution",
+            "run_tests",
             "replace_string_in_file", "multi_replace_string_in_file",
             "create_file", "delete_file", "apply_patch", "create_directory", "run_in_terminal",
             "get_terminal_output", "load_skill", "read_skill_resource",
@@ -673,6 +674,79 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
 
             var sentMessages = CaptureLastSentMessagesForCache();
             return sentMessages == null ? null : PrepareHandoffCacheMessages(sentMessages);
+        }
+
+        /// <summary>
+        /// 获取 Handoff 缓存前缀，并把源 Agent 已完成但尚未落库的最终 assistant 回答追加进去。
+        /// 标准顺序应为：... tool result → assistant 最终回答 → 目标 Agent 的 user/system。
+        /// 若源 Agent 最后一步本身是 request_handoff 工具链，则不再追加移交提示，避免重复。
+        /// </summary>
+        /// <param name="completedResult">源 Agent 已完成的执行结果。</param>
+        /// <returns>可直接交给目标 Agent 复用的缓存前缀。</returns>
+        public List<ChatApiMessage>? SnapshotHandoffCacheMessages(AgentResult? completedResult)
+        {
+            var snapshot = SnapshotHandoffCacheMessages();
+            EnsureCompletedAssistantInHandoffPrefix(snapshot, completedResult);
+            return snapshot;
+        }
+
+        /// <summary>
+        /// 确保源 Agent 的最终回答作为 assistant 消息位于 Handoff 前缀末尾。
+        /// 该方法会去重，并跳过已经由 request_handoff 工具链表达完成的移交。
+        /// </summary>
+        /// <param name="snapshot">待补充的 Handoff 前缀；可为 null。</param>
+        /// <param name="completedResult">源 Agent 已完成的执行结果。</param>
+        /// <returns>是否新增了 assistant 消息。</returns>
+        internal static bool EnsureCompletedAssistantInHandoffPrefix(
+            List<ChatApiMessage>? snapshot,
+            AgentResult? completedResult)
+        {
+            if (snapshot == null
+                || completedResult == null
+                || string.IsNullOrWhiteSpace(completedResult.Content))
+            {
+                return false;
+            }
+
+            // 源 Agent 的行为 system prompt 位于请求尾部，不属于对话内容。
+            // build_solution 等路径保存的快照可能仍带着它；先移除，再追加最终 assistant 回答。
+            if (snapshot.Count > 0
+                && string.Equals(snapshot[snapshot.Count - 1].Role, "system", StringComparison.Ordinal))
+            {
+                snapshot.RemoveAt(snapshot.Count - 1);
+            }
+
+            int lastAssistantIndex = snapshot.FindLastIndex(
+                m => string.Equals(m.Role, "assistant", StringComparison.Ordinal));
+
+            // request_handoff 的 assistant(tool_calls)+tool 结果已经表达完本轮动作；
+            // 其结果正文通常是 HANDOFF_REQUESTED，不应再伪装成一条 assistant 回答。
+            for (int i = lastAssistantIndex + 1; i < snapshot.Count; i++)
+            {
+                var message = snapshot[i];
+                if (string.Equals(message.Role, "tool", StringComparison.Ordinal)
+                    && string.Equals(message.Name, "request_handoff", StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+            }
+
+            if (lastAssistantIndex >= 0
+                && string.Equals(
+                    snapshot[lastAssistantIndex].Content?.Trim(),
+                    completedResult.Content.Trim(),
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            snapshot.Add(new ChatApiMessage
+            {
+                Role = "assistant",
+                Content = completedResult.Content,
+                ReasoningContent = completedResult.ReasoningContent,
+            });
+            return true;
         }
 
         /// <summary>
@@ -1859,32 +1933,19 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                     while (toolCallHistory.Count > 20)
                         toolCallHistory.RemoveAt(0);
 
-                    // ──  子Agent/Handoff缓存优化：在插入 assistant(tool_calls) 前捕获消息列表，
-                    //     供 runSubagent(ExploreAgent) 或 request_handoff 目标 Agent 复用
-                    //     本轮 API 调用实际使用过的缓存前缀。
-                    //     必须在 Insert 之前捕获：Insert 后 messages[4] 从 system 变为
-                    //     assistant(tool_calls)，Rule 5 剥离 tool_calls 后残留纯文本
-                    //     assistant，与已缓存的 system(Agent提示词) 结构不同，导致
-                    //     DeepSeek 前缀缓存在 messages[4] 断裂，命中率从 98% 暴跌至 10.9%。
-                    //     提前捕获不含 assistant 的"干净前缀"确保 messages[0..3] 与已缓存
-                    //     版本完全一致，前缀缓存可持续命中。──
+                    // ── 子 Agent 缓存优化：在插入 assistant(tool_calls) 前捕获干净前缀 ──
+                    //     runSubagent 只需要本轮请求已经缓存过的前缀，因此仍在 Insert 前捕获。
+                    //     request_handoff 不能在这里捕获：它必须等 request_handoff 的 assistant/tool
+                    //     结果写入 messages 后再生成转发快照，否则目标 Agent 的历史会比
+                    //     ContextManager 的 canonical history 少两条消息。后续记忆提取从
+                    //     canonical history 重建时就会在该位置分叉，造成整段 Prompt Cache miss。
                     bool isRequestHandoff = toolCalls.Any(tc => tc.Function.Name == "request_handoff");
-                    if (Context != null && (isRequestHandoff || toolCalls.Any(tc =>
-                        tc.Function.Name == "runSubagent")))
+                    if (Context != null && !isRequestHandoff && toolCalls.Any(tc =>
+                        tc.Function.Name == "runSubagent"))
                     {
-                        if (isRequestHandoff)
-                        {
-                            // 保留当前轮完整上下文，包括已完成的多轮 tool_calls/tool 结果。
-                            var sentMessages = CaptureLastSentMessagesForCache()
-                                ?? new List<ChatApiMessage>(messages);
-                            Context.ForwardedMessages = PrepareHandoffCacheMessages(sentMessages);
-                        }
-                        else
-                        {
-                            Context.ForwardedMessages =
-                                CaptureLastSentMessagesForCache()
-                                ?? new List<ChatApiMessage>(messages);
-                        }
+                        Context.ForwardedMessages =
+                            CaptureLastSentMessagesForCache()
+                            ?? CloneApiMessages(messages);
                     }
 
                     // ── 添加 assistant 消息（含工具调用）──
@@ -2059,26 +2120,22 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                         // ── 裁剪工具结果以保护上下文（与 ContextManager.AddToolResult 保持一致）──
                         string contextResult = CompactToolResultForAgent(tc.Function.Name, resultText);
 
-                        // ── runSubagent 结果同样进入稳定工具历史区，
-                        //     与 ContextManager 中的持久化顺序保持一致。──
-                        if (tc.Function.Name == "runSubagent")
-                        {
-                            messages.Insert(toolInsertPos,
-                                BuildToolResultMessage(tc.Id, tc.Function.Name, contextResult, imageUrls));
-                            toolInsertPos++;
-                        }
-                        else
-                        {
-                            messages.Insert(toolInsertPos,
-                                BuildToolResultMessage(tc.Id, tc.Function.Name, contextResult, imageUrls));
-                            toolInsertPos++;
-                        }
+                        // 构建一次并复用同一对象：本次发送与历史落库必须保持完全一致的 content 形态。
+                        var toolResultMessage = BuildToolResultMessage(
+                            tc.Id, tc.Function.Name, contextResult, imageUrls);
+                        messages.Insert(toolInsertPos, toolResultMessage);
+                        toolInsertPos++;
 
                         // ── 同步 tool 结果到全局 ContextManager，确保重启后可恢复完整对话 ──
+                        //     图片等多模态块必须一并落库，否则下一次请求会把内容数组降级为字符串。
                         //     子任务（persistToHistory=false）不落库。
                         if (persistToHistory && Context?.ContextManager != null)
                         {
-                            Context.ContextManager.AddToolResult(tc.Id, tc.Function.Name, contextResult);
+                            Context.ContextManager.AddToolResult(
+                                tc.Id,
+                                tc.Function.Name,
+                                contextResult,
+                                toolResultMessage.MultimodalContent);
                         }
 
                         Logger.Info($"[Agent:{Definition.Name}] 工具 {tc.Function.Name} 返回: {(toolResult.Length > 200 ? toolResult.Substring(0, 200) + "..." : toolResult)}");
@@ -2168,19 +2225,15 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                     if (PendingHandoffRequest != null)
                     {
                         Logger.Info($"[Agent:{Definition.Name}]  检测到移交请求 → {PendingHandoffRequest.TargetAgent}，终止工具循环");
-                        // ──  保存工具循环消息列表，供 Handoff 目标 Agent 复用前缀 ──
-                        //     浅克隆即可，不调用 CleanIncompleteToolChains：
-                        //     - ChatStreamAsync Rule 5 在每次 API 调用时已统一处理孤儿 assistant
-                        //     - CleanIncompleteToolChains 会修改消息内容（剥离 tool_calls），
-                        //       导致 ForwardedMessages 与 DeepSeek 服务端缓存不一致 → 前缀断裂
-                        //     - Rule 5 是确定性的：相同输入前缀 → 相同输出，不会产生缓存断裂
-                        if (Context != null && Context.ForwardedMessages == null)
+                        // ── 保存完整的 handoff 工具链，供目标 Agent 复用并保持 canonical 前缀 ──
+                        //     request_handoff 的 assistant(tool_calls) 与 tool 结果已经是主流程
+                        //     历史的一部分；若转发时省略它们，目标 Agent 第一轮请求与
+                        //     ContextManager 后续重建的历史就会永久错位。这里深克隆当前消息，
+                        //     并移除末尾 Agent 行为指令，交给目标 Agent 重新生成身份边界和任务。
+                        if (Context != null)
                         {
-                            // 正常路径已在插入本轮 assistant/tool 消息前保存干净前缀；
-                            // 此处仅作为异常路径兜底，避免把 request_handoff 自身消息带入前缀。
-                            var sentMessages = CaptureLastSentMessagesForCache()
-                                ?? new List<ChatApiMessage>(messages);
-                            Context.ForwardedMessages = PrepareHandoffCacheMessages(sentMessages);
+                            Context.ForwardedMessages =
+                                PrepareHandoffCacheMessages(CloneApiMessages(messages));
                         }
                         contentBuilder.Append(LocalizationService.Instance.Format(
                     "agent.handoffNotice", PendingHandoffRequest.TargetAgent));
@@ -3192,8 +3245,10 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             targetAgent.Context = context;
             context.IsSummaryOnlyHandoff = handoff.IsSummaryOnly;
 
-            // 如果热链路上尚未消费 ForwardedMessages，优先使用 Handoff 中携带的快照。
-            if (context.ForwardedMessages == null && handoff.ForwardedMessages != null)
+            // Handoff 携带的快照是调用方刚刚基于 completedResult 生成的最终版本，
+            // 必须优先于 Context 中可能残留的源 Agent 旧快照（例如 build_solution 成功后保存的列表）；
+            // 否则目标 Agent 会丢掉刚追加的源 Agent 最终 assistant 回答。
+            if (handoff.ForwardedMessages != null)
                 context.ForwardedMessages = CloneApiMessages(handoff.ForwardedMessages);
 
             // ── 真移交：允许目标 Agent 首轮复用移交前缀（含身份边界提示语义）──
@@ -3739,6 +3794,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                 or "create_file"
                 or "apply_patch"
                 or "build_solution"          // 构建时间不可预测，由 BuildService 内部控制超时
+                or "run_tests"               // 测试运行时间不可预测，由 TestService 内部控制超时
                 or "read_file"               // 可能触发项目外路径权限弹窗
                 or "list_dir"                // 同上
                 or "create_directory"        // 同上
@@ -4952,6 +5008,34 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             if (level == "ERROR") Logger.Error($"[{Definition.Name}] {message}");
             else if (level == "WARN") Logger.Warn($"[{Definition.Name}] {message}");
             else Logger.Info($"[{Definition.Name}] {message}");
+        }
+
+        /// <summary>
+        /// 把进入 Agent 的消息（用户请求或 Handoff 提示词）压缩成一行摘要，供**写日志文件**使用。
+        ///
+        /// 这类消息常达数 KB，且尾部会挂上给模型看的脚手架（例如「优先复用对话历史中已读取的文件内容…」）。
+        /// 它只能进日志文件，**不能进 <see cref="AddLog"/> 的时间线**——时间线会渲染进 UI，
+        /// 用户会看到本该给 AI 的提示词（Build/Plan/Explore 曾因此把整段 Handoff prompt 显示给用户）。
+        /// 时间线请改用各 Agent 的 *Short 文案键（不含 {0} 占位符）。
+        /// </summary>
+        /// <param name="message">原始用户消息或 Handoff 提示词。</param>
+        protected static string SummarizeForLog(string? message)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+                return "(empty)";
+
+            string normalized = message.Replace("\r\n", "\n").Trim();
+            int newlineIdx = normalized.IndexOf('\n');
+            string firstLine = newlineIdx >= 0 ? normalized.Substring(0, newlineIdx).Trim() : normalized;
+
+            const int maxFirstLine = 120;
+            if (firstLine.Length > maxFirstLine)
+                firstLine = firstLine.Substring(0, maxFirstLine) + "…";
+
+            int totalLines = normalized.Split('\n').Length;
+            return totalLines > 1
+                ? $"{firstLine} …(共 {normalized.Length} 字符 / {totalLines} 行)"
+                : firstLine;
         }
 
         #endregion

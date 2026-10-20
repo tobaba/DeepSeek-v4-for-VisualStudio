@@ -15,14 +15,15 @@ public class BuiltInToolServiceTests
     #region Tool Registration
 
     [Fact]
-    public void Constructor_RegistersAll25Tools()
+    public void Constructor_RegistersAll26Tools()
     {
         var service = new BuiltInToolService();
 
         var defs = service.GetFilteredToolDefinitions(null);
 
-        defs.Should().HaveCount(25);
+        defs.Should().HaveCount(26);
         defs.Select(d => d.Function.Name).Should().Contain("get_file_symbols");
+        defs.Select(d => d.Function.Name).Should().Contain("run_tests");
     }
 
     [Fact]
@@ -100,7 +101,7 @@ public class BuiltInToolServiceTests
 
         var defs = service.GetFilteredToolDefinitions(new List<string>());
 
-        defs.Should().HaveCount(25);
+        defs.Should().HaveCount(26);
     }
 
     [Fact]
@@ -110,7 +111,7 @@ public class BuiltInToolServiceTests
 
         var defs = service.GetFilteredToolDefinitions(null);
 
-        defs.Should().HaveCount(25);
+        defs.Should().HaveCount(26);
     }
 
     [Theory]
@@ -151,6 +152,7 @@ public class BuiltInToolServiceTests
     [InlineData("capture_window", true)]
     [InlineData("capture_webpage", true)]
     [InlineData("build_solution", true)]
+    [InlineData("run_tests", true)]
     [InlineData("replace_string_in_file", true)]
     [InlineData("multi_replace_string_in_file", true)]
     [InlineData("create_file", true)]

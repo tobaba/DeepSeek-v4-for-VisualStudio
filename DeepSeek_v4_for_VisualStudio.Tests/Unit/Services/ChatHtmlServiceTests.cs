@@ -35,6 +35,27 @@ public class ChatHtmlServiceTests
     }
 
     [Fact]
+    public void RenderMarkdownToHtml_Table_WrapsInHorizontalScrollContainer()
+    {
+        string markdown = "| 项 | 性质 | 影响 | 建议 |\n|---|---|---|---|\n| 失败 | 功能缺陷 | 多索引场景 | fix(index) |";
+
+        string result = ChatHtmlService.RenderMarkdownToHtml(markdown);
+
+        result.Should().Contain("<div class=\"table-scroll\"><table>");
+        result.Should().Contain("</table></div>");
+    }
+
+    [Fact]
+    public void BuildInitialPage_IncludesResponsiveTableStyles()
+    {
+        string html = ChatHtmlService.BuildInitialPage(new List<ChatMessage>());
+
+        html.Should().Contain(".table-scroll{");
+        html.Should().Contain("overflow-x:auto");
+        html.Should().Contain("overflow-wrap:anywhere");
+    }
+
+    [Fact]
     public void BuildAssistantDisplayContent_CombinesTimelineAndFinalAnswer()
     {
         string result = ChatHtmlService.BuildAssistantDisplayContent(
@@ -441,6 +462,8 @@ public class ChatHtmlServiceTests
     [Fact]
     public void BuildAskQuestionsJs_MultipleQuestions_MergesIntoPaginatedCardWithSubmitOnLastPage()
     {
+        using var _ = UseThemeMode(ThemeMode.Dark);
+
         var request = new AgentQuestionRequest
         {
             RequestId = "q-1",
@@ -492,6 +515,8 @@ public class ChatHtmlServiceTests
     [Fact]
     public void BuildAskQuestionsJs_SingleQuestion_HidesPagingAndShowsSubmitImmediately()
     {
+        using var _ = UseThemeMode(ThemeMode.Dark);
+
         var request = new AgentQuestionRequest
         {
             RequestId = "q-2",
@@ -507,6 +532,77 @@ public class ChatHtmlServiceTests
         js.Should().NotContain("agent-questions-prev", "单题不需要切题箭头");
         js.Should().NotContain("agent-questions-progress", "单题不需要进度提示");
         js.Should().Contain("display:inline-block;background:#0e639c");
+    }
+
+    [Fact]
+    public void AgentCards_FollowTheme_NoHardcodedDarkOnlyColors()
+    {
+        // ── 浅色主题下的提问 / 审批 / 任务面板必须使用浅色配色，而不是深色硬编码 ──
+        using var _ = UseThemeMode(ThemeMode.Light);
+
+        var questionRequest = new AgentQuestionRequest
+        {
+            RequestId = "q-theme",
+            Questions = new List<AgentQuestion>
+            {
+                new AgentQuestion
+                {
+                    Header = "范围",
+                    Question = "要改哪些文件？",
+                    Options = new List<QuestionOption> { new QuestionOption { Label = "全部" } },
+                    AllowFreeformInput = true,
+                },
+            },
+        };
+        string questionsJs = ChatHtmlService.BuildAskQuestionsJs(questionRequest);
+
+        questionsJs.Should().Contain("#f0f7ff", "浅色主题的提问卡片应使用浅色背景");
+        questionsJs.Should().NotContain("#1a2a3a", "浅色主题不应出现深色卡片背景");
+        questionsJs.Should().NotContain("#1e1e1e", "浅色主题的输入框不应是深色背景");
+
+        var panelJs = ChatHtmlService.BuildAgentTaskPanelCompleteJs(
+            new AgentTaskPlan { PlanId = "p-theme", Title = "任务" });
+        panelJs.Should().NotContain("#4EC9B0", "浅色主题的状态色不应使用深色主题的亮青绿");
+        panelJs.Should().Contain("#2ea87a", "浅色主题应使用浅色主题的成功色");
+    }
+
+    [Fact]
+    public void BuildAskQuestionsJs_OptionDescription_UsesReadableBodyTextStyle()
+    {
+        using var _ = UseThemeMode(ThemeMode.Dark);
+
+        var request = new AgentQuestionRequest
+        {
+            RequestId = "q-3",
+            Questions = new List<AgentQuestion>
+            {
+                new AgentQuestion
+                {
+                    Header = "范围",
+                    Question = "要改哪些文件？",
+                    Options = new List<QuestionOption>
+                    {
+                        new QuestionOption { Label = "全部", Description = "包含 <b>测试</b> 与文档\n第二行" },
+                        new QuestionOption { Label = "仅当前" },
+                    },
+                },
+            },
+        };
+
+        string js = ChatHtmlService.BuildAskQuestionsJs(request);
+
+        // 选项描述不再降级为更暗的 #888 / 10px
+        js.Should().NotContain("#888;font-size:10px");
+        js.Should().NotContain("font-size:10px");
+
+        // 标签与描述同处一个排版容器，用「: 」分隔（视觉分隔，不进入选项值）
+        js.Should().Contain("全部<span style='color:#D4D4D4'>:</span>");
+
+        // 描述保留换行且仍做 HTML 转义
+        js.Should().Contain("包含 &lt;b&gt;测试&lt;/b&gt; 与文档<br>第二行");
+
+        // 没有描述的选项不追加多余分隔符
+        js.Should().NotContain("仅当前<span");
     }
 
     [Fact]
@@ -636,6 +732,36 @@ public class ChatHtmlServiceTests
     #region 用户消息 @ / 蓝色渲染
 
     [Fact]
+    public void BuildUserMessageHtml_ImageOnly_RendersOneThumbnailInsideUserBubbleWithoutFileReference()
+    {
+        var image = new FileParseResult
+        {
+            FileName = "clipboard_20261021_004426_416.png",
+            FileExtension = ".png",
+            FilePath = @"C:\Temp\clipboard_20261021_004426_416.png",
+            Success = true,
+        };
+
+        string html = ChatHtmlService.BuildUserMessageHtml(
+            string.Empty,
+            new List<FileParseResult> { image },
+            messageIndex: 7,
+            attachedImageDataUris: new List<string> { "data:image/png;base64,AAAA" },
+            attachedImageFileNames: new List<string> { image.FileName },
+            attachedImagePaths: new List<string> { image.FilePath });
+
+        html.Should().Contain("class='msg-bubble user'");
+        html.Should().Contain("class='user-message-bubble'");
+        html.Should().Contain("class='attached-image-thumb'");
+        html.Should().NotContain("file-attachment-reference",
+            "已有缩略图时不应再渲染重复的“按需读取”图片文件标签");
+        System.Text.RegularExpressions.Regex.Matches(html, "class='attached-image-thumb'")
+            .Count.Should().Be(1);
+        html.IndexOf("class='user-message-bubble'", StringComparison.Ordinal)
+            .Should().BeLessThan(html.IndexOf("class='attached-image-thumb'", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void BuildUserMessageHtml_AgentToken_WrapsInBlueMentionSpan()
     {
         string html = ChatHtmlService.BuildUserMessageHtml("@ask");
@@ -752,5 +878,24 @@ public class ChatHtmlServiceTests
             idx += needle.Length;
         }
         return count;
+    }
+
+    /// <summary>
+    /// 临时切换主题模式，释放时恢复原值。
+    /// ThemeService 是进程级单例，测试内改主题必须恢复，避免影响其它用例。
+    /// </summary>
+    private static IDisposable UseThemeMode(ThemeMode mode) => new ThemeModeScope(mode);
+
+    private sealed class ThemeModeScope : IDisposable
+    {
+        private readonly ThemeMode _previous;
+
+        public ThemeModeScope(ThemeMode mode)
+        {
+            _previous = ThemeService.Instance.UserThemeMode;
+            ThemeService.Instance.UserThemeMode = mode;
+        }
+
+        public void Dispose() => ThemeService.Instance.UserThemeMode = _previous;
     }
 }

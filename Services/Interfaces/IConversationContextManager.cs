@@ -52,7 +52,11 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         void AddUserMessage(string content);
         void AddUserMessage(string content, List<ChatContentPart>? multimodalContent);
         void AddAssistantMessage(string? content, string? reasoningContent = null, List<ToolCall>? toolCalls = null);
+        /// <summary>添加纯文本工具调用结果。</summary>
         void AddToolResult(string toolCallId, string toolName, string result);
+
+        /// <summary>添加工具调用结果；视觉工具可同时保存文本与图片等内容块。</summary>
+        void AddToolResult(string toolCallId, string toolName, string result, List<ChatContentPart>? multimodalContent);
         void AddCustomMessage(string role, string content, int turnIndex = -1);
 
         // ── 上下文获取 ──

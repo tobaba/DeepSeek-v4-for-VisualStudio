@@ -352,6 +352,11 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     Logger.Warn("[AgentHandoff] 未找到有效的 PlanJson，EditAgent 将回退到单步执行");
                 }
 
+                // ── 切换前先捕获源 Agent 的缓存前缀 ──
+                //     重启恢复等情况下 HandoffJson 不包含 ForwardedMessages；若运行期仍能取到
+                //     最近发送快照，应在这里补齐，避免按钮 Handoff 退化为全量历史重建。
+                CaptureHandoffForwardedMessages(_pendingHandoff);
+
                 // ── 切换到目标 Agent 并绑定事件 ──
                 var handoffTargetAgent = _agentFactory.GetAgent(_pendingHandoff.TargetAgent);
                 SwitchActiveAgent(handoffTargetAgent, context);
@@ -378,6 +383,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 int chainDepth = 0;
                 const int maxChainDepth = 10;
                 AgentHandoff? pendingChainBack = null;
+                bool parallelMemoryExtractionStarted = false;
                 while (agentResult.Handoff != null
                     && agentResult.Handoff.AutoSend
                     && !context.CancellationToken.IsCancellationRequested
@@ -404,6 +410,17 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     await TaskScheduler.Default;
 
                     // ── 切换并执行链式 Handoff ──
+                    //     RetryEdit 的链式路径此前遗漏了 ForwardedMessages 捕获，导致
+                    //     Edit→Build、Edit→Ask、Build→Ask 等切换每次都可能从 canonical history
+                    //     重建前缀。必须在 SwitchActiveAgent 之前、_activeAgent 仍指向源 Agent 时捕获。
+                    CaptureHandoffForwardedMessages(nextHandoff, agentResult);
+
+                    if (!parallelMemoryExtractionStarted && nextHandoff.IsSummaryOnly)
+                    {
+                        parallelMemoryExtractionStarted =
+                            TryStartParallelMemoryExtraction(nextHandoff, agentResult);
+                    }
+
                     var chainAgent = _agentFactory.GetAgent(nextHandoff.TargetAgent);
                     SwitchActiveAgent(chainAgent, context);
                     context.IsChainBackContinuation = nextHandoff.IsChainBackContinuation;
@@ -430,9 +447,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
                         else if (agentResult.Handoff.AutoSend
                             && agentResult.Handoff.TargetAgent == chainBack.TargetAgent)
                         {
-                            agentResult.Handoff.Prompt = (agentResult.Handoff.Prompt ?? string.Empty)
-                                + "\n\n" + chainBack.Prompt;
-                            agentResult.Handoff.IsChainBackContinuation = true;
+                            // 合并纯续接要求；源 Agent 执行结果已作为 assistant 前缀存在。
+                            MergeChainBackIntoHandoff(agentResult.Handoff, chainBack);
                             pendingChainBack = null;
                             Logger.Info($"[AgentHandoff] Handoff 链回并入: → {agentResult.Handoff.TargetAgent} ({agentResult.Handoff.Label})");
                         }
@@ -594,7 +610,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
                 await SyncAgentResponseToTreeAndContextAsync();
 
                 // ── 一次 Handoff 执行结束后根据需要自动记录 memory（此前该路径缺失）──
-                TryScheduleAutoMemoryRecord();
+                if (!parallelMemoryExtractionStarted)
+                    TryScheduleAutoMemoryRecord();
 
                 // ── 刷新右下角余额/Token 显示 ──
                 RefreshConsumptionDisplay();
@@ -1133,6 +1150,10 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     Content = newContent,
                     AttachedFileNames = originalUserMsg?.AttachedFileNames ?? new List<string>(),
                     AttachedFiles = originalUserMsg?.AttachedFiles ?? new List<FileParseResult>(),
+                    AttachedImageDataUris = originalUserMsg?.AttachedImageDataUris ?? new List<string>(),
+                    AttachedImageFileNames = originalUserMsg?.AttachedImageFileNames ?? new List<string>(),
+                    AttachedImagePaths = originalUserMsg?.AttachedImagePaths ?? new List<string>(),
+                    AttachedPdfPaths = originalUserMsg?.AttachedPdfPaths ?? new List<string>(),
                     Timestamp = DateTime.Now,
                     AgentType = originalUserMsg?.AgentType, // 保留原 Agent 类型
                 };
@@ -1272,7 +1293,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
                         if (apiMsg.Role == "tool" && !string.IsNullOrEmpty(apiMsg.ToolCallId))
                         {
                             _contextManager.AddToolResult(apiMsg.ToolCallId,
-                                apiMsg.Name ?? "unknown", apiMsg.Content ?? string.Empty);
+                                apiMsg.Name ?? "unknown", apiMsg.Content ?? string.Empty,
+                                apiMsg.MultimodalContent);
                         }
                         else if (apiMsg.Role == "system")
                         {

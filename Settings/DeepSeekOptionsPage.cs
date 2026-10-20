@@ -487,6 +487,11 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
             {
                 base.LoadSettingsFromStorage();
                 LoadApiKeysFromCredentialStore();
+
+                // 持久化装载后同步运行期开关：VC 设置存储反序列化走的是字段赋值，
+                // 不会经过属性 setter，必须在此显式同步一次，否则重启后转储开关失效。
+                Services.ApiDebugDumpService.Enabled = EnableApiDebugDump;
+
                 bool promptsUpgraded = UpgradeLegacyDefaultSystemPrompts();
                 bool searchDefaultMigrated = MigrateLegacyWebSearchDefault();
                 if (promptsUpgraded || searchDefaultMigrated)
@@ -1344,6 +1349,34 @@ namespace DeepSeek_v4_for_VisualStudio.Settings
             if (value < MinWebView2ZoomPercent) return MinWebView2ZoomPercent;
             if (value > MaxWebView2ZoomPercent) return MaxWebView2ZoomPercent;
             return value;
+        }
+
+        // ═══════════════════════════════════════════════
+        //  开发者调试设置
+        // ═══════════════════════════════════════════════
+
+        private bool _enableApiDebugDump;
+
+        /// <summary>
+        /// 开发者调试：把每次 API 调用的完整请求体与完整响应流（原始 SSE）落盘，
+        /// 用于分析缓存命中、工具调用与消息清洗结果。
+        ///
+        /// 报文包含完整 prompt 与代码，且一次调用可能数 MB，默认关闭。
+        /// 开启后由 <see cref="Services.ApiDebugDumpService"/> 同步运行期开关。
+        /// </summary>
+        [LocalizedCategory("settings.category.developer")]
+        [LocalizedDisplayName("settings.apiDebugDump.displayName")]
+        [LocalizedDescription("settings.apiDebugDump.description")]
+        [DefaultValue(false)]
+        [DesignerSerializationVisibility(DesignerSerializationVisibility.Visible)]
+        public bool EnableApiDebugDump
+        {
+            get => _enableApiDebugDump;
+            set
+            {
+                _enableApiDebugDump = value;
+                Services.ApiDebugDumpService.Enabled = value;
+            }
         }
 
         private ThemeMode _themeMode = ThemeMode.Auto;

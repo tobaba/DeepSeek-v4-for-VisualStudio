@@ -50,6 +50,12 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         private bool _didAttemptBuild;
         private bool? _lastBuildSucceeded;
 
+        // ── 本轮是否实际调用过测试，以及最后一次测试运行的结果 ──
+        // 验证优先级：有可运行的测试项目时先跑 run_tests，跑不过才回退 build_solution。
+        private bool _didAttemptTests;
+        private bool? _lastTestsPassed;
+        private string? _lastDirectTestResult;
+
         // ── 本轮计划开始时刻（UTC）──
         // 用于判定"某步骤的目标文件是否在本轮被前序步骤修改过"：
         // 只有最后写入时间晚于该时刻的文件才算"本轮改的"，避免把上一轮残留的
@@ -110,6 +116,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             "runSubagent",
             // 终端、构建与 Git
             "build_solution",
+            "run_tests",
             "run_in_terminal",
             "get_terminal_output",
             "git",
@@ -174,6 +181,9 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             _lastDirectBuildResult = null;
             _didAttemptBuild = false;
             _lastBuildSucceeded = null;
+            _didAttemptTests = false;
+            _lastTestsPassed = null;
+            _lastDirectTestResult = null;
 
             var result = new AgentResult
             {
@@ -327,9 +337,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                     step.Status = AgentStepStatus.InProgress;
                     NotifyPlanUpdated();
 
-                    // ── 记录本步骤开始前的累积思考长度，用于提取本步骤思考增量（供完成声明检测）──
-                    int reasoningBaseLength = _accumulatedReasoning?.Length ?? 0;
-
                     var L = LocalizationService.Instance;
                     AddLog("INFO", string.Format(L["agent.log.editStepExec"], step.Index, plan.Steps.Count, step.Title));
 
@@ -378,11 +385,10 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                         // ── 将步骤摘要写入会话记忆（供 Ask Agent 最终汇总使用）──
                         await SaveStepSummaryToMemoryAsync(step, plan, context);
 
-                        // ── v1.1.10: 检测 AI 输出中声明的后续步骤完成情况（含思考内容）──
-                        string stepThinking = _accumulatedReasoning != null && _accumulatedReasoning.Length > reasoningBaseLength
-                            ? _accumulatedReasoning.Substring(reasoningBaseLength)
-                            : "";
-                        DetectAndAutoCompleteLaterSteps(step, plan, stepThinking);
+                        // ── v1.1.10: 检测 AI 输出中声明的后续步骤完成情况 ──
+                        // 只扫正式输出：思考内容里常出现引述/假设（如「并声明"也完成了步骤2"」），
+                        // 会被正则当成真声明，导致后续步骤被静默跳过。
+                        DetectAndAutoCompleteLaterSteps(step, plan);
                     }
                 }
 
@@ -544,10 +550,13 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             // ── 步骤级构建许可：非"要求构建"的中间步骤禁用 build_solution ──
             // 只裁剪客户端拦截白名单，tools JSON 仍发送完整集（保持 Prefix Cache 稳定）。
             // 模型若仍调用 build_solution，会收到白名单拒绝消息并据此调整。
+            // run_tests 依赖已构建产物，与 build_solution 绑定同一开关：
+            // 未编译就跑去跑测试只会得到"测试程序集不存在"，没有意义。
             if (!IsBuildAllowedForStep(step, plan, out string? buildAllowedReason))
             {
                 stepToolWhitelist.RemoveAll(t =>
-                    string.Equals(t, "build_solution", StringComparison.OrdinalIgnoreCase));
+                    string.Equals(t, "build_solution", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(t, "run_tests", StringComparison.OrdinalIgnoreCase));
                 AddLog("INFO", string.Format(
                     LocalizationService.Instance["agent.log.editStepBuildBlocked"], step.Index));
             }
@@ -640,11 +649,29 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                         "build_solution",
                         StringComparison.OrdinalIgnoreCase)));
 
+                bool hasTestCall = stepMessages.Any(m =>
+                    m.ToolCalls != null &&
+                    m.ToolCalls.Any(tc => string.Equals(
+                        tc.Function?.Name,
+                        "run_tests",
+                        StringComparison.OrdinalIgnoreCase)));
+
                 step.AiResponse = BuildToolStepContent(
                     result,
                     GetLastUserFacingToolOutput(stepMessages));
 
-                if (hasBuildCall)
+                // 测试优先：本步骤跑过测试且拿到明确结论时，以测试结果作为验证结论；
+                // 否则（没跑测试、或工作区没有可运行的测试）再退回构建结论。
+                if (hasTestCall && _lastTestsPassed != null)
+                {
+                    bool testsPassed = _lastTestsPassed == true;
+                    step.ResultSummary = testsPassed
+                        ? LocalizationService.Instance["agent.log.editTestStepPassed"]
+                        : LocalizationService.Instance["agent.log.editTestStepFailed"];
+                    AddLog(testsPassed ? "INFO" : "WARN",
+                        "[EditAgent] " + step.ResultSummary);
+                }
+                else if (hasBuildCall)
                 {
                     bool buildSucceeded = _lastBuildSucceeded == true;
                     step.ResultSummary = buildSucceeded
@@ -1060,15 +1087,18 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         /// 从 AI 响应中检测是否声明了后续步骤也已完成（v1.1.10）。
         /// 解析 AI 输出中的步骤完成声明（如"步骤2和3也完成了"/"also completed step 2"），
         /// 自动将对应步骤标记为 Completed。比文件级启发式更可靠，尤其适用于同文件多步骤场景。
-        /// v1.1.12: 支持范围式声明（"步骤1-6 已完成"），并合并扫描思考内容（thinkingContent），
-        /// 因为 AI 可能在思考过程中声明步骤完成而正式输出未提及。
+        /// v1.1.12: 支持范围式声明（"步骤1-6 已完成"）。
+        ///
+        /// 只依据正式输出（<see cref="AgentStep.AiResponse"/>）判定，不再扫描思考内容：
+        /// 思考里经常出现引述、假设与自我反驳（如"我可以声明『也完成了步骤2』，但…"），
+        /// 正则只看字面短语，会把这类否定语境误判为真声明，从而静默跳过后续步骤。
         /// </summary>
-        private void DetectAndAutoCompleteLaterSteps(AgentStep completedStep, AgentTaskPlan plan, string? thinkingContent = null)
+        private void DetectAndAutoCompleteLaterSteps(AgentStep completedStep, AgentTaskPlan plan)
         {
-            if (string.IsNullOrWhiteSpace(completedStep.AiResponse) && string.IsNullOrWhiteSpace(thinkingContent)) return;
+            if (string.IsNullOrWhiteSpace(completedStep.AiResponse)) return;
 
-            // 检测范围：正式输出 + 思考内容（合并后同一套正则均生效）
-            string response = (completedStep.AiResponse ?? "") + "\n[思考内容]\n" + (thinkingContent ?? "");
+            // 检测范围：仅正式输出
+            string response = completedStep.AiResponse ?? "";
             var autoCompletedIndices = new HashSet<int>();
 
             // 模式1: 中文 "步骤2、3也完成了" / "步骤2和3已完成" / "也完成了步骤2,3"
@@ -1575,8 +1605,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         #region Build State
 
         /// <summary>
-        /// 按消息顺序追踪本轮 build_solution 与文件修改，确保最终构建状态来自最后一次有效构建。
-        /// 如果构建后又修改了文件，则把上次构建标记为失效，后续必须由 Build Agent 重新构建。
+        /// 按消息顺序追踪本轮 run_tests / build_solution 与文件修改，确保验证状态来自最后一次有效结果。
+        /// 文件在验证后又发生变化时，把两种验证结果一并标记为失效。
         /// </summary>
         private void TrackBuildStateFromToolMessages(List<ChatApiMessage> messages)
         {
@@ -1599,23 +1629,55 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
 
                     if (IsFileModificationToolName(toolName))
                     {
-                        // 文件在构建后发生变化，旧构建结果不再可信。
+                        // 文件在验证后发生变化，旧验证结果不再可信。
                         _lastBuildSucceeded = null;
+                        _lastTestsPassed = null;
                         continue;
                     }
 
-                    if (!string.Equals(toolName, "build_solution", StringComparison.OrdinalIgnoreCase))
+                    bool isBuild = string.Equals(toolName, "build_solution", StringComparison.OrdinalIgnoreCase);
+                    bool isTests = string.Equals(toolName, "run_tests", StringComparison.OrdinalIgnoreCase);
+                    if (!isBuild && !isTests)
                         continue;
 
-                    string? buildResult = null;
+                    string? toolResult = null;
                     if (!string.IsNullOrEmpty(toolCall.Id))
-                        toolResults.TryGetValue(toolCall.Id, out buildResult);
+                        toolResults.TryGetValue(toolCall.Id, out toolResult);
 
-                    _didAttemptBuild = true;
-                    _lastBuildSucceeded = DeepSeek_v4_for_VisualStudio.Services.BuiltInTools.BuildSolutionTool.IsSuccessResult(buildResult);
+                    if (isBuild)
+                    {
+                        _didAttemptBuild = true;
+                        _lastBuildSucceeded = DeepSeek_v4_for_VisualStudio.Services.BuiltInTools.BuildSolutionTool.IsSuccessResult(toolResult);
 
-                    if (!string.IsNullOrWhiteSpace(buildResult))
-                        _lastDirectBuildResult = buildResult;
+                        if (!string.IsNullOrWhiteSpace(toolResult))
+                            _lastDirectBuildResult = toolResult;
+                    }
+                    else
+                    {
+                        _didAttemptTests = true;
+
+                        if (toolResult != null &&
+                            (toolResult.StartsWith(
+                                 DeepSeek_v4_for_VisualStudio.Services.BuiltInTools.RunTestsTool.NoTestProjectMarker,
+                                 StringComparison.Ordinal) ||
+                             toolResult.StartsWith(
+                                 DeepSeek_v4_for_VisualStudio.Services.BuiltInTools.RunTestsTool.MultipleProjectsMarker,
+                                 StringComparison.Ordinal)))
+                        {
+                            // 没有可执行的测试（或未指定项目）：测试未构成验证，
+                            // 置空以要求回退到构建验证，而不是当成"测试通过"。
+                            _lastTestsPassed = null;
+                        }
+                        else
+                        {
+                            _lastTestsPassed =
+                                DeepSeek_v4_for_VisualStudio.Services.BuiltInTools.RunTestsTool
+                                    .IsTestRunFailure(toolResult) ? false : true;
+                        }
+
+                        if (!string.IsNullOrWhiteSpace(toolResult))
+                            _lastDirectTestResult = toolResult;
+                    }
                 }
             }
         }
@@ -1664,39 +1726,41 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             return sb.ToString();
         }
 
-        #region Build Permission — 步骤级构建许可
+        #region Verification Permission — 步骤级验证许可（构建 / 测试）
 
         /// <summary>
-        /// 步骤文本中表示"本步骤需要构建/编译/验证"的关键词。
-        /// 命中任一关键词即认为该步骤明确要求构建，允许调用 build_solution。
+        /// 步骤文本中表示"本步骤需要验证（构建/编译/测试）"的关键词。
+        /// 命中任一关键词即认为该步骤明确要求验证，允许调用 run_tests / build_solution。
         /// 匹配不区分大小写；中文关键词按子串匹配，英文按词边界匹配以避免
         /// 例如 "test" 命中 "latest" 这类误判。
         /// </summary>
         private static readonly string[] BuildIntentKeywordsZh = new[]
         {
             "构建", "编译", "生成解决方案", "验证构建", "构建验证", "重新构建",
+            "测试", "跑测试", "运行测试", "单元测试", "验证",
         };
 
         private static readonly string[] BuildIntentKeywordsEn = new[]
         {
             "build", "compile", "rebuild", "msbuild", "dotnet build",
+            "test", "tests", "ctest", "verify", "verification",
         };
 
         /// <summary>
-        /// 判断某步骤是否允许调用 build_solution。
+        /// 判断某步骤是否允许验证（run_tests / build_solution）。
         /// 规则（按用户约定）：仅当
-        ///   ① 当前步骤<strong>标题</strong>明确要求构建（关键词命中），或
+        ///   ① 当前步骤<strong>标题</strong>明确要求验证（构建/编译/测试关键词命中），或
         ///   ② 当前步骤是计划的最后一步
-        /// 时允许构建；其余步骤禁用，避免每个中间步骤都触发一次昂贵的解决方案构建。
+        /// 时允许验证；其余步骤禁用，避免每个中间步骤都触发一次昂贵的构建或整套测试。
         /// </summary>
         /// <remarks>
         /// 只匹配 <see cref="AgentStep.Title"/>，不再拼接 <see cref="AgentStep.Description"/>。
-        /// 描述里常出现「确保可编译」「避免编译错误」这类<em>约束性说法</em>，语义上并不要求
-        /// 本步骤执行构建；而中文关键词按子串匹配、无词边界与否定语气识别，一旦纳入描述
-        /// 就会把这类步骤误判为构建意图，令白名单不裁剪 build_solution。
-        /// 标题是计划作者对本步骤动作的凝练表达，作为「是否构建」的判据更可预测。
-        /// 注：代价是标题未写构建、描述却明确要求构建时不再放行；此类步骤仍可依赖
-        /// ②「最后一步」兜底，或由计划作者把构建意图写进标题。
+        /// 描述里常出现「确保可编译」「避免出错」这类<em>约束性说法</em>，语义上并不要求
+        /// 本步骤执行验证；而中文关键词按子串匹配、无词边界与否定语气识别，一旦纳入描述
+        /// 就会把这类步骤误判为验证意图，令白名单不裁剪 run_tests / build_solution。
+        /// 标题是计划作者对本步骤动作的凝练表达，作为「是否验证」的判据更可预测。
+        /// 注：代价是标题未写验证、描述却明确要求验证时不再放行；此类步骤仍可依赖
+        /// ②「最后一步」兜底，或由计划作者把验证意图写进标题。
         /// </remarks>
         /// <param name="step">当前步骤</param>
         /// <param name="plan">所属计划（用于判定是否为最后一步）</param>
@@ -1707,14 +1771,14 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             if (step == null || plan == null)
                 return false;
 
-            // ① 步骤标题明确要求构建
+            // ① 步骤标题明确要求验证（构建/编译/测试）
             if (ContainsBuildIntent(step.Title))
             {
                 reason = LocalizationService.Instance["agent.step.buildAllowedReasonExplicit"];
                 return true;
             }
 
-            // ② 最后一步：收敛验证点，允许构建
+            // ② 最后一步：收敛验证点，允许验证（构建/测试）
             //    注：net472 不支持 System.Index（[^1]），使用传统索引。
             int lastIndex = plan.Steps.Count > 0
                 ? plan.Steps[plan.Steps.Count - 1].Index
@@ -1729,8 +1793,9 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         }
 
         /// <summary>
-        /// 步骤文本是否表达了构建意图。中文关键词子串匹配；英文关键词要求词边界，
-        /// 避免 "build" 之外的子串误命中（如 "rebuild" 需单独列出）。
+        /// 步骤文本是否表达了验证意图（构建/编译/测试）。中文关键词子串匹配；
+        /// 英文关键词要求词边界，避免 "test" 命中 "latest" 这类误判
+        /// （如 "rebuild" / "ctest" 需单独列出）。
         /// </summary>
         internal static bool ContainsBuildIntent(string? text)
         {
@@ -2125,19 +2190,30 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         }
 
         /// <summary>
-        /// 判断是否必须把最终构建交给 Build Agent。
-        /// 有文件变更时，只有“本轮确实构建过且最后一次构建成功”才能跳过；
-        /// 未构建、构建失败或构建后又修改文件，都需要 Build Agent 处理。
+        /// 判断是否必须把最终验证交给 Build Agent。
+        ///
+        /// 优先级：测试优先，构建兜底。
+        /// - 有文件变更且本轮测试通过 → 跳过（测试是比"能编译"更强的验证）；
+        /// - 测试失败，或没有可运行的测试 → 由构建验证兜底，构建成功才跳过；
+        /// - 未测试、未构建、构建失败，或验证后又改了文件，都需要 Build Agent 处理。
         /// </summary>
         internal static bool ShouldHandoffToBuild(
             bool hasFileChanges,
             bool didAttemptBuild,
             bool? lastBuildSucceeded,
-            bool skipAutoBuild)
+            bool skipAutoBuild,
+            bool didAttemptTests = false,
+            bool? lastTestsPassed = null)
         {
             if (skipAutoBuild || !hasFileChanges)
                 return false;
 
+            // ── 测试优先：跑过且通过即可结束验证 ──
+            if (didAttemptTests && lastTestsPassed == true)
+                return false;
+
+            // ── 测试通过之外的路径一律回到构建判定 ──
+            // 包括：测试失败、工作区没有可运行的测试（lastTestsPassed 为 null）。
             return !didAttemptBuild || lastBuildSucceeded != true;
         }
 
@@ -2153,7 +2229,9 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                 hasFileChanges,
                 _didAttemptBuild,
                 _lastBuildSucceeded,
-                skipBuild);
+                skipBuild,
+                _didAttemptTests,
+                _lastTestsPassed);
 
             // ── AI 动态移交优先，但 Build 移交仍受最终构建状态约束 ──
             if (PendingHandoffRequest != null)
@@ -2206,6 +2284,15 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             var prompt = new StringBuilder();
             prompt.AppendLine(L["agent.edit.handoffBuildPrompt"]);
 
+            // 把最近的测试结果一并带给 Build Agent：测试失败时它需要据此定位问题，
+            // 而不是从零再跑一遍同样的测试。
+            if (!string.IsNullOrWhiteSpace(_lastDirectTestResult))
+            {
+                prompt.AppendLine();
+                prompt.AppendLine(L["agent.edit.handoffTestResultHeader"]);
+                prompt.AppendLine(TruncateBuildResultForHandoff(_lastDirectTestResult!));
+            }
+
             if (!string.IsNullOrWhiteSpace(_lastDirectBuildResult))
             {
                 prompt.AppendLine();
@@ -2246,90 +2333,15 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
 
         /// <summary>
         /// 构建移交 Ask Agent 生成总结的 Handoff。
-        /// 将文件变更统计、步骤执行情况、缓存命中率等上下文打包传递给 Ask Agent。
+        /// Edit/Build 共用 BuildAgent.CreateAskSummaryHandoff，统一进入 summary-only 终态路径。
         /// </summary>
         private AgentHandoff BuildSummaryHandoff(AgentTaskPlan plan)
         {
             var L = LocalizationService.Instance;
-
-            if (plan.IsCancelled)
-            {
-                return new AgentHandoff
-                {
-                    Label = L["agent.edit.handoffAskLabel"],
-                    TargetAgent = AgentType.Ask,
-                    Prompt = L["edit.summary.cancelled"],
-                    AutoSend = true,
-                    ShowContinueOn = false,
-                };
-            }
-
-            // 构建包含所有统计数据的 handoff prompt
-            var sb = new StringBuilder();
-            sb.AppendLine(L["agent.edit.handoffAskPrompt"]);
-            sb.AppendLine();
-            sb.AppendLine($"**{L["edit.summary.taskLabel"]}**: {plan.Title}");
-            sb.AppendLine();
-
-            // ── 步骤执行情况（优先：描述完成了什么）──
-            if (plan.Steps.Count > 0)
-            {
-                sb.AppendLine(L["edit.summary.stepExecutionHeader"]);
-                foreach (var step in plan.Steps)
-                {
-                    string statusIcon = step.Status == AgentStepStatus.Completed ? "✅"
-                        : step.Status == AgentStepStatus.Failed ? "❌"
-                        : step.Status == AgentStepStatus.Skipped ? "⏭️"
-                        : "🔄";
-                    string summary = !string.IsNullOrWhiteSpace(step.ResultSummary)
-                        ? step.ResultSummary!
-                        : LocalizationService.Instance["agent.step.noDetail"];
-                    sb.AppendLine(L.Format("edit.summary.stepLineFormat",
-                        statusIcon, step.Index, step.Title, summary));
-                }
-                sb.AppendLine();
-            }
-
-            // ── 文件变更统计（辅助参考）──
-            if (plan.ChangedFiles.Count > 0)
-            {
-                var mergedFiles = plan.ChangedFiles
-                    .GroupBy(c => NormalizePath(c.FilePath), StringComparer.OrdinalIgnoreCase)
-                    .Select(g => new
-                    {
-                        FileName = Path.GetFileName(g.First().FilePath),
-                        LinesAdded = g.Sum(c => c.LinesAdded),
-                        LinesRemoved = g.Sum(c => c.LinesRemoved),
-                    })
-                    .ToList();
-
-                sb.AppendLine(L.Format("edit.summary.changeStats",
-                    mergedFiles.Sum(c => c.LinesAdded),
-                    mergedFiles.Sum(c => c.LinesRemoved),
-                    mergedFiles.Count));
-                sb.AppendLine();
-                sb.AppendLine(L["edit.summary.modifiedFiles"]);
-                foreach (var file in mergedFiles)
-                {
-                    sb.AppendLine($"- **{file.FileName}** (+{file.LinesAdded} -{file.LinesRemoved})");
-                }
-                sb.AppendLine();
-            }
-
-            // 编译警告（如果有）
-            if (HasBuildWarningsInLogs())
-            {
-                sb.AppendLine(LocalizationService.Instance["agent.edit.handoffBuildWarningHint"]);
-            }
-
-            return new AgentHandoff
-            {
-                Label = L["agent.edit.handoffAskLabel"],
-                TargetAgent = AgentType.Ask,
-                Prompt = sb.ToString(),
-                AutoSend = true,
-                ShowContinueOn = false,
-            };
+            string prompt = plan.IsCancelled
+                ? L["edit.summary.cancelled"]
+                : L["agent.summary.handoffUserPrompt"];
+            return BuildAgent.CreateAskSummaryHandoff(prompt);
         }
 
         /// <summary>

@@ -2239,6 +2239,15 @@ namespace DeepSeek_v4_for_VisualStudio.View
         private volatile Models.ApprovalMode _cachedApprovalMode = Models.ApprovalMode.SmartBlock;
 
         /// <summary>
+        /// 真正的"格式化磁盘"调用：format 必须作为命令起始，且紧跟盘符或 /fs 参数。
+        /// 不能用宽松的"出现 format + 盘符字样"匹配，否则 `Get-Date -Format "HH:mm"`
+        /// 里引号内的 X: 形态会被误报，使普通取时间命令被拦下要求审批。
+        /// </summary>
+        private static readonly System.Text.RegularExpressions.Regex FormatDiskRegex =
+            new(@"(?<![\w\\/])(?:format\.com|format)(?![\w-])(?:\s+(?:/[a-z]+:(?:""[^""]*""|[^\s]+)|[A-Za-z]:))",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+        /// <summary>
         /// 检测命令是否危险（用于智能拦截模式）。
         /// 检查终端命令、文件删除等操作中是否包含危险模式。
         /// </summary>
@@ -2258,10 +2267,13 @@ namespace DeepSeek_v4_for_VisualStudio.View
             string cmd = command.ToLowerInvariant().Trim();
 
             // ── 高危系统命令 ──
-            // format / diskpart 等磁盘操作
-            if (cmd.Contains("format ") && (cmd.Contains("c:") || cmd.Contains("d:") || cmd.Contains("/fs")))
+            // format / diskpart 等磁盘操作。
+            // 注意不能用"包含 format + 任意盘符字样"判定：PowerShell 的
+            // `Get-Date -Format "HH:mm"` 里引号内就是 X: 形态，会被误报，
+            // 使普通取时间命令在智能拦截模式下被拦下要求审批。
+            if (FormatDiskRegex.IsMatch(cmd))
                 return true;
-            if (cmd.Contains("diskpart"))
+            if (cmd.Contains("format-volume") || cmd.Contains("diskpart"))
                 return true;
 
             // ── 危险删除操作 ──

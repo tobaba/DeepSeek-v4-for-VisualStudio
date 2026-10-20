@@ -658,6 +658,52 @@ namespace DeepSeek_v4_for_VisualStudio.View
             };
         }
 
+        /// <summary>
+        /// 在切换 Agent 前捕获源 Agent 最近一次实际发送的消息前缀。
+        /// 所有 Handoff 路径（自动链、按钮触发、链回）必须共用同一入口，否则目标 Agent
+        /// 会改从 ContextManager 重建历史，导致当前请求的 tool_calls/tool 结果与缓存前缀脱节。
+        /// </summary>
+        private void CaptureHandoffForwardedMessages(
+            AgentHandoff handoff,
+            AgentResult? completedSourceResult = null)
+        {
+            if (handoff.ForwardedMessages == null)
+            {
+                handoff.ForwardedMessages = completedSourceResult == null
+                    ? _activeAgent?.SnapshotHandoffCacheMessages()
+                    : _activeAgent?.SnapshotHandoffCacheMessages(completedSourceResult);
+                return;
+            }
+
+            // 已有快照也必须补入源 Agent 最终回答；例如 build_solution 成功时
+            // Context.ForwardedMessages 会先被保存，此时 Handoff 不是 null 但还缺最终 assistant。
+            BaseAgent.EnsureCompletedAssistantInHandoffPrefix(
+                handoff.ForwardedMessages,
+                completedSourceResult);
+        }
+
+        /// <summary>
+        /// 将链回要求合并到现有 Handoff。
+        /// Ask 链回不再把源 Agent 执行结果和原始请求重新拼进 user 消息：
+        /// 执行结果已作为 assistant 前缀存在，原始请求也在历史中；这里只追加纯续接指令。
+        /// </summary>
+        private static void MergeChainBackIntoHandoff(AgentHandoff handoff, AgentHandoff chainBack)
+        {
+            if (handoff.TargetAgent == AgentType.Ask)
+            {
+                handoff.Prompt = (handoff.Prompt ?? string.Empty).TrimEnd()
+                    + "\n\n"
+                    + LocalizationService.Instance["agent.chainback.summaryContinuationPrompt"];
+            }
+            else
+            {
+                handoff.Prompt = (handoff.Prompt ?? string.Empty)
+                    + "\n\n" + chainBack.Prompt;
+            }
+
+            handoff.IsChainBackContinuation = true;
+        }
+
         private async Task RunAgentWorkflowAsync(
             string userText,
             string fileContext = "",
@@ -667,6 +713,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
         {
             if (_activeAgent == null || _agentFactory == null) return;
             string? workflowSessionId = _activeSession?.Id;
+            bool parallelMemoryExtractionStarted = false;
 
             // ── 单轮 Cache 统计快照：本次问答开始时的累计值 ──
             _apiService?.TakeCacheSnapshot();
@@ -961,10 +1008,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     if (incomingHandoff.ChainBack && incomingHandoff.SourceAgent.HasValue)
                         pendingChainBack = incomingHandoff;
                     handoffChainDepth++;
-                    if (incomingHandoff.ForwardedMessages == null)
-                    {
-                        incomingHandoff.ForwardedMessages = _activeAgent?.SnapshotHandoffCacheMessages();
-                    }
+                    CaptureHandoffForwardedMessages(incomingHandoff, agentResult);
 
                     if (handoffChainDepth > maxHandoffChainDepth)
                     {
@@ -993,6 +1037,12 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
                     StatusLabel.Text = string.Format(LocalizationService.Instance["status.agentSwitched"], incomingHandoff.TargetAgent);
                     await TaskScheduler.Default;
+
+                    if (!parallelMemoryExtractionStarted && incomingHandoff.IsSummaryOnly)
+                    {
+                        parallelMemoryExtractionStarted =
+                            TryStartParallelMemoryExtraction(incomingHandoff, agentResult);
+                    }
 
                     var nextAgent = _agentFactory.GetAgent(incomingHandoff.TargetAgent);
                     SwitchActiveAgent(nextAgent, context);
@@ -1026,11 +1076,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
                         else if (agentResult.Handoff.AutoSend
                             && agentResult.Handoff.TargetAgent == chainBack.TargetAgent)
                         {
-                            // 目标 Agent 已准备移交回源 Agent；把链回续答要求合并进该 Handoff，
-                            // 保留原有的总结/执行上下文，不额外增加一次调用。
-                            agentResult.Handoff.Prompt = (agentResult.Handoff.Prompt ?? string.Empty)
-                                + "\n\n" + chainBack.Prompt;
-                            agentResult.Handoff.IsChainBackContinuation = true;
+                            // 目标 Agent 已准备移交回源 Agent；合并纯续接要求，不额外增加一次调用。
+                            MergeChainBackIntoHandoff(agentResult.Handoff, chainBack);
                             pendingChainBack = null;
                             Logger.Info($"[Agent] Handoff 链回并入: → {agentResult.Handoff.TargetAgent} ({agentResult.Handoff.Label})");
                         }
@@ -1328,7 +1375,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
             LogCacheHitRate();
 
             // ── 一次回答结束后根据需要自动记录 memory（与 Handoff 路径共用）──
-            TryScheduleAutoMemoryRecord();
+            if (!parallelMemoryExtractionStarted)
+                TryScheduleAutoMemoryRecord();
         }
 
         /// <summary>
@@ -1667,26 +1715,160 @@ namespace DeepSeek_v4_for_VisualStudio.View
 
             try
             {
-                // ── 基于完整消息历史组装：末尾追加 user 判定指令 + 替换/追加末尾 system ──
                 var messages = _contextManager.BuildApiMessagesWithSubTaskPrompt(
                     AiPrompts.MemoryAutoRecordUserPrompt,
                     AiPrompts.MemoryAutoRecordSystemPrompt);
 
-                // toolChoice:"auto" + 只读白名单：与主对话保持同一 tool_choice，避免因该字段变化
-                // 击穿 DeepSeek Prefix Cache。完整上下文含工具调用记录，模型可能模仿历史发起工具
-                // 调用；此处走只读工具循环而非单次调用，误调用可在白名单内正常收尾，而非静默返回空。
-                // 子任务：persistToHistory=false —— 记忆判定的提示词与返回结果都不属于主流程对话，
-                // 绝不能进入 _entries，否则下一轮请求会把「记忆管理助手」的问答当成本轮内容。
-                // 注：不再固定 temperature:0.0 —— 与主对话保持一致的采样参数，避免字段差异
-                //    造成请求签名不同、影响前缀缓存复用。
-                //    response_format:json_object 保留：JSON 结构由服务端约束比依赖提示词更可靠，
-                //    解析失败会导致本次记忆漏记（解析侧已有 ExtractJsonArray + 单对象兜底容错）。
                 var rawResponse = await _activeAgent.CallAiWithReadOnlyToolLoopAsync(
                     messages, CancellationToken.None,
                     reminderAfterFirstToolRound: LocalizationService.Instance["agent.memoryAutoRecordNoMoreToolsAfterToolRound"],
                     responseFormat: "json_object",
                     persistToHistory: false);
 
+                await ProcessMemoryDecisionAsync(
+                    rawResponse,
+                    _memoryService!,
+                    _activeSession?.Id,
+                    _solutionPath);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"[Memory] 自动记忆判断异常: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 基于总结 Handoff 的同一份 ForwardedMessages 前缀并行执行记忆提取。
+        /// 结构：源历史 → assistant 最终回答 → user 记忆指令 → system 记忆助手。
+        /// </summary>
+        private bool TryStartParallelMemoryExtraction(AgentHandoff summaryHandoff, AgentResult sourceResult)
+        {
+            if (!summaryHandoff.IsSummaryOnly
+                || _memoryService == null
+                || summaryHandoff.ForwardedMessages is not { Count: > 0 })
+            {
+                return false;
+            }
+
+            var messages = BuildMemoryExtractionMessages(summaryHandoff, sourceResult);
+            if (messages.Count == 0)
+                return false;
+
+            var memoryService = _memoryService;
+            var memoryApi = CreateIsolatedMemoryApiService();
+            if (memoryApi == null)
+            {
+                Logger.Warn("[Memory] 并行记忆提取跳过：无法创建独立 API 服务");
+                return false;
+            }
+
+            var builtInTools = _builtInToolService;
+            var mcpManager = _mcpManager;
+            string? sessionId = _activeSession?.Id;
+            string? solutionPath = _solutionPath;
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    using (memoryApi)
+                    {
+                        var memoryAgent = new AskAgent(memoryApi)
+                        {
+                            BuiltInTools = builtInTools,
+                            McpManager = mcpManager,
+                            MemoryService = memoryService,
+                            Context = new AgentContext
+                            {
+                                SolutionPath = solutionPath,
+                                CancellationToken = CancellationToken.None,
+                            },
+                        };
+
+                        string rawResponse = await memoryAgent.CallAiWithReadOnlyToolLoopAsync(
+                            messages,
+                            CancellationToken.None,
+                            reminderAfterFirstToolRound: LocalizationService.Instance["agent.memoryAutoRecordNoMoreToolsAfterToolRound"],
+                            responseFormat: "json_object",
+                            persistToHistory: false);
+
+                        await ProcessMemoryDecisionAsync(rawResponse, memoryService, sessionId, solutionPath);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn($"[Memory] 并行记忆提取异常: {ex.Message}");
+                }
+            });
+
+            return true;
+        }
+
+        /// <summary>
+        /// 使用总结 Handoff 的精确前缀构建记忆提取消息，确保复用相同缓存前缀。
+        /// </summary>
+        internal static List<ChatApiMessage> BuildMemoryExtractionMessages(
+            AgentHandoff summaryHandoff,
+            AgentResult sourceResult)
+        {
+            var messages = summaryHandoff.ForwardedMessages == null
+                ? new List<ChatApiMessage>()
+                : ChatMessageCloner.CloneAll(summaryHandoff.ForwardedMessages).ToList();
+
+            BaseAgent.EnsureCompletedAssistantInHandoffPrefix(messages, sourceResult);
+            if (messages.Count > 0
+                && string.Equals(messages[messages.Count - 1].Role, "system", StringComparison.Ordinal))
+            {
+                messages.RemoveAt(messages.Count - 1);
+            }
+
+            messages.Add(new ChatApiMessage
+            {
+                Role = "user",
+                Content = AiPrompts.MemoryAutoRecordUserPrompt,
+            });
+            messages.Add(new ChatApiMessage
+            {
+                Role = "system",
+                Content = AiPrompts.MemoryAutoRecordSystemPrompt,
+            });
+            return messages;
+        }
+
+        /// <summary>
+        /// 为并行记忆提取创建独立 API 客户端，避免与总结请求竞争 LastUsage / LastSentMessages。
+        /// </summary>
+        private DeepSeekApiService? CreateIsolatedMemoryApiService()
+        {
+            if (_options == null)
+                return null;
+
+            var config = DeepSeekEndpointResolver.Resolve(_options);
+            if (string.IsNullOrWhiteSpace(config.ApiKey))
+                return null;
+
+            var api = new DeepSeekApiService(
+                config.ApiKey,
+                config.Model,
+                baseUrl: config.BaseUrl,
+                isVision: config.IsVision,
+                isCustom: config.IsCustom);
+            api.ConfigureThinking(_options.IsThinkingEnabled, _options.ReasoningEffort);
+            api.PrefixCache = new PrefixCacheManager();
+            return api;
+        }
+
+        /// <summary>
+        /// 解析并执行记忆管理助手的 JSON 结果。
+        /// </summary>
+        private async Task ProcessMemoryDecisionAsync(
+            string? rawResponse,
+            IMemoryService memoryService,
+            string? sessionId,
+            string? solutionPath)
+        {
+            try
+            {
                 if (string.IsNullOrWhiteSpace(rawResponse))
                 {
                     Logger.Info("[Memory] 自动记忆判断：AI 无响应，跳过");
@@ -1722,8 +1904,6 @@ namespace DeepSeek_v4_for_VisualStudio.View
                     return;
                 }
 
-                string? sessionId = _activeSession?.Id;
-                string? solutionPath = _solutionPath;
 
                 int recordedCount = 0;
                 foreach (var item in doc.RootElement.EnumerateArray())
@@ -1761,7 +1941,7 @@ namespace DeepSeek_v4_for_VisualStudio.View
                         string? existingContent = null;
                         try
                         {
-                            var viewResult = await _memoryService.ViewAsync(scope, path, sessionId, solutionPath);
+                            var viewResult = await memoryService.ViewAsync(scope, path, sessionId, solutionPath);
                             existingContent = viewResult?.Content;
                         }
                         catch
@@ -1778,12 +1958,12 @@ namespace DeepSeek_v4_for_VisualStudio.View
                             }
 
                             // ── 追加到已有文件末尾 ──
-                            await _memoryService.InsertAsync(scope, path, int.MaxValue, "\n\n" + content.Trim(), sessionId, solutionPath);
+                            await memoryService.InsertAsync(scope, path, int.MaxValue, "\n\n" + content.Trim(), sessionId, solutionPath);
                         }
                         else
                         {
                             // ── 创建新文件 ──
-                            await _memoryService.CreateAsync(scope, path, content, sessionId, solutionPath);
+                            await memoryService.CreateAsync(scope, path, content, sessionId, solutionPath);
                         }
 
                         recordedCount++;

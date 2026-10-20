@@ -244,6 +244,43 @@ public class BaseAgentHandoffEditStepsTests
         context.IsPlanningMode.Should().BeFalse();
     }
 
+    /// <summary>
+    /// Handoff 自带的 ForwardedMessages 必须覆盖 Context 中残留的旧快照。
+    /// 否则 build_solution 等路径保存的旧列表会让目标 Agent 丢掉刚追加的源 Agent 最终回答。
+    /// </summary>
+    [Fact]
+    public async Task ExecuteHandoffAsync_PrefersHandoffForwardedMessagesOverStaleContextSnapshot()
+    {
+        var apiService = new DeepSeekApiService("test-api-key");
+        var agent = new EditStepsTestAgent(apiService);
+        var target = new NoOpAskAgent(apiService);
+        var factory = new AgentFactory(apiService);
+        InjectPrivateField(factory, "_askAgent", target);
+
+        var handoff = BuildHandoff(AgentType.Ask);
+        handoff.ForwardedMessages = new List<ChatApiMessage>
+        {
+            new() { Role = "system", Content = "stable system" },
+            new() { Role = "user", Content = "original request" },
+            new() { Role = "assistant", Content = "source final answer" },
+        };
+
+        var context = new AgentContext
+        {
+            ForwardedMessages = new List<ChatApiMessage>
+            {
+                new() { Role = "system", Content = "stable system" },
+                new() { Role = "user", Content = "stale prefix" },
+            },
+        };
+
+        await agent.ExecuteHandoffAsync(handoff, context, null, factory);
+
+        target.ObservedForwardedMessages.Should().NotBeNull();
+        target.ObservedForwardedMessages.Should().Contain(m => m.Content == "source final answer");
+        target.ObservedForwardedMessages.Should().NotContain(m => m.Content == "stale prefix");
+    }
+
     /// <summary>原计划非 null 且未完成：原计划优先，EditSteps 被忽略。</summary>
     [Fact]
     public async Task ExecuteHandoffAsync_ExistingIncompletePlan_TakesPrecedenceOverEditSteps()
@@ -334,8 +371,14 @@ public class BaseAgentHandoffEditStepsTests
         {
         }
 
+        /// <summary>记录 ExecuteHandoffAsync 最终注入的 Handoff 前缀。</summary>
+        public List<ChatApiMessage>? ObservedForwardedMessages { get; private set; }
+
         public override Task<AgentResult> ExecuteAsync(string userMessage, AgentContext context)
-            => Task.FromResult(new AgentResult { Success = true, Content = userMessage });
+        {
+            ObservedForwardedMessages = context.ForwardedMessages;
+            return Task.FromResult(new AgentResult { Success = true, Content = userMessage });
+        }
     }
 
     /// <summary>Edit 目标 NoOp：直接返回结果，避免测试触发真实 AI 调用链。</summary>

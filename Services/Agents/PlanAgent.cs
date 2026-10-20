@@ -121,7 +121,10 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             PendingHandoffRequest = null;
 
             var L = LocalizationService.Instance;
-            AddLog("INFO", string.Format(L["agent.log.planStarted"], userMessage));
+            // 时间线只显示稳定短句：整段请求/Handoff prompt 属于给模型的输入，
+            // 经 AddLog 会渲染进 UI，把内部提示词显示给用户。原文压缩后只写日志文件。
+            Logger.Info(string.Format(L["agent.log.planStarted"], SummarizeForLog(userMessage)));
+            AddLog("INFO", L["agent.log.planStartedShort"]);
 
             var result = new AgentResult
             {

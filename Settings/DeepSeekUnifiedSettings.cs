@@ -223,6 +223,18 @@ namespace DeepSeek_v4_for_VisualStudio
                 Description = "%DeepSeek.Chat.settings.showDiffMarkers.description%",
             };
 
+        /// <summary>
+        /// 开发者调试：把每次 API 调用的完整请求体与响应流落盘，供离线分析缓存命中、
+        /// 工具调用与消息清洗结果。默认关闭——报文含完整 prompt / 代码且体积可达数 MB。
+        /// </summary>
+        [VisualStudioContribution]
+        internal static Setting.Boolean ApiDebugDump { get; } =
+            new("deepseekApiDebugDump", "%DeepSeek.Chat.settings.apiDebugDump.displayName%", GeneralCategory, defaultValue: false)
+            {
+                Description = "%DeepSeek.Chat.settings.apiDebugDump.description%",
+                SearchKeywords = new[] { "debug", "api", "dump", "cache", "trace", "调试", "报文", "缓存" },
+            };
+
         [VisualStudioContribution]
         internal static Setting.Enum OcrEngine { get; } =
             new(

@@ -9,6 +9,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
+using System.Windows.Threading;
 
 namespace DeepSeek_v4_for_VisualStudio.Services
 {
@@ -49,12 +50,28 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         private readonly Dictionary<ITextBuffer, EditorDiffHost> _editorHosts = new();
         private readonly object _editorHostsLock = new();
 
+        // ── 预览刷新防抖 ──
+        // 写穿编辑会在极短时间内反复触发（同一文件多次写 / 多个步骤连续写）。
+        // 每次刷新都会重建 IDifferenceBuffer + IWpfDifferenceViewer（UI 线程、毫秒级开销），
+        // 密集触发时会把 UI 线程占满，表现为界面卡顿。这里按 buffer 合并刷新请求：
+        // 防抖窗口内只保留「最后一次」待刷新内容，窗口结束后统一重建一次预览。
+        private const int PreviewRefreshDebounceMs = 250;
+
+        private sealed class PendingPreviewRefresh
+        {
+            public DispatcherTimer? Timer;
+            public string FilePath = string.Empty;
+        }
+
+        private readonly Dictionary<ITextBuffer, PendingPreviewRefresh> _pendingPreviewRefreshes = new();
+
         // ── 待处理改动追踪（供聊天区「文件改动列表」驱动）──
         // 一轮编辑的多个文件共用同一个 StagedEditWorkspace；列表按 Workspace 的
         // 实时追踪集合渲染，某文件被保留/撤销后自然从列表消失。
         private readonly object _reviewLock = new();
         private Editing.StagedEditWorkspace? _reviewWorkspace;
         private int _reviewTurnUserMsgIndex = -1;
+        private bool _disposed;
 
         /// <summary>
         /// 待处理改动集合发生变化（文件新增/确认/撤销）时触发。
@@ -161,6 +178,16 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         private static PreparedChangeSet BuildChangeSet(
             IWpfTextView textView, string filePath, string baseline, string proposed,
             IReadOnlyList<ProposedTextChange>? textChanges = null)
+            => BuildChangeSet(
+                textView.TextBuffer.ContentType.TypeName,
+                textView.TextBuffer, filePath, baseline, proposed, textChanges);
+
+        /// <summary>
+        /// 构建写穿模式下的单文件变更提案（防抖刷新路径使用：已知 buffer，无 IWpfTextView）。
+        /// </summary>
+        private static PreparedChangeSet BuildChangeSet(
+            string contentTypeName, ITextBuffer textBuffer, string filePath, string baseline,
+            string proposed, IReadOnlyList<ProposedTextChange>? textChanges = null)
             => new PreparedChangeSet
             {
                 FilePath = filePath,
@@ -168,13 +195,18 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 BaselineText = baseline,
                 ProposedText = proposed,
                 TextChanges = textChanges ?? Array.Empty<ProposedTextChange>(),
-                ContentTypeName = textView.TextBuffer.ContentType.TypeName,
+                ContentTypeName = contentTypeName,
                 SaveBehavior = ProposalSaveBehavior.KeepDocumentDirty,
             };
 
         /// <summary>
         /// 原地刷新已有写穿会话：把撤销追踪移交新 Workspace、替换变更内容，
         /// 并通过 EditorDiffHost 重建只读视图与 hunk 按钮。
+        ///
+        /// 本方法被 FileTracked / 步骤收尾 / 防抖刷新等多条路径调用，必须满足：
+        /// 1. 幂等 —— 内容与 Workspace 均未变化时不再重建 Diff 视图；
+        /// 2. 不重复订阅 —— Workspace 的 FileTracked 只订阅一次，否则每次刷新
+        ///    都会让订阅数翻倍，后续一次写入就会触发指数级数量的预览重建。
         /// </summary>
         private void RefreshWriteThroughSession(
             InlineDiffSession session,
@@ -183,23 +215,31 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             ITextBuffer buffer)
         {
             var oldWorkspace = session.Workspace;
+
+            // ── 幂等短路：内容与追踪 Workspace 都没变 → 无需重建视图 ──
+            // 重建一次的代价是「两个临时文件 + 两个文本缓冲区 + DifferenceBuffer +
+            // IWpfDifferenceViewer」，全部在 UI 线程完成，重复调用会直接卡住界面。
+            if (ReferenceEquals(oldWorkspace, workspace) &&
+                string.Equals(session.Change.BaselineText, change.BaselineText, StringComparison.Ordinal) &&
+                string.Equals(session.Change.ProposedText, change.ProposedText, StringComparison.Ordinal))
+            {
+                return;
+            }
+
             if (oldWorkspace != null && !ReferenceEquals(oldWorkspace, workspace))
                 oldWorkspace.DiscardFile(change.FilePath);
 
             session.ReplaceChange(change);
             session.Workspace = workspace;
 
-            lock (_reviewLock)
-            {
-                if (ReferenceEquals(_reviewWorkspace, workspace))
-                    _reviewWorkspace = null;
-            }
-
             lock (_editorHostsLock)
             {
                 if (_editorHosts.TryGetValue(buffer, out var editorHost))
                     editorHost.RefreshSession(session);
             }
+
+            // 同一 Workspace 时 AttachReviewWorkspace 内部直接返回，不会重复订阅；
+            // 换成新 Workspace 时才需要重新挂接（并退订旧的）。
             AttachReviewWorkspace(workspace);
         }
 
@@ -255,6 +295,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             var session = GetActiveSessionForBuffer(buffer);
             if (session == null) return;
 
+            CancelPendingPreviewRefresh(buffer);
             CloseEditorHost(buffer);
 
             if (session.Workspace != null)
@@ -275,6 +316,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             var session = GetActiveSessionForBuffer(buffer);
             if (session == null) return;
 
+            CancelPendingPreviewRefresh(buffer);
             CloseEditorHost(buffer);
             session.Dismiss();
             RaisePendingChangesChanged();
@@ -497,13 +539,11 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                     if (string.Equals(baseline, proposed, StringComparison.Ordinal)) return;
 
                     // 同一文件再次被写入 → 原地刷新既有会话，保持预览与最新内容一致。
+                    // 走防抖：密集写入（同一文件多次落盘 / 多步连续编辑）合并为一次重建，
+                    // 否则每次都创建 IDifferenceBuffer + IWpfDifferenceViewer 会占满 UI 线程。
                     if (_sessionManager.TryGetSession(view.TextBuffer, out var existing) && existing != null)
                     {
-                        RefreshWriteThroughSession(
-                            existing,
-                            BuildChangeSet(view, filePath, baseline, proposed),
-                            workspace,
-                            view.TextBuffer);
+                        SchedulePreviewRefresh(view.TextBuffer, filePath);
                         return;
                     }
 
@@ -560,6 +600,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             foreach (var session in _sessionManager.GetActiveSessions())
             {
                 if (!ReferenceEquals(session.Workspace, workspace)) continue;
+                if (session.SourceBuffer != null)
+                    CancelPendingPreviewRefresh(session.SourceBuffer);
                 try
                 {
                     if (session.SourceBuffer != null)
@@ -569,6 +611,190 @@ namespace DeepSeek_v4_for_VisualStudio.Services
 
                 try { session.Dispose(); }
                 catch (Exception ex) { Logger.Warn($"[EditorDiff] 释放全部应用/撤销会话失败: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>取消所有尚未落地的防抖刷新并释放在途定时器。</summary>
+        private void CancelAllPendingPreviewRefreshes()
+        {
+            List<PendingPreviewRefresh> pending;
+            lock (_editorHostsLock)
+            {
+                pending = new List<PendingPreviewRefresh>(_pendingPreviewRefreshes.Values);
+                _pendingPreviewRefreshes.Clear();
+            }
+
+            foreach (var state in pending)
+            {
+                try { state.Timer?.Stop(); } catch { }
+            }
+        }
+
+        /// <summary>
+        /// 释放服务：取消在途防抖刷新、关闭所有编辑器覆盖层并停止会话追踪。
+        /// 幂等；可从任意线程调用（关闭覆盖层有 UI 线程亲和性，这里自行切回）。
+        /// </summary>
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+
+            CancelAllPendingPreviewRefreshes();
+
+            if (!ThreadHelper.CheckAccess())
+            {
+                _ = ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
+                {
+                    try
+                    {
+                        await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                        DisposeCore();
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Warn($"[EditorDiff] 异步释放失败: {ex.Message}");
+                    }
+                });
+                return;
+            }
+
+            DisposeCore();
+        }
+
+        private void DisposeCore()
+        {
+            List<EditorDiffHost> hosts;
+            lock (_editorHostsLock)
+            {
+                hosts = new List<EditorDiffHost>(_editorHosts.Values);
+                _editorHosts.Clear();
+            }
+
+            foreach (var host in hosts)
+            {
+                try { host.Close(); }
+                catch (Exception ex) { Logger.Warn($"[EditorDiff] 释放编辑器 Diff 宿主失败: {ex.Message}"); }
+            }
+
+            try { _sessionManager.Dispose(); }
+            catch (Exception ex) { Logger.Warn($"[EditorDiff] 释放会话管理器失败: {ex.Message}"); }
+        }
+
+        /// <summary>
+        /// 合并同一文件的连续预览刷新请求：防抖窗口内只重建一次 Diff 视图。
+        /// 必须从 UI 线程调用（DispatcherTimer 有线程亲和性）。
+        /// </summary>
+        private void SchedulePreviewRefresh(ITextBuffer buffer, string filePath)
+        {
+            PendingPreviewRefresh state;
+            lock (_editorHostsLock)
+            {
+                if (_disposed) return;
+
+                if (!_pendingPreviewRefreshes.TryGetValue(buffer, out state!))
+                {
+                    state = new PendingPreviewRefresh();
+                    state.Timer = new DispatcherTimer(
+                        TimeSpan.FromMilliseconds(PreviewRefreshDebounceMs),
+                        DispatcherPriority.Background,
+                        OnPendingPreviewRefreshTick,
+                        Dispatcher.CurrentDispatcher)
+                    {
+                        IsEnabled = false,
+                    };
+                    _pendingPreviewRefreshes[buffer] = state;
+                }
+
+                state.FilePath = filePath;
+                state.Timer!.Stop();
+                state.Timer.Start();
+            }
+        }
+
+        /// <summary>取消某个 buffer 尚未落地的预览刷新（会话关闭 / 服务释放时调用）。</summary>
+        private void CancelPendingPreviewRefresh(ITextBuffer buffer)
+        {
+            PendingPreviewRefresh? state = null;
+            lock (_editorHostsLock)
+            {
+                if (_pendingPreviewRefreshes.TryGetValue(buffer, out state))
+                {
+                    _pendingPreviewRefreshes.Remove(buffer);
+                }
+            }
+
+            try { state?.Timer?.Stop(); } catch { }
+        }
+
+        private void OnPendingPreviewRefreshTick(object? sender, EventArgs e)
+        {
+            if (sender is not DispatcherTimer timer)
+            {
+                return;
+            }
+
+            ITextBuffer? buffer = null;
+            string filePath = string.Empty;
+            lock (_editorHostsLock)
+            {
+                // 先定位该定时器对应的 buffer，再在枚举结束后移除条目
+                // （在 foreach 中直接 Remove 依赖「立刻 break」，太隐晦）。
+                foreach (var pair in _pendingPreviewRefreshes)
+                {
+                    if (!ReferenceEquals(pair.Value.Timer, timer))
+                    {
+                        continue;
+                    }
+
+                    buffer = pair.Key;
+                    filePath = pair.Value.FilePath;
+                    break;
+                }
+
+                if (buffer != null)
+                    _pendingPreviewRefreshes.Remove(buffer);
+            }
+
+            try { timer.Stop(); } catch { }
+
+            if (_disposed || buffer == null)
+            {
+                return;
+            }
+
+            // ── 落盘后再让预览跟上最新内容：只刷新仍存在且属于当前 Workspace 的会话 ──
+            InlineDiffSession? session = null;
+            Editing.StagedEditWorkspace? workspace;
+            lock (_reviewLock) { workspace = _reviewWorkspace; }
+
+            if (workspace == null || !_sessionManager.TryGetSession(buffer, out session) || session == null)
+            {
+                return;
+            }
+
+            if (!workspace.HasTrackedFile(filePath))
+            {
+                return;
+            }
+
+            try
+            {
+                string baseline = workspace.BuildPendingOnlyBaseline(filePath);
+                string proposed = workspace.ReadFile(filePath);
+                if (string.Equals(baseline, proposed, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                RefreshWriteThroughSession(
+                    session,
+                    BuildChangeSet(buffer.ContentType.TypeName, buffer, filePath, baseline, proposed),
+                    workspace,
+                    buffer);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"[EditorDiff] 防抖刷新 Diff 预览失败 ({Path.GetFileName(filePath)}): {ex.Message}");
             }
         }
 

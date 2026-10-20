@@ -69,6 +69,13 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         private static readonly Regex EventHandlerRegex = new(
             @"\bon\w+\s*=", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+        /// <summary>
+        /// 为 Markdig 生成的表格增加横向滚动容器，防止宽表或超长路径撑破消息气泡。
+        /// </summary>
+        private static readonly Regex MarkdownTableRegex = new(
+            @"<table\b[^>]*>.*?</table>",
+            RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Compiled);
+
 
         #endregion
 
@@ -610,8 +617,13 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 ? $"<button id='edit-btn-{messageIndex}' class='msg-action-btn edit-btn' onclick='window.__editMessage({messageIndex})' title='{L["chat.html.editButtonTitle"]}'>{EscapeHtml(L["chat.html.editButton"])}</button>"
                 : "";
 
-            // ── 文件附件 
-            string fileBlocksHtml = BuildFileAttachmentHtml(attachedFiles);
+            // ── 文件附件 ──
+            // 图片已经通过 attached-images 渲染为缩略图时，不再重复显示“按需读取”文件标签。
+            string fileBlocksHtml = BuildFileAttachmentHtml(
+                FilterFileAttachmentsForThumbnails(
+                    attachedFiles,
+                    attachedImageFileNames,
+                    attachedImagePaths));
             string imagePreviewHtml = BuildImageThumbnailHtml(
                 attachedImageDataUris,
                 attachedImageFileNames,
@@ -639,10 +651,13 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             // ── 气泡 + 头像水平对齐（无标签）
             sb.Append("<div class='msg-wrapper user'>");
             sb.Append("<div class='msg-bubble user'>");
+            // 蓝色气泡必须包住附件缩略图和正文；编辑按钮保留在气泡外。
+            sb.Append("<div class='user-message-bubble'>");
             sb.Append(fileBlocksHtml);
             sb.Append(imagePreviewHtml);
             sb.Append(agentBadgeHtml);
             sb.Append($"<div class='msg-content' id='msg-body-{messageIndex}'>{body}</div>");
+            sb.Append("</div>");
             sb.Append(editBtnHtml);
             sb.Append("</div>");
             sb.Append("<div class='msg-avatar user'>U</div>");
@@ -703,6 +718,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             if (dataUris == null || dataUris.Count == 0)
                 return string.Empty;
 
+            var p = Palette;
             var sb = new StringBuilder();
             sb.Append("<div class='attached-images' style='display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px'>");
             for (int i = 0; i < dataUris.Count; i++)
@@ -716,10 +732,50 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                     ? filePaths![i]
                     : string.Empty;
                 string escapedPath = System.Net.WebUtility.HtmlEncode(path);
-                sb.Append($"<img class='attached-image-thumb' src=\"{escapedSrc}\" alt=\"{escapedName}\" title=\"{escapedName}\" data-path=\"{escapedPath}\" style=\"width:52px;height:52px;object-fit:cover;border-radius:4px;border:1px solid #4EC9B0;cursor:pointer\" onclick=\"window.__openAttachment(this.getAttribute('data-path'))\" />");
+                sb.Append($"<img class='attached-image-thumb' src=\"{escapedSrc}\" alt=\"{escapedName}\" title=\"{escapedName}\" data-path=\"{escapedPath}\" style=\"width:52px;height:52px;object-fit:cover;border-radius:4px;border:1px solid {p.Accent};cursor:pointer\" onclick=\"window.__openAttachment(this.getAttribute('data-path'))\" />");
             }
             sb.Append("</div>");
             return sb.ToString();
+        }
+
+        /// <summary>
+        /// 过滤已经由缩略图展示的图片附件，避免同一图片同时出现文件标签和缩略图。
+        /// 只按路径或文件名匹配，不影响普通文件、PDF 或尚未生成缩略图的图片。
+        /// </summary>
+        private static List<FileParseResult>? FilterFileAttachmentsForThumbnails(
+            List<FileParseResult>? attachedFiles,
+            IReadOnlyList<string>? imageFileNames,
+            IReadOnlyList<string>? imagePaths)
+        {
+            if (attachedFiles == null || attachedFiles.Count == 0)
+                return null;
+
+            var thumbnailPaths = new HashSet<string>(
+                (imagePaths ?? Array.Empty<string>()).Where(p => !string.IsNullOrWhiteSpace(p)),
+                StringComparer.OrdinalIgnoreCase);
+            var thumbnailNames = new HashSet<string>(
+                (imageFileNames ?? Array.Empty<string>()).Where(n => !string.IsNullOrWhiteSpace(n)),
+                StringComparer.OrdinalIgnoreCase);
+
+            if (thumbnailPaths.Count == 0 && thumbnailNames.Count == 0)
+                return attachedFiles;
+
+            var filtered = attachedFiles.Where(file =>
+            {
+                string extension = string.IsNullOrWhiteSpace(file.FileExtension)
+                    ? Path.GetExtension(file.FileName)
+                    : file.FileExtension;
+                if (!IsImageExtension(extension))
+                    return true;
+
+                bool hasThumbnail = (!string.IsNullOrWhiteSpace(file.FilePath)
+                        && thumbnailPaths.Contains(file.FilePath))
+                    || (!string.IsNullOrWhiteSpace(file.FileName)
+                        && thumbnailNames.Contains(file.FileName));
+                return !hasThumbnail;
+            }).ToList();
+
+            return filtered.Count > 0 ? filtered : null;
         }
 
         /// <summary>
@@ -846,7 +902,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 }
                 else if (isStreaming)
                 {
-                    bodyHtml = "<span style='color:#888;font-style:italic'>Thinking…</span>";
+                    bodyHtml = $"<span style='color:{Palette.MutedText};font-style:italic'>Thinking…</span>";
                 }
                 else
                 {
@@ -861,7 +917,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 : "";
 
             string streamingDots = isStreaming
-                ? " <span style='color:#4fc1ff;font-size:10px'>&#8226; &#8226; &#8226;</span>" : "";
+                ? $" <span style='color:{Palette.Accent};font-size:10px'>&#8226; &#8226; &#8226;</span>" : "";
 
             string retryBtnHtml = !isStreaming && !msg.IsHtml
                 ? $"<button id='retry-btn-{idx}' class='msg-action-btn retry-btn' onclick='window.__retryMessage({idx})' title='{L["chat.html.retryButtonTitle"]}'>{EscapeHtml(L["chat.html.retryButton"])}</button>"
@@ -1124,6 +1180,11 @@ namespace DeepSeek_v4_for_VisualStudio.Services
 
                 // ── 文件名/符号名可点击导航处理 ──
                 htmlContent = MakeFileAndSymbolLinks(htmlContent);
+
+                // ── 宽表格单独横向滚动，避免撑破消息气泡边界 ──
+                htmlContent = MarkdownTableRegex.Replace(
+                    htmlContent,
+                    match => "<div class=\"table-scroll\">" + match.Value + "</div>");
 
                 return htmlContent;
             }
@@ -1506,15 +1567,16 @@ return "<!DOCTYPE html><html lang='" + htmlLang + "'><head><meta charset='UTF-8'
             string cardId = PermissionCardIdPrefix + request.RequestId;
             string escapedCardId = EscapeJsString(cardId);
             string safeRequestId = EscapeHtmlAttribute(request.RequestId);
+            var p = Palette;
 
             var cardHtml = new StringBuilder();
-            cardHtml.Append("<div style=\"color:#C8A84E;font-size:12px;font-weight:600;margin-bottom:6px\">")
+            cardHtml.Append($"<div style=\"color:{p.ApprovalTitleText};font-size:12px;font-weight:600;margin-bottom:6px\">")
                 .Append(EscapeHtml(L["chat.html.permissionTitle"]))
                 .Append("</div>");
 
             if (!string.IsNullOrWhiteSpace(request.Purpose))
             {
-                cardHtml.Append("<div style=\"color:#CEA85C;font-size:11px;margin-bottom:4px;padding:6px 8px;background:#2A2218;border-left:3px solid #C8A84E;border-radius:4px\">")
+                cardHtml.Append($"<div style=\"color:{p.ApprovalHintText};font-size:11px;margin-bottom:4px;padding:6px 8px;background:{p.ApprovalHintBg};border-left:3px solid {p.ApprovalHintBorder};border-radius:4px\">")
                     .Append("<span style=\"font-weight:600\">")
                     .Append(EscapeHtml(L["chat.html.purposeLabel"]))
                     .Append("</span>")
@@ -1522,20 +1584,20 @@ return "<!DOCTYPE html><html lang='" + htmlLang + "'><head><meta charset='UTF-8'
                     .Append("</div>");
             }
 
-            cardHtml.Append("<div style=\"color:#D4D4D4;font-size:12px;margin-bottom:4px\">")
+            cardHtml.Append($"<div style=\"color:{p.Text};font-size:12px;margin-bottom:4px\">")
                 .Append(EscapeHtml(request.Title))
                 .Append("</div>");
-            cardHtml.Append("<pre style=\"background:#1A1A0E;color:#C8C84E;padding:8px;border-radius:4px;font-size:11px;margin:4px 0;max-height:60px;overflow-y:auto\">")
+            cardHtml.Append($"<pre style=\"background:{p.ApprovalCodeBg};color:{p.ApprovalCodeText};padding:8px;border-radius:4px;font-size:11px;margin:4px 0;max-height:60px;overflow-y:auto\">")
                 .Append(EscapeHtml(request.Command))
                 .Append("</pre>");
 
             if (!string.IsNullOrWhiteSpace(request.Detail))
             {
                 cardHtml.Append("<details style=\"margin-top:8px\">")
-                    .Append("<summary style=\"color:#C8A84E;font-size:11px;cursor:pointer\">")
+                    .Append($"<summary style=\"color:{p.ApprovalTitleText};font-size:11px;cursor:pointer\">")
                     .Append(EscapeHtml(L["chat.html.changePreview"]))
                     .Append("</summary>")
-                    .Append("<pre style=\"background:#1A1A0E;color:#C8C84E;padding:8px;border-radius:4px;font-size:10px;margin-top:4px;max-height:200px;overflow-y:auto;white-space:pre-wrap;word-break:break-all\">")
+                    .Append($"<pre style=\"background:{p.ApprovalCodeBg};color:{p.ApprovalCodeText};padding:8px;border-radius:4px;font-size:10px;margin-top:4px;max-height:200px;overflow-y:auto;white-space:pre-wrap;word-break:break-all\">")
                     .Append(EscapeHtml(request.Detail))
                     .Append("</pre></details>");
             }
@@ -1543,12 +1605,12 @@ return "<!DOCTYPE html><html lang='" + htmlLang + "'><head><meta charset='UTF-8'
             cardHtml.Append("<div style=\"display:flex;gap:8px;margin-top:8px\">")
                 .Append("<button onclick=\"window.__agentApprove('")
                 .Append(safeRequestId)
-                .Append("')\" style=\"background:#1A3A1A;color:#4EC9B0;border:1px solid #3A6A3A;border-radius:4px;padding:4px 16px;cursor:pointer;font-size:12px\">")
+                .Append($"')\" style=\"background:{p.ApproveBtnBg};color:{p.ApproveBtnText};border:1px solid {p.ApproveBtnBorder};border-radius:4px;padding:4px 16px;cursor:pointer;font-size:12px\">")
                 .Append(EscapeHtml(L["chat.html.approveButton"]))
                 .Append("</button>")
                 .Append("<button onclick=\"window.__agentDeny('")
                 .Append(safeRequestId)
-                .Append("')\" style=\"background:#3A1A1A;color:#E07878;border:1px solid #6A3A3A;border-radius:4px;padding:4px 16px;cursor:pointer;font-size:12px\">")
+                .Append($"')\" style=\"background:{p.DenyBtnBg};color:{p.DenyBtnText};border:1px solid {p.DenyBtnBorder};border-radius:4px;padding:4px 16px;cursor:pointer;font-size:12px\">")
                 .Append(EscapeHtml(L["chat.html.denyButton"]))
                 .Append("</button></div>");
 
@@ -1562,7 +1624,7 @@ return "<!DOCTYPE html><html lang='" + htmlLang + "'><head><meta charset='UTF-8'
 
     var div=document.createElement('div');
     div.id={escapedCardId};
-    div.style.cssText='border:1px solid #C8A84E;border-radius:8px;background:#2E2A1A;padding:12px;margin:8px 0;animation:fadeIn .3s';
+    div.style.cssText='border:1px solid {p.ApprovalBorder};border-radius:8px;background:{p.ApprovalBg};padding:12px;margin:8px 0;animation:fadeIn .3s';
     div.innerHTML={escapedInnerHtml};
 
     var container=document.getElementById('chat-container');
@@ -1581,6 +1643,7 @@ return "<!DOCTYPE html><html lang='" + htmlLang + "'><head><meta charset='UTF-8'
             string safeRequestId = EscapeHtmlAttribute(request.RequestId);
             int totalQuestions = request.Questions.Count;
             bool hasMultipleQuestions = totalQuestions > 1;
+            var p = Palette;
 
             // ── 构建题目分页 HTML（每页一道题；所有页都保留在 DOM 中，切换只是显隐，
             //    因此用户来回翻页时已填写的选项/文本不会丢失）──
@@ -1595,8 +1658,8 @@ return "<!DOCTYPE html><html lang='" + htmlLang + "'><head><meta charset='UTF-8'
                 string escapedQuestion = EscapeHtmlWithBreaks(q.Question ?? string.Empty);
 
                 pagesHtml.Append($"<div class='aq-page' data-index='{qi}' style='display:{(qi == 0 ? "block" : "none")}'>");
-                pagesHtml.Append($"<div style='color:#4fc1ff;font-size:12px;font-weight:600;margin-bottom:4px'>{escapedHeader}</div>");
-                pagesHtml.Append($"<div style='color:#D4D4D4;font-size:12px;margin-bottom:6px'>{escapedQuestion}</div>");
+                pagesHtml.Append($"<div style='color:{p.Accent};font-size:12px;font-weight:600;margin-bottom:4px'>{escapedHeader}</div>");
+                pagesHtml.Append($"<div style='color:{p.Text};font-size:12px;margin-bottom:6px'>{escapedQuestion}</div>");
 
                 if (q.Options != null && q.Options.Count > 0)
                 {
@@ -1605,20 +1668,26 @@ return "<!DOCTYPE html><html lang='" + htmlLang + "'><head><meta charset='UTF-8'
                     foreach (var opt in q.Options)
                     {
                         string escapedLabel = EscapeHtml(opt.Label);
-                        string escapedDesc = opt.Description != null ? EscapeHtml(opt.Description) : "";
+                        // 描述与选项标签同级可读性：正常字号 + 正常文本色，用「: 」分隔主次。
+                        string escapedDesc = EscapeHtmlWithBreaks(opt.Description);
                         string descHtml = !string.IsNullOrEmpty(escapedDesc)
-                            ? $"<span style='color:#888;font-size:10px;margin-left:4px'>{escapedDesc}</span>"
+                            ? $" <span style='color:{p.Text}'>{escapedDesc}</span>"
                             : "";
-                        pagesHtml.Append($"<label style='display:flex;align-items:center;gap:6px;margin:2px 0;cursor:pointer;font-size:11px;color:#ccc'>");
-                        pagesHtml.Append($"<input type='{inputType}' name='{qId}' value='{EscapeHtmlAttribute(opt.Label)}' style='accent-color:#4fc1ff'>");
-                        pagesHtml.Append($"{escapedLabel}{descHtml}</label>");
+                        // align-items:flex-start 让多行描述与选项首行对齐，而不是整体垂直居中。
+                        pagesHtml.Append($"<label style='display:flex;align-items:flex-start;gap:6px;margin:2px 0;cursor:pointer;font-size:11px;color:{p.Text}'>");
+                        pagesHtml.Append($"<input type='{inputType}' name='{qId}' value='{EscapeHtmlAttribute(opt.Label)}' style='accent-color:{p.Accent}'>");
+                        // 标签 + 「: 描述」同处一个排版容器，长描述才能自然换行而不是各自成为 flex 项。
+                        string optText = descHtml.Length > 0
+                            ? $"{escapedLabel}<span style='color:{p.Text}'>:</span>{descHtml}"
+                            : escapedLabel;
+                        pagesHtml.Append($"<span style='min-width:0;color:{p.Text}'>{optText}</span></label>");
                     }
                 }
 
                 // 自由文本输入（始终提供，作为补充或替代选项）
                 if (q.AllowFreeformInput)
                 {
-                    pagesHtml.Append($"<textarea id='{qId}-free' placeholder='{L["chat.html.answerPlaceholder"]}' style='width:100%;min-height:40px;background:#1e1e1e;color:#d4d4d4;border:1px solid #3c3c3c;border-radius:4px;padding:6px 8px;font-size:11px;margin-top:4px;resize:vertical'></textarea>");
+                    pagesHtml.Append($"<textarea id='{qId}-free' placeholder='{L["chat.html.answerPlaceholder"]}' style='width:100%;min-height:40px;background:{p.InputBg};color:{p.InputText};border:1px solid {p.InputBorder};border-radius:4px;padding:6px 8px;font-size:11px;margin-top:4px;resize:vertical'></textarea>");
                 }
 
                 pagesHtml.Append("</div>");
@@ -1628,9 +1697,9 @@ return "<!DOCTYPE html><html lang='" + htmlLang + "'><head><meta charset='UTF-8'
             string progressTemplate = L["chat.html.questionProgress"];
             string headerHtml =
                 "<div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:8px'>" +
-                $"<div style='color:#4fc1ff;font-size:12px;font-weight:600'>{EscapeHtml(L["chat.html.questionsTitle"])}</div>" +
+                $"<div style='color:{p.Accent};font-size:12px;font-weight:600'>{EscapeHtml(L["chat.html.questionsTitle"])}</div>" +
                 (hasMultipleQuestions
-                    ? $"<div id='agent-questions-progress' data-template='{EscapeHtmlAttribute(progressTemplate)}' style='color:#888;font-size:11px'>" +
+                    ? $"<div id='agent-questions-progress' data-template='{EscapeHtmlAttribute(progressTemplate)}' style='color:{p.MutedText};font-size:11px'>" +
                       $"{EscapeHtml(LocalizationService.Instance.Format("chat.html.questionProgress", 1, totalQuestions))}</div>"
                     : "") +
                 "</div>";
@@ -1639,11 +1708,11 @@ return "<!DOCTYPE html><html lang='" + htmlLang + "'><head><meta charset='UTF-8'
             string navHtml = hasMultipleQuestions
                 ? "<button id='agent-questions-prev' type='button' " +
                   $"onclick=\"window.__askQuestionsNav('{safeRequestId}',-1)\" " +
-                  "style='background:#243447;color:#9cc7e8;border:1px solid #3c5a75;border-radius:4px;padding:6px 14px;cursor:pointer;font-size:12px;visibility:hidden'>" +
+                  $"style='background:{p.SecondaryBtnBg};color:{p.SecondaryBtnText};border:1px solid {p.SecondaryBtnBorder};border-radius:4px;padding:6px 14px;cursor:pointer;font-size:12px;visibility:hidden'>" +
                   $"&#8592; {EscapeHtml(L["chat.html.questionPrev"])}</button>" +
                   "<button id='agent-questions-next' type='button' " +
                   $"onclick=\"window.__askQuestionsNav('{safeRequestId}',1)\" " +
-                  "style='background:#243447;color:#9cc7e8;border:1px solid #3c5a75;border-radius:4px;padding:6px 14px;cursor:pointer;font-size:12px'>" +
+                  $"style='background:{p.SecondaryBtnBg};color:{p.SecondaryBtnText};border:1px solid {p.SecondaryBtnBorder};border-radius:4px;padding:6px 14px;cursor:pointer;font-size:12px'>" +
                   $"{EscapeHtml(L["chat.html.questionNext"])} &#8594;</button>"
                 : "";
 
@@ -1656,10 +1725,10 @@ return "<!DOCTYPE html><html lang='" + htmlLang + "'><head><meta charset='UTF-8'
                 navHtml +
                 "<div style='flex:1'></div>" +
                 $"<button id='agent-questions-submit' type='button' onclick=\"window.__answerQuestions('{safeRequestId}')\" " +
-                $"style='{submitStyle}background:#0e639c;color:#fff;border:none;border-radius:4px;padding:6px 20px;cursor:pointer;font-size:12px;font-weight:600'>" +
+                $"style='{submitStyle}background:{p.PrimaryBtnBg};color:{p.PrimaryBtnText};border:none;border-radius:4px;padding:6px 20px;cursor:pointer;font-size:12px;font-weight:600'>" +
                 $"{EscapeHtml(L["chat.html.submitAnswer"])}</button>" +
                 $"<button type='button' onclick=\"window.__skipQuestions('{safeRequestId}')\" " +
-                "style='background:#3c3c3c;color:#aaa;border:1px solid #555;border-radius:4px;padding:6px 16px;cursor:pointer;font-size:12px'>" +
+                $"style='background:{p.SecondaryBtnBg};color:{p.SecondaryBtnText};border:1px solid {p.SecondaryBtnBorder};border-radius:4px;padding:6px 16px;cursor:pointer;font-size:12px'>" +
                 $"{EscapeHtml(L["chat.html.skip"])}</button>" +
                 "</div>";
 
@@ -1673,7 +1742,7 @@ return "<!DOCTYPE html><html lang='" + htmlLang + "'><head><meta charset='UTF-8'
 
         var div=document.createElement('div');
         div.id='agent-questions';
-        div.style.cssText='border:1px solid #4fc1ff;border-radius:8px;background:#1a2a3a;padding:12px;margin:8px 0;animation:fadeIn .3s';
+        div.style.cssText='border:1px solid {p.CardBorder};border-radius:8px;background:{p.CardBg};padding:12px;margin:8px 0;animation:fadeIn .3s';
         div.innerHTML={escapedInnerHtml};
 
         var container=document.getElementById('chat-container');
@@ -1697,6 +1766,7 @@ return "<!DOCTYPE html><html lang='" + htmlLang + "'><head><meta charset='UTF-8'
         {
             string cardId = FileDeleteCardIdPrefix + request.RequestId;
             string escapedCardId = EscapeJsString(cardId);
+            var p = Palette;
 
             // 构建文件列表 HTML（在 C# 侧完成，避免 JS 字符串嵌套转义）
             var fileItemsHtml = new StringBuilder();
@@ -1734,7 +1804,7 @@ return "<!DOCTYPE html><html lang='" + htmlLang + "'><head><meta charset='UTF-8'
                 "<div class=\"file-list\">" +
                 fileItemsHtml.ToString() +
                 "</div>" +
-                "<div class=\"warning-text\" style=\"color:#E07878;font-weight:600\">" + L["chat.html.deleteIrreversible"] + "</div>" +
+                $"<div class=\"warning-text\" style=\"color:{p.DangerTitleText};font-weight:600\">" + L["chat.html.deleteIrreversible"] + "</div>" +
                 "</div>" +
                 "<div class=\"file-delete-card-footer\">" +
                 $"<button class=\"file-delete-btn-confirm\" onclick=\"window.__fileDeleteConfirm('{EscapeHtmlAttribute(request.RequestId)}')\">" + L["chat.html.confirmDeleteButton"] + "</button>" +
@@ -1770,6 +1840,7 @@ return "<!DOCTYPE html><html lang='" + htmlLang + "'><head><meta charset='UTF-8'
             string escapedCardId = EscapeJsString(cardId);
             string explanation = (request.FilePaths != null && request.FilePaths.Count > 0)
                 ? request.FilePaths[0] : string.Empty;
+            var p = Palette;
 
             // ── 目的说明 ──
             // Purpose 优先；如果为空则用 explanation（FilePaths[0]）作为 fallback
@@ -1794,7 +1865,7 @@ return "<!DOCTYPE html><html lang='" + htmlLang + "'><head><meta charset='UTF-8'
                 (!string.IsNullOrEmpty(explanation)
                     ? "<div class=\"cmd-explanation\"> " + EscapeHtml(explanation) + "</div>"
                     : "") +
-                "<div class=\"warning-text\" style=\"color:#CEA85C;font-weight:600\">" + L["chat.html.terminalConfirm"] + "</div>" +
+                $"<div class=\"warning-text\" style=\"color:{p.ApprovalHintText};font-weight:600\">" + L["chat.html.terminalConfirm"] + "</div>" +
                 "</div>" +
                 "<div class=\"terminal-approval-card-footer\">" +
                 $"<button class=\"terminal-approval-btn-allow\" onclick=\"window.__terminalApprove('{EscapeHtmlAttribute(request.RequestId)}')\">" + L["chat.html.approveButton"] + "</button>" +
@@ -1822,6 +1893,152 @@ return "<!DOCTYPE html><html lang='" + htmlLang + "'><head><meta charset='UTF-8'
         #endregion
 
         #region HTML/JS String Helpers
+
+        /// <summary>
+        /// Agent 交互卡片（提问 / 审批 / 任务面板等）的主题调色板。
+        /// 这些卡片由 C# 侧拼接 HTML 后注入 WebView，无法走 PageCss 的级联，
+        /// 因此统一通过这里取色，保证深色/浅色主题下都可读。
+        /// </summary>
+        internal readonly struct AgentUiPalette
+        {
+            /// <summary>卡片正文文本色。</summary>
+            public string Text { get; init; }
+            /// <summary>次要说明文本色（进度、提示等）。</summary>
+            public string MutedText { get; init; }
+            /// <summary>强调色：卡片边框、标题、选中态。</summary>
+            public string Accent { get; init; }
+
+            public string CardBorder { get; init; }
+            public string CardBg { get; init; }
+
+            public string InputBg { get; init; }
+            public string InputText { get; init; }
+            public string InputBorder { get; init; }
+
+            /// <summary>次级按钮（跳过 / 取消）。</summary>
+            public string SecondaryBtnBg { get; init; }
+            public string SecondaryBtnText { get; init; }
+            public string SecondaryBtnBorder { get; init; }
+
+            /// <summary>主按钮（提交回答）。</summary>
+            public string PrimaryBtnBg { get; init; }
+            public string PrimaryBtnText { get; init; }
+
+            /// <summary>审批类卡片（终端审批、权限请求）的暖色系。</summary>
+            public string ApprovalBg { get; init; }
+            public string ApprovalBorder { get; init; }
+            public string ApprovalTitleText { get; init; }
+            public string ApprovalHintBg { get; init; }
+            public string ApprovalHintText { get; init; }
+            public string ApprovalHintBorder { get; init; }
+            public string ApprovalCodeBg { get; init; }
+            public string ApprovalCodeText { get; init; }
+
+            /// <summary>危险类卡片（文件删除）的红色系。</summary>
+            public string DangerBg { get; init; }
+            public string DangerBorder { get; init; }
+            public string DangerTitleText { get; init; }
+            public string DangerItemBg { get; init; }
+            public string DangerItemBorder { get; init; }
+            public string DangerItemText { get; init; }
+
+            public string ApproveBtnBg { get; init; }
+            public string ApproveBtnText { get; init; }
+            public string ApproveBtnBorder { get; init; }
+            public string DenyBtnBg { get; init; }
+            public string DenyBtnText { get; init; }
+            public string DenyBtnBorder { get; init; }
+
+            /// <summary>任务面板完成态状态色。</summary>
+            public string StatusSuccess { get; init; }
+            /// <summary>任务面板部分失败 / 取消状态色。</summary>
+            public string StatusWarning { get; init; }
+            /// <summary>任务面板失败状态色。</summary>
+            public string StatusError { get; init; }
+        }
+
+        /// <summary>
+        /// 返回当前主题对应的 Agent 卡片调色板。
+        /// </summary>
+        private static AgentUiPalette Palette => ThemeService.Instance.IsLight
+            ? new AgentUiPalette
+            {
+                Text = "#333333",
+                MutedText = "#666666",
+                Accent = "#0078d4",
+                CardBorder = "#0078d4",
+                CardBg = "#f0f7ff",
+                InputBg = "#ffffff",
+                InputText = "#333333",
+                InputBorder = "#c8c8c8",
+                SecondaryBtnBg = "#e8e8e8",
+                SecondaryBtnText = "#555555",
+                SecondaryBtnBorder = "#cccccc",
+                PrimaryBtnBg = "#0078d4",
+                PrimaryBtnText = "#ffffff",
+                ApprovalBg = "#fffdf5",
+                ApprovalBorder = "#e0cfa0",
+                ApprovalTitleText = "#8a7030",
+                ApprovalHintBg = "#faf5e8",
+                ApprovalHintText = "#8a7030",
+                ApprovalHintBorder = "#c8a84e",
+                ApprovalCodeBg = "#f6f8fa",
+                ApprovalCodeText = "#333333",
+                DangerBg = "#fff8f8",
+                DangerBorder = "#e0b0b0",
+                DangerTitleText = "#c04040",
+                DangerItemBg = "#f6f8fa",
+                DangerItemBorder = "#e0d0d0",
+                DangerItemText = "#333333",
+                ApproveBtnBg = "#e8f5e9",
+                ApproveBtnText = "#2a7a2a",
+                ApproveBtnBorder = "#a0d0a0",
+                DenyBtnBg = "#fae0e0",
+                DenyBtnText = "#c04040",
+                DenyBtnBorder = "#e0a0a0",
+                StatusSuccess = "#2ea87a",
+                StatusWarning = "#c8a030",
+                StatusError = "#c04040",
+            }
+            : new AgentUiPalette
+            {
+                Text = "#D4D4D4",
+                MutedText = "#999999",
+                Accent = "#4fc1ff",
+                CardBorder = "#4fc1ff",
+                CardBg = "#1a2a3a",
+                InputBg = "#1e1e1e",
+                InputText = "#d4d4d4",
+                InputBorder = "#3c3c3c",
+                SecondaryBtnBg = "#3c3c3c",
+                SecondaryBtnText = "#aaaaaa",
+                SecondaryBtnBorder = "#555555",
+                PrimaryBtnBg = "#0e639c",
+                PrimaryBtnText = "#ffffff",
+                ApprovalBg = "#2E2A1A",
+                ApprovalBorder = "#C8A84E",
+                ApprovalTitleText = "#C8A84E",
+                ApprovalHintBg = "#2A2218",
+                ApprovalHintText = "#CEA85C",
+                ApprovalHintBorder = "#C8A84E",
+                ApprovalCodeBg = "#1A1A0E",
+                ApprovalCodeText = "#C8C84E",
+                DangerBg = "#1e1a1a",
+                DangerBorder = "#6a3a3a",
+                DangerTitleText = "#e07878",
+                DangerItemBg = "#1a1a1a",
+                DangerItemBorder = "#3a2a2a",
+                DangerItemText = "#d4d4d4",
+                ApproveBtnBg = "#1A3A1A",
+                ApproveBtnText = "#4EC9B0",
+                ApproveBtnBorder = "#3A6A3A",
+                DenyBtnBg = "#3A1A1A",
+                DenyBtnText = "#E07878",
+                DenyBtnBorder = "#6A3A3A",
+                StatusSuccess = "#4EC9B0",
+                StatusWarning = "#C8A84E",
+                StatusError = "#E07878",
+            };
 
         /// <summary>
         /// 转义 HTML 属性值中的引号字符。
@@ -2022,7 +2239,8 @@ return "<!DOCTYPE html><html lang='" + htmlLang + "'><head><meta charset='UTF-8'
             int failed = plan.Steps.Count(s => s.Status == AgentStepStatus.Failed);
             int total = plan.Steps.Count;
             string statusIcon = plan.IsCancelled ? "⚠️" : (failed > 0 ? "⚠️" : "✅");
-            string statusColor = plan.IsCancelled ? "#E07878" : (failed > 0 ? "#C8A84E" : "#4EC9B0");
+            var p = Palette;
+            string statusColor = plan.IsCancelled ? p.StatusError : (failed > 0 ? p.StatusWarning : p.StatusSuccess);
             string statusText = plan.IsCancelled ? L["chat.html.taskCancelled"] : (failed > 0 ? string.Format(L["chat.html.taskPartialSuccess"], completed, total, failed) : string.Format(L["chat.html.taskAllSuccess"], completed, total));
             string escapedStatusIcon = EscapeJsString(statusIcon);
             string escapedStatusText = EscapeJsString(statusText);

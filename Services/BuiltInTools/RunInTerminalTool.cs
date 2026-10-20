@@ -135,8 +135,18 @@ namespace DeepSeek_v4_for_VisualStudio.Services.BuiltInTools
                 DangerousCommandKind.Shutdown),
 
             // ── 磁盘 / 引导区破坏 ──
+            // 仅匹配真正的"格式化"调用：format 必须是命令起始（行首或 ; | & ( 之后），
+            // 且紧跟盘符或 /fs 参数。
+            // 不能写成 `\bformat\b[^\r\n;|]{0,80}[A-Za-z]:`：
+            // PowerShell 的 `Get-Date -Format "yyyy-MM-dd HH:mm:ss"` 里 "Format" 之后
+            // 隔着引号出现 "HH:mm" 这种 X: 形态，会被误判成格式化磁盘，
+            // 使普通取时间命令被安全过滤器拦截。
             (new System.Text.RegularExpressions.Regex(
-                @"\b(?:format|format\.com)\b[^\r\n;|]{0,80}[A-Za-z]:",
+                @"(?<![\w\\/])(?:format\.com|format)(?![\w-])(?:\s+(?:/[a-z]+:(?:"".*?""|[^\s]+)|[A-Za-z]:))",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase),
+                DangerousCommandKind.SystemDestruction),
+            (new System.Text.RegularExpressions.Regex(
+                @"\bformat-volume\b",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase),
                 DangerousCommandKind.SystemDestruction),
             (new System.Text.RegularExpressions.Regex(
@@ -796,6 +806,14 @@ namespace DeepSeek_v4_for_VisualStudio.Services.BuiltInTools
             if (string.IsNullOrEmpty(command))
                 return LocalizationService.Instance["tool.runTerminal.missingCommand"];
 
+            // 测试命令（dotnet test / vstest.console / ctest）单独提示，引导到 run_tests 工具。
+            // 必须先于构建分支判断：ctest 本身不是构建命令，而 dotnet test 会隐式构建。
+            if (IsTestCommand(command))
+            {
+                return LocalizationService.Instance["tool.runTerminal.testBlocked"] + "\n\n" +
+                    LocalizationService.Instance.Format("tool.runInTerminal.testBlockedExtra", command);
+            }
+
             if (IsBuildCommand(command))
             {
                 return LocalizationService.Instance["tool.runTerminal.buildBlocked"] + "\n\n" +
@@ -830,8 +848,17 @@ namespace DeepSeek_v4_for_VisualStudio.Services.BuiltInTools
             if (isCmakeBuild)
             {
                 // ── 复用 BuildService.FindVcvarsBat()（需要 UI 线程访问 SVsShell）──
-                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-                vcvarsPath = BuildService.FindVcvarsBat();
+                // 单元测试等非 VS 宿主场景下 JoinableTaskFactory 可能不可用，
+                // 此时跳过注入而不是让整个命令抛 NullReferenceException。
+                try
+                {
+                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                    vcvarsPath = BuildService.FindVcvarsBat();
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn($"[RunInTerminal] 解析 vcvars64.bat 失败，跳过注入: {ex.Message}");
+                }
                 if (vcvarsPath == null)
                     vcvarsWarning = LocalizationService.Instance["tool.runInTerminal.vcvarsNotFound"] + "\n\n";
             }
@@ -1307,6 +1334,39 @@ namespace DeepSeek_v4_for_VisualStudio.Services.BuiltInTools
         /// <summary>
         /// 检测命令是否为编译/构建命令。
         /// </summary>
+        /// <summary>
+        /// 判定是否为测试命令（.NET 的 dotnet test / vstest.console，或 C++ 的 ctest），
+        /// 引导到 run_tests 工具而非 build_solution。
+        /// </summary>
+        private static bool IsTestCommand(string command)
+        {
+            if (string.IsNullOrWhiteSpace(command)) return false;
+
+            string normalized = command.Trim();
+            if (normalized.StartsWith("&"))
+                normalized = normalized.Substring(1).Trim();
+
+            return normalized.Contains("dotnet test", StringComparison.OrdinalIgnoreCase) ||
+                   normalized.Contains("vstest.console", StringComparison.OrdinalIgnoreCase) ||
+                   IsCtestCommand(normalized);
+        }
+
+        /// <summary>
+        /// 判定是否为 CTest 命令。按词边界匹配，避免把 "ctest_failed.log" 之类的文件名当成命令；
+        /// 路径形态（&lt;cmake&gt;\ctest.exe 或 "ctest"）也一并覆盖。
+        /// </summary>
+        private static bool IsCtestCommand(string normalized)
+        {
+            if (string.IsNullOrEmpty(normalized))
+                return false;
+
+            // 命令可能跟在 & 或 cmd /c 之后，逐段检查第一个 token 后的子串
+            string lowered = normalized.ToLowerInvariant();
+
+            return System.Text.RegularExpressions.Regex.IsMatch(
+                lowered, @"(^|[\s""\\/&|;])ctest(\.exe)?(""|\s|$)");
+        }
+
         private static bool IsBuildCommand(string command)
         {
             if (string.IsNullOrWhiteSpace(command)) return false;
@@ -1319,7 +1379,11 @@ namespace DeepSeek_v4_for_VisualStudio.Services.BuiltInTools
                 normalized.Contains("dotnet msbuild", StringComparison.OrdinalIgnoreCase) ||
                 normalized.Contains("dotnet publish", StringComparison.OrdinalIgnoreCase) ||
                 normalized.Contains("dotnet restore", StringComparison.OrdinalIgnoreCase) ||
-                normalized.Contains("dotnet pack", StringComparison.OrdinalIgnoreCase))
+                normalized.Contains("dotnet pack", StringComparison.OrdinalIgnoreCase) ||
+                // dotnet test 默认先构建再跑测试；.NET 测试请统一走 run_tests 工具
+                // （dotnet test 本身不是构建命令，但在 --no-build 缺失时会隐式构建）
+                normalized.Contains("dotnet test", StringComparison.OrdinalIgnoreCase) ||
+                normalized.Contains("vstest.console", StringComparison.OrdinalIgnoreCase))
                 return true;
 
             if (normalized.Contains("msbuild", StringComparison.OrdinalIgnoreCase) ||

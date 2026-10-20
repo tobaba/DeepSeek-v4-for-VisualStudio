@@ -54,6 +54,9 @@ public class RunInTerminalToolTests
 
     [Theory]
     [InlineData("format C:", DangerousCommandKind.SystemDestruction)]
+    [InlineData("format D: /q", DangerousCommandKind.SystemDestruction)]
+    [InlineData("format /fs:NTFS D:", DangerousCommandKind.SystemDestruction)]
+    [InlineData("Format-Volume -DriveLetter C", DangerousCommandKind.SystemDestruction)]
     [InlineData("diskpart clean", DangerousCommandKind.SystemDestruction)]
     [InlineData("shutdown /s", DangerousCommandKind.Shutdown)]
     [InlineData("Stop-Computer -Force", DangerousCommandKind.Shutdown)]
@@ -98,6 +101,12 @@ public class RunInTerminalToolTests
     [InlineData("git status")]
     [InlineData("pip list")]
     [InlineData("Remove-Item -Recurse -Force .\\build")]
+    // 回归：PowerShell -Format 参数里的 "HH:mm" 曾被当成盘符 "H:"，
+    // 使取时间这类普通命令被误判为「格式化磁盘」而拦下。
+    [InlineData("Write-Output (Get-Date -Format \"yyyy-MM-dd HH:mm:ss\")")]
+    [InlineData("Get-Date -Format \"HH:mm\"")]
+    [InlineData("Get-ChildItem | Format-Table -AutoSize")]
+    [InlineData("Get-Date -Format o")]
     public void DetectDangerousCommand_AllowsSafeCommand(string command)
     {
         RunInTerminalTool.DetectDangerousCommand(command).Should().Be(DangerousCommandKind.None);
@@ -192,6 +201,52 @@ public class RunInTerminalToolTests
         var result = await tool.ExecuteAsync(args, null);
 
         result.Should().Contain("build_solution");
+    }
+
+    /// <summary>
+    /// C++ 测试命令必须被引导到 run_tests（而不是 build_solution），
+    /// 同时文件名里含 "ctest" 的普通命令不能被误伤。
+    /// </summary>
+    [Theory]
+    [InlineData("ctest --output-on-failure", true)]
+    [InlineData("ctest -R Suite.Name", true)]
+    [InlineData("& \"D:\\Cmake\\bin\\ctest.exe\" -C Debug", true)]
+    [InlineData("cd out/build/x64-debug; ctest --test-dir .", true)]
+    [InlineData("cmake --build out/build/x64-debug", false)]
+    [InlineData("Get-Content ctest_failed.log", false)]
+    [InlineData("Select-String -Path ctest_full.log -Pattern failed", false)]
+    public async Task ExecuteAsync_CtestCommandRedirectsToRunTests(string command, bool expectTestBlock)
+    {
+        var tool = new RunInTerminalTool();
+        var args = ParseArgs(JsonSerializer.Serialize(new Dictionary<string, string>
+        {
+            ["command"] = command,
+            ["explanation"] = "test",
+        }));
+
+        string result = await tool.ExecuteAsync(args, null);
+
+        if (expectTestBlock)
+        {
+            result.Should().Contain("run_tests");
+            result.Should().Contain("[BLOCKED]");
+        }
+        else
+        {
+            result.Should().NotContain("run_tests");
+        }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_DotnetTestRedirectsToRunTestsNotBuild()
+    {
+        var tool = new RunInTerminalTool();
+        var args = ParseArgs("{\"command\":\"dotnet test\",\"explanation\":\"test\"}");
+
+        string result = await tool.ExecuteAsync(args, null);
+
+        result.Should().Contain("run_tests");
+        result.Should().NotContain("build_solution");
     }
 
     [Theory]

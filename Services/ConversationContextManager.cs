@@ -207,7 +207,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// 只有真实用户提问才会产生新的 TurnIndex。
         /// </remarks>
         public int TurnCount => _entries
-            .Where(e => e.Role == "user" && e.TurnIndex > 0)
+            .Where(e => e is not null && e.Role == "user" && e.TurnIndex > 0)
             .Select(e => e.TurnIndex)
             .Distinct()
             .Count();
@@ -216,7 +216,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         public int MessageCount => _entries.Count;
 
         /// <summary>获取当前上下文中 assistant 消息携带的工具调用总次数</summary>
-        public int ToolCallCount => _entries.Sum(e => e.ToolCalls?.Count ?? 0);
+        public int ToolCallCount => _entries.Sum(e => e?.ToolCalls?.Count ?? 0);
 
         /// <summary>获取校准后的估算 Token 数（= 原始估算 × 校准系数）</summary>
         public int EstimatedTokens => (int)(_estimatedTokens * _calibrationFactor);
@@ -225,7 +225,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         public int RawEstimatedTokens => _estimatedTokens;
 
         /// <summary>上下文是否为空（无任何用户消息）</summary>
-        public bool IsEmpty => !_entries.Any(e => e.Role == "user");
+        public bool IsEmpty => !_entries.Any(e => e is not null && e.Role == "user");
 
         /// <summary>获取上下文使用率（0.0 ~ 1.0，基于校准后估算）</summary>
         public double UsageRatio => TokenBudget > 0 ? (double)EstimatedTokens / TokenBudget : 0;
@@ -724,17 +724,45 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         }
 
         /// <summary>
-        /// 添加工具调用结果（tool 角色消息）。
+        /// 添加纯文本工具调用结果（tool 角色消息）。
         /// </summary>
         public void AddToolResult(string toolCallId, string toolName, string result)
+            => AddToolResult(toolCallId, toolName, result, null);
+
+        /// <summary>
+        /// 添加工具调用结果；视觉工具返回的图片必须与文本一起写入历史，
+        /// 否则下一次从 ContextManager 重建请求时 content 数组会退化成字符串，
+        /// 既丢失图片，也会破坏后续请求的稳定前缀缓存。
+        /// </summary>
+        public void AddToolResult(
+            string toolCallId,
+            string toolName,
+            string result,
+            List<ChatContentPart>? multimodalContent)
         {
+            var normalizedMultimodalContent = CloneContentParts(multimodalContent);
+            if (!string.IsNullOrEmpty(result)
+                && normalizedMultimodalContent is { Count: > 0 }
+                && !normalizedMultimodalContent.Any(p =>
+                    p.Type == "text" && string.Equals(p.Text, result, StringComparison.Ordinal)))
+            {
+                // 调用方只传图片块时补回文本，保证工具结果在 UI、日志与 API 三处语义一致。
+                normalizedMultimodalContent.Insert(0, new ChatContentPart
+                {
+                    Type = "text",
+                    Text = result,
+                });
+            }
+
             _entries.Add(CreateEntry(
                 Role: "tool",
                 Content: result,
+                MultimodalContent: normalizedMultimodalContent,
                 ToolCallId: toolCallId,
                 Name: toolName,
                 TurnIndex: TurnCount)); // 工具调用属于当前轮次
             _estimatedTokens += EstimateTokens(result);
+            _estimatedTokens += EstimateMultimodalTokens(normalizedMultimodalContent);
         }
 
         /// <summary>
@@ -867,6 +895,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             //     于是被判为"脱节内容"再补一份 —— 这正是 152 号请求 [48][49] 相邻重复的成因。
             int entryLimit = _entries.Count;
             int appended = 0;
+            int multimodalUpgraded = 0;
             int cursor = 0;      // _entries 扫描游标：已匹配到的条目下标
 
             // ── 跳过结构性前缀（[0] 稳定系统提示词、[1] 动态上下文块）──
@@ -934,6 +963,17 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 int matched = FindMatchingEntryIndex(msg, cursor, entryLimit);
                 if (matched >= 0)
                 {
+                    // 兼容旧历史：此前工具结果只落文本，实际请求却携带了图片块。
+                    // 同一 tool_call 已被匹配时不要追加重复消息，而是用发送快照补齐缺失的多模态内容。
+                    var matchedEntry = _entries[matched];
+                    if (string.Equals(matchedEntry.Role, "tool", StringComparison.Ordinal)
+                        && msg.MultimodalContent is { Count: > 0 }
+                        && matchedEntry.MultimodalContent is not { Count: > 0 })
+                    {
+                        matchedEntry.MultimodalContent = CloneContentParts(msg.MultimodalContent);
+                        multimodalUpgraded++;
+                    }
+
                     cursor = matched + 1;
                     continue;
                 }
@@ -965,10 +1005,19 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 appended++;
             }
 
-            if (appended > 0)
+            if (appended > 0 || multimodalUpgraded > 0)
             {
                 _estimatedTokens = RecalculateEstimatedTokens();
-                Logger.Info($"[ContextManager] 主流程对账：补写 {appended} 条脱节消息进 _entries（当前 {MessageCount} 条 / {TurnCount} 轮）");
+
+                if (appended > 0)
+                {
+                    Logger.Info($"[ContextManager] 主流程对账：补写 {appended} 条脱节消息进 _entries（当前 {MessageCount} 条 / {TurnCount} 轮）");
+                }
+
+                if (multimodalUpgraded > 0)
+                {
+                    Logger.Info($"[ContextManager] 主流程对账：为 {multimodalUpgraded} 条工具结果补齐多模态内容");
+                }
             }
 
             return appended;
@@ -2118,20 +2167,31 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         /// </summary>
         public ContextStats GetStats()
         {
+            // 后台 Agent 写入与 UI 统计读取可能并发发生。List<T>.ToArray() 不做版本枚举，
+            // 但扩容瞬间仍可能复制到未初始化槽位；统计属于只读诊断数据，跳过空槽位即可。
+            var entries = _entries
+                .ToArray()
+                .Where(e => e is not null)
+                .ToArray();
+
             var stats = new ContextStats
             {
                 EstimatedTokens = EstimatedTokens,
                 TokenBudget = TokenBudget,
-                MessageCount = MessageCount,
-                TurnCount = TurnCount,
-                ToolCallCount = ToolCallCount,
+                MessageCount = entries.Length,
+                TurnCount = entries
+                    .Where(e => e.Role == "user" && e.TurnIndex > 0)
+                    .Select(e => e.TurnIndex)
+                    .Distinct()
+                    .Count(),
+                ToolCallCount = entries.Sum(e => e.ToolCalls?.Count ?? 0),
                 SystemPromptTokens = EstimateTokens(_systemPrompt),
                 CompressedTurns = _compressor?.CompressedSummaries.Count ?? 0,
                 CompressedSummaryTokens = _compressor?.TotalCompressedTokens ?? 0,
             };
 
             // 统计工具调用结果 token
-            stats.ToolResultTokens = _entries
+            stats.ToolResultTokens = entries
                 .Where(e => e.Role == "tool")
                 .Sum(e => EstimateTokens(e.Content));
 
@@ -2254,7 +2314,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                         break;
                     case "tool":
                         if (!string.IsNullOrEmpty(msg.ToolCallId))
-                            AddToolResult(msg.ToolCallId!, msg.Name ?? "unknown", msg.Content ?? string.Empty);
+                            AddToolResult(msg.ToolCallId!, msg.Name ?? "unknown", msg.Content ?? string.Empty, msg.MultimodalContent);
                         break;
                     case "system":
                         AddCustomMessage("system", msg.Content ?? string.Empty);

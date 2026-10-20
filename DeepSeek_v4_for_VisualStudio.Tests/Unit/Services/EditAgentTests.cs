@@ -171,6 +171,33 @@ public class EditAgentTests
     }
 
     [Fact]
+    public void BuildSummaryHandoff_UsesSameSummaryOnlyPathAsBuildAgent()
+    {
+        var agent = new EditAgent(_apiService);
+        var plan = new AgentTaskPlan
+        {
+            Intent = AgentIntent.CodeChange,
+            Steps = new List<AgentStep>
+            {
+                new() { Index = 1, Title = "修改代码", Status = AgentStepStatus.Completed },
+            },
+        };
+
+        var method = typeof(EditAgent).GetMethod(
+            "BuildSummaryHandoff",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        method.Should().NotBeNull();
+
+        var handoff = (AgentHandoff)method!.Invoke(agent, new object[] { plan })!;
+
+        handoff.TargetAgent.Should().Be(AgentType.Ask);
+        handoff.IsSummaryOnly.Should().BeTrue(
+            "Edit 和 Build 的终态总结必须统一进入 AskAgent.ExecuteSummaryOnlyAsync");
+        handoff.Prompt.Should().Be(
+            LocalizationService.Instance["agent.summary.handoffUserPrompt"]);
+    }
+
+    [Fact]
     public void ShouldSkipAskSummaryHandoff_ReadOnlyOutputWithoutChanges_ReturnsTrue()
     {
         var plan = new AgentTaskPlan
@@ -233,6 +260,48 @@ public class EditAgentTests
             skipAutoBuild);
 
         result.Should().Be(expected);
+    }
+
+    /// <summary>
+    /// 验证优先级：测试通过即可结束，未通过/无测试时才回到构建判定。
+    /// 参数依次为：尝试测试、测试结果、尝试构建、构建结果、是否移交 Build。
+    /// </summary>
+    [Theory]
+    [InlineData(true, true, false, null, false)]    // 测试通过 → 不必移交（无需构建）
+    [InlineData(true, true, true, false, false)]    // 测试通过覆盖构建失败（构建结果已过期）→ 不移交
+    [InlineData(true, false, false, null, true)]    // 测试失败且未构建 → 移交 Build 处理
+    [InlineData(true, false, true, true, false)]    // 测试失败但随后构建成功 → 编译层面已通过，不移交
+    [InlineData(true, null, false, null, true)]     // 工作区没有可运行的测试（无明确结论）→ 回到构建判定，未构建则移交
+    [InlineData(true, null, true, true, false)]     // 无测试但构建成功 → 不移交
+    [InlineData(false, null, false, null, true)]    // 没跑测试也没构建 → 移交
+    public void ShouldHandoffToBuild_PrefersTestsThenFallsBackToBuild(
+        bool didAttemptTests,
+        bool? lastTestsPassed,
+        bool didAttemptBuild,
+        bool? lastBuildSucceeded,
+        bool expected)
+    {
+        bool result = EditAgent.ShouldHandoffToBuild(
+            hasFileChanges: true,
+            didAttemptBuild: didAttemptBuild,
+            lastBuildSucceeded: lastBuildSucceeded,
+            skipAutoBuild: false,
+            didAttemptTests: didAttemptTests,
+            lastTestsPassed: lastTestsPassed);
+
+        result.Should().Be(expected);
+    }
+
+    [Fact]
+    public void EditVerifyUserMessage_PrefersTestsOverBuild()
+    {
+        // 验证提示词必须把 run_tests 排在 build_solution 之前，
+        // 否则模型会沿用旧的"改完就构建"路径。
+        string message = AiPrompts.EditVerifyUserMessage;
+
+        message.Should().Contain("run_tests");
+        message.IndexOf("run_tests", StringComparison.Ordinal)
+            .Should().BeLessThan(message.IndexOf("build_solution", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -524,15 +593,14 @@ public class EditAgentTests
     }
 
     /// <summary>
-    /// 回归：构建意图只看 Title，描述里的约束性说法不得放行。
-    /// 实测一轮 6 步计划中「抽取纯函数计数器 + 单元测试」被放行构建——
-    /// 标题无关键词，但描述含构建词，而中文按子串匹配、无否定语气识别，
-    /// 「确保可编译」这类约束被误当成构建意图，导致白名单未裁剪 build_solution。
+    /// 回归：验证意图只看 Title，描述里的约束性说法不得放行。
+    /// 中文关键词按子串匹配、无否定语气识别，若把描述纳入判据，
+    /// 「确保可编译」这类约束会被误当成验证意图，导致白名单不裁剪 run_tests / build_solution。
     /// </summary>
     [Theory]
-    [InlineData("抽取纯函数计数器 + 单元测试", "确保新文件可编译，避免编译错误")]
+    [InlineData("抽取纯函数计数器", "确保新文件可编译，避免编译错误")]
     [InlineData("重构解析器", "改动后代码应能正常编译")]
-    [InlineData("补充单元测试", "本次不构建，仅新增测试用例")]
+    [InlineData("补充断言辅助函数", "本次不构建，仅新增用例")]
     [InlineData("更新文档", "说明如何编译本仓库")]
     public void IsBuildAllowedForStep_BuildWordOnlyInDescription_IsBlocked(string title, string description)
     {
@@ -563,6 +631,44 @@ public class EditAgentTests
 
         allowed.Should().BeTrue("标题写明的构建意图应被尊重");
         reason.Should().Be(LocalizationService.Instance["agent.step.buildAllowedReasonExplicit"]);
+    }
+
+    /// <summary>
+    /// 步骤级许可同时覆盖"测试"：标题写了跑测试/运行单元测试的中间步骤，
+    /// 也应放行 run_tests（与 build_solution 同一开关）。
+    /// </summary>
+    [Theory]
+    [InlineData("运行单元测试")]
+    [InlineData("跑测试验证改动")]
+    [InlineData("测试覆盖率检查")]
+    [InlineData("Run the unit tests")]
+    [InlineData("Verify with tests")]
+    public void IsBuildAllowedForStep_TestIntentInTitle_IsAllowed(string title)
+    {
+        var plan = BuildPlan(
+            (1, title, "无描述"),
+            (2, "下一步", "继续"));
+
+        bool allowed = EditAgent.IsBuildAllowedForStep(plan.Steps[0], plan, out string? reason);
+
+        allowed.Should().BeTrue("标题写明的测试意图与构建意图同级，应放行 run_tests");
+        reason.Should().Be(LocalizationService.Instance["agent.step.buildAllowedReasonExplicit"]);
+    }
+
+    /// <summary>测试意图同样只看标题，描述里的"要保证测试通过"属于约束性说法，不放行。</summary>
+    [Theory]
+    [InlineData("调整断言辅助函数", "确保单元测试通过")]
+    [InlineData("重命名夹具类", "本次不跑测试，仅改名")]
+    public void IsBuildAllowedForStep_TestWordOnlyInDescription_IsBlocked(string title, string description)
+    {
+        var plan = BuildPlan(
+            (1, title, description),
+            (2, "下一步", "继续"));
+
+        bool allowed = EditAgent.IsBuildAllowedForStep(plan.Steps[0], plan, out string? reason);
+
+        allowed.Should().BeFalse("描述里的测试词是约束性说法，不代表本步骤要求执行测试");
+        reason.Should().BeNull();
     }
 
     /// <summary>英文关键词按词边界匹配，避免子串误命中（如 "build" 不应命中 "rebuilding" 之外的无关词）。</summary>
@@ -624,9 +730,10 @@ public class EditAgentTests
         blocked.Should().Contain("不允许");
         blocked.Should().Contain("build_solution");
 
-        // 最后一步 → 提示允许构建
+        // 最后一步 → 提示允许验证，且测试优先于构建
         var allowed = InvokeBuildStepPrompt(agent, blockedPlan.Steps[1], blockedPlan);
-        allowed.Should().Contain("允许调用 build_solution");
+        allowed.Should().Contain("允许验证");
+        allowed.Should().Contain("run_tests");
     }
 
     private static string InvokeBuildStepPrompt(EditAgent agent, AgentStep step, AgentTaskPlan plan)
@@ -951,43 +1058,31 @@ public class EditAgentTests
     }
 
     [Fact]
-    public void DetectAndAutoCompleteLaterSteps_ThinkingContent_DeclaresRange_CompletesAndAdvances()
+    public void DetectAndAutoCompleteLaterSteps_TakesOnlyAiResponse_NoThinkingInput()
     {
-        // 场景：正式输出未提及后续步骤，但思考内容中声明了范围式完成
-        var agent = new EditAgent(_apiService);
-        var plan = new AgentTaskPlan
-        {
-            Title = "Test Plan",
-            CurrentStepIndex = 1,
-            Steps = Enumerable.Range(1, 6)
-                .Select(i => new AgentStep
-                {
-                    Index = i,
-                    Title = $"步骤{i}",
-                    Status = AgentStepStatus.Pending,
-                })
-                .ToList(),
-        };
-        plan.Steps[0].Status = AgentStepStatus.InProgress;
-        plan.Steps[0].AiResponse = "第一步完成。";
-        const string thinking = "已经把所有文件都改好了，步骤1-6 已完成。";
+        // 契约：自动完成只依据正式输出（AiResponse）。
+        // 思考内容不得再作为输入，否则引述/假设会被当成真声明。
+        var method = typeof(EditAgent).GetMethod("DetectAndAutoCompleteLaterSteps",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
 
-        DetectAndAutoCompleteLaterStepsPublic(agent, plan.Steps[0], plan, thinking);
-
-        plan.Steps.Skip(1).Should().OnlyContain(s => s.Status == AgentStepStatus.Completed);
-        plan.CurrentStepIndex.Should().Be(6);
+        var parameters = method!.GetParameters();
+        parameters.Should().HaveCount(2, "签名只接收(AiResponse 所在的 step, plan)");
+        parameters.Should().NotContain(p =>
+            p.Name != null && p.Name.Contains("thinking", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
-    public void DetectAndAutoCompleteLaterSteps_ThinkingContent_ListDeclares_Completes()
+    public void DetectAndAutoCompleteLaterSteps_QuotedClaimInThinking_DoesNotSkipLaterStep()
     {
-        // 场景：逗号/顿号分隔列表声明出现在思考内容中
+        // 回归：真实的步骤 1 输出只说"步骤 1 完成，等待下一步执行删除"，
+        // 但思考里出现了引述"也完成了步骤2"。该引述曾被当成真声明，
+        // 使步骤 2 被标记完成并跳过（文件创建后未被删除）。
         var agent = new EditAgent(_apiService);
         var plan = new AgentTaskPlan
         {
             Title = "Test Plan",
             CurrentStepIndex = 1,
-            Steps = Enumerable.Range(1, 4)
+            Steps = Enumerable.Range(1, 2)
                 .Select(i => new AgentStep
                 {
                     Index = i,
@@ -997,43 +1092,40 @@ public class EditAgentTests
                 .ToList(),
         };
         plan.Steps[0].Status = AgentStepStatus.InProgress;
-        plan.Steps[0].AiResponse = "第一步完成。";
-        const string thinking = "步骤2、3也完成了，可以直接跳到第4步。";
+        plan.Steps[0].AiResponse = "已在 test_temp.txt 创建测试文件。步骤 1 完成，等待下一步执行删除。";
 
-        DetectAndAutoCompleteLaterStepsPublic(agent, plan.Steps[0], plan, thinking);
+        DetectAndAutoCompleteLaterStepsPublic(agent, plan.Steps[0], plan);
 
-        plan.Steps[1].Status.Should().Be(AgentStepStatus.Completed); // 2
-        plan.Steps[2].Status.Should().Be(AgentStepStatus.Completed); // 3
-        plan.Steps[3].Status.Should().Be(AgentStepStatus.Pending);   // 4 不受影响
-        plan.CurrentStepIndex.Should().Be(3);
-    }
-
-    [Fact]
-    public void DetectAndAutoCompleteLaterSteps_ThinkingContent_NoDeclaration_DoesNotAdvance()
-    {
-        // 场景：思考内容只是计划性表述，不应被误判为完成
-        var agent = new EditAgent(_apiService);
-        var plan = new AgentTaskPlan
-        {
-            Title = "Test Plan",
-            CurrentStepIndex = 1,
-            Steps = Enumerable.Range(1, 4)
-                .Select(i => new AgentStep
-                {
-                    Index = i,
-                    Title = $"步骤{i}",
-                    Status = AgentStepStatus.Pending,
-                })
-                .ToList(),
-        };
-        plan.Steps[0].Status = AgentStepStatus.InProgress;
-        plan.Steps[0].AiResponse = "第一步完成。";
-        const string thinking = "接下来打算执行步骤2和步骤3，然后步骤4。";
-
-        DetectAndAutoCompleteLaterStepsPublic(agent, plan.Steps[0], plan, thinking);
-
-        plan.Steps.Skip(1).Should().OnlyContain(s => s.Status == AgentStepStatus.Pending);
+        plan.Steps[1].Status.Should().Be(AgentStepStatus.Pending, "步骤2必须留给主循环真正执行");
         plan.CurrentStepIndex.Should().Be(1);
+    }
+
+    [Fact]
+    public void DetectAndAutoCompleteLaterSteps_AiResponseAlsoCompletedStep2_CompletesIt()
+    {
+        // 反向校验：同一句话若真的出现在正式输出里，仍应被识别为声明
+        // （即回归修复来自"不读思考内容"，而非禁用自动完成本身）。
+        var agent = new EditAgent(_apiService);
+        var plan = new AgentTaskPlan
+        {
+            Title = "Test Plan",
+            CurrentStepIndex = 1,
+            Steps = Enumerable.Range(1, 4)
+                .Select(i => new AgentStep
+                {
+                    Index = i,
+                    Title = $"步骤{i}",
+                    Status = AgentStepStatus.Pending,
+                })
+                .ToList(),
+        };
+        plan.Steps[0].Status = AgentStepStatus.InProgress;
+        plan.Steps[0].AiResponse = "创建测试文件完成。也完成了步骤2。";
+
+        DetectAndAutoCompleteLaterStepsPublic(agent, plan.Steps[0], plan);
+
+        plan.Steps[1].Status.Should().Be(AgentStepStatus.Completed);
+        plan.CurrentStepIndex.Should().Be(2);
     }
 
     #endregion
@@ -1271,11 +1363,11 @@ public class EditAgentTests
 
     // ──────────── Reflection helpers for testing private methods ────────────
 
-    private static void DetectAndAutoCompleteLaterStepsPublic(EditAgent agent, AgentStep completedStep, AgentTaskPlan plan, string? thinkingContent = null)
+    private static void DetectAndAutoCompleteLaterStepsPublic(EditAgent agent, AgentStep completedStep, AgentTaskPlan plan)
     {
         var method = typeof(EditAgent).GetMethod("DetectAndAutoCompleteLaterSteps",
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        method!.Invoke(agent, new object[] { completedStep, plan, thinkingContent });
+        method!.Invoke(agent, new object[] { completedStep, plan });
     }
 
     private static AgentTaskPlan CreateSingleStepPlanPublic(string userMessage)
