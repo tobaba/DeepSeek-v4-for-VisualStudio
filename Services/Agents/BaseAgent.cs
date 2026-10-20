@@ -686,11 +686,26 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         public List<ChatApiMessage>? SnapshotHandoffCacheMessages(AgentResult? completedResult)
         {
             var snapshot = SnapshotHandoffCacheMessages();
+            EnsureCompletedAssistantInHandoffPrefix(snapshot, completedResult);
+            return snapshot;
+        }
+
+        /// <summary>
+        /// 确保源 Agent 的最终回答作为 assistant 消息位于 Handoff 前缀末尾。
+        /// 该方法会去重，并跳过已经由 request_handoff 工具链表达完成的移交。
+        /// </summary>
+        /// <param name="snapshot">待补充的 Handoff 前缀；可为 null。</param>
+        /// <param name="completedResult">源 Agent 已完成的执行结果。</param>
+        /// <returns>是否新增了 assistant 消息。</returns>
+        internal static bool EnsureCompletedAssistantInHandoffPrefix(
+            List<ChatApiMessage>? snapshot,
+            AgentResult? completedResult)
+        {
             if (snapshot == null
                 || completedResult == null
                 || string.IsNullOrWhiteSpace(completedResult.Content))
             {
-                return snapshot;
+                return false;
             }
 
             int lastAssistantIndex = snapshot.FindLastIndex(
@@ -704,7 +719,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                 if (string.Equals(message.Role, "tool", StringComparison.Ordinal)
                     && string.Equals(message.Name, "request_handoff", StringComparison.OrdinalIgnoreCase))
                 {
-                    return snapshot;
+                    return false;
                 }
             }
 
@@ -714,7 +729,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                     completedResult.Content.Trim(),
                     StringComparison.Ordinal))
             {
-                return snapshot;
+                return false;
             }
 
             snapshot.Add(new ChatApiMessage
@@ -723,7 +738,7 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                 Content = completedResult.Content,
                 ReasoningContent = completedResult.ReasoningContent,
             });
-            return snapshot;
+            return true;
         }
 
         /// <summary>
@@ -3222,8 +3237,10 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             targetAgent.Context = context;
             context.IsSummaryOnlyHandoff = handoff.IsSummaryOnly;
 
-            // 如果热链路上尚未消费 ForwardedMessages，优先使用 Handoff 中携带的快照。
-            if (context.ForwardedMessages == null && handoff.ForwardedMessages != null)
+            // Handoff 携带的快照是调用方刚刚基于 completedResult 生成的最终版本，
+            // 必须优先于 Context 中可能残留的源 Agent 旧快照（例如 build_solution 成功后保存的列表）；
+            // 否则目标 Agent 会丢掉刚追加的源 Agent 最终 assistant 回答。
+            if (handoff.ForwardedMessages != null)
                 context.ForwardedMessages = CloneApiMessages(handoff.ForwardedMessages);
 
             // ── 真移交：允许目标 Agent 首轮复用移交前缀（含身份边界提示语义）──

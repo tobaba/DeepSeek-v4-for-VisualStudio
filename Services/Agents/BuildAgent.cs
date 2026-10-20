@@ -197,18 +197,16 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                     result.Plan = context.ActivePlan;
                     result.FileChanges = context.ActivePlan.ChangedFiles;
 
-                    // ── 构建详细的 Handoff Prompt（包含文件变更统计、步骤详情）──
-                    string summaryPrompt = AppendBuildResult(
-                        BuildAskHandoffPrompt(context.ActivePlan), aiResponse);
-                    result.Handoff = CreateAskSummaryHandoff(summaryPrompt);
+                    // 计划统计与构建结果由源 Agent 的 assistant 消息承载；
+                    // 总结 user 只保留纯指令，避免把结构化执行数据重复塞进用户消息。
+                    result.Handoff = CreateAskSummaryHandoff(
+                        L["agent.summary.handoffUserPrompt"]);
                 }
                 else
                 {
                     // ── 无计划上下文时也移交 Ask 生成总结 ──
-                    string summaryPrompt = AppendBuildResult(
-                        L["agent.build.handoffAskPrompt"] ?? "请总结以上构建结果。",
-                        aiResponse);
-                    result.Handoff = CreateAskSummaryHandoff(summaryPrompt);
+                    result.Handoff = CreateAskSummaryHandoff(
+                        L["agent.summary.handoffUserPrompt"]);
                 }
 
                 result.Logs.AddRange(_logs);
@@ -329,78 +327,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                     return dir;
             }
             return string.Empty;
-        }
-
-        /// <summary>
-        /// 构建指向 AskAgent 的 Handoff Prompt，包含文件变更统计和步骤执行详情。
-        /// 确保 BuildAgent→AskAgent 路径与 EditAgent→AskAgent 路径有相同的信息密度。
-        /// </summary>
-        private static string BuildAskHandoffPrompt(AgentTaskPlan plan)
-        {
-            var L = LocalizationService.Instance;
-            var sb = new StringBuilder();
-
-            sb.AppendLine(L["agent.edit.handoffAskPrompt"]);
-            sb.AppendLine();
-            sb.AppendLine($"**{L["edit.summary.taskLabel"]}**: {plan.Title}");
-            sb.AppendLine($"**{L["edit.summary.fileCount"]}**: {plan.ChangedFiles.Count}");
-            sb.AppendLine();
-
-            // ── 合并相同文件的变更记录 ──
-            if (plan.ChangedFiles.Count > 0)
-            {
-                var mergedFiles = plan.ChangedFiles
-                    .GroupBy(c => NormalizePath(c.FilePath), StringComparer.OrdinalIgnoreCase)
-                    .Select(g => new
-                    {
-                        FileName = Path.GetFileName(g.First().FilePath),
-                        LinesAdded = g.Sum(c => c.LinesAdded),
-                        LinesRemoved = g.Sum(c => c.LinesRemoved),
-                    })
-                    .ToList();
-
-                sb.AppendLine(L.Format("edit.summary.changeStats",
-                    mergedFiles.Sum(c => c.LinesAdded),
-                    mergedFiles.Sum(c => c.LinesRemoved),
-                    mergedFiles.Count));
-                sb.AppendLine();
-                sb.AppendLine(L["edit.summary.modifiedFiles"]);
-                foreach (var file in mergedFiles)
-                {
-                    sb.AppendLine($"- **{file.FileName}** (+{file.LinesAdded} -{file.LinesRemoved})");
-                }
-                sb.AppendLine();
-            }
-
-            // ── 步骤执行情况 ──
-            if (plan.Steps.Count > 0)
-            {
-                sb.AppendLine("## 步骤执行情况");
-                foreach (var step in plan.Steps)
-                {
-                    string statusIcon = step.Status == AgentStepStatus.Completed ? "✅"
-                        : step.Status == AgentStepStatus.Failed ? "❌"
-                        : step.Status == AgentStepStatus.Skipped ? "⏭️"
-                        : "🔄";
-                    string summary = !string.IsNullOrWhiteSpace(step.ResultSummary)
-                        ? step.ResultSummary!
-                        : "(无)";
-                    sb.AppendLine($"- {statusIcon} **步骤 {step.Index}**: {step.Title} — {summary}");
-                }
-                sb.AppendLine();
-            }
-
-            // ── 最终构建通过结论（权威覆盖，防止 AI 引用早期 Error: 步骤状态）──
-            if (plan.FinalBuildSucceeded)
-            {
-                sb.AppendLine(L["agent.build.handoffFinalPassed"]);
-                sb.AppendLine();
-            }
-
-            // ── 注明构建已完成 ──
-            sb.AppendLine(" 构建验证已完成，请生成最终变更总结。");
-
-            return sb.ToString();
         }
 
         /// <summary>

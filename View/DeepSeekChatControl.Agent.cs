@@ -667,12 +667,41 @@ namespace DeepSeek_v4_for_VisualStudio.View
             AgentHandoff handoff,
             AgentResult? completedSourceResult = null)
         {
-            if (handoff.ForwardedMessages != null)
+            if (handoff.ForwardedMessages == null)
+            {
+                handoff.ForwardedMessages = completedSourceResult == null
+                    ? _activeAgent?.SnapshotHandoffCacheMessages()
+                    : _activeAgent?.SnapshotHandoffCacheMessages(completedSourceResult);
                 return;
+            }
 
-            handoff.ForwardedMessages = completedSourceResult == null
-                ? _activeAgent?.SnapshotHandoffCacheMessages()
-                : _activeAgent?.SnapshotHandoffCacheMessages(completedSourceResult);
+            // 已有快照也必须补入源 Agent 最终回答；例如 build_solution 成功时
+            // Context.ForwardedMessages 会先被保存，此时 Handoff 不是 null 但还缺最终 assistant。
+            BaseAgent.EnsureCompletedAssistantInHandoffPrefix(
+                handoff.ForwardedMessages,
+                completedSourceResult);
+        }
+
+        /// <summary>
+        /// 将链回要求合并到现有 Handoff。
+        /// Ask 链回不再把源 Agent 执行结果和原始请求重新拼进 user 消息：
+        /// 执行结果已作为 assistant 前缀存在，原始请求也在历史中；这里只追加纯续接指令。
+        /// </summary>
+        private static void MergeChainBackIntoHandoff(AgentHandoff handoff, AgentHandoff chainBack)
+        {
+            if (handoff.TargetAgent == AgentType.Ask)
+            {
+                handoff.Prompt = (handoff.Prompt ?? string.Empty).TrimEnd()
+                    + "\n\n"
+                    + LocalizationService.Instance["agent.chainback.summaryContinuationPrompt"];
+            }
+            else
+            {
+                handoff.Prompt = (handoff.Prompt ?? string.Empty)
+                    + "\n\n" + chainBack.Prompt;
+            }
+
+            handoff.IsChainBackContinuation = true;
         }
 
         private async Task RunAgentWorkflowAsync(
@@ -1040,11 +1069,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
                         else if (agentResult.Handoff.AutoSend
                             && agentResult.Handoff.TargetAgent == chainBack.TargetAgent)
                         {
-                            // 目标 Agent 已准备移交回源 Agent；把链回续答要求合并进该 Handoff，
-                            // 保留原有的总结/执行上下文，不额外增加一次调用。
-                            agentResult.Handoff.Prompt = (agentResult.Handoff.Prompt ?? string.Empty)
-                                + "\n\n" + chainBack.Prompt;
-                            agentResult.Handoff.IsChainBackContinuation = true;
+                            // 目标 Agent 已准备移交回源 Agent；合并纯续接要求，不额外增加一次调用。
+                            MergeChainBackIntoHandoff(agentResult.Handoff, chainBack);
                             pendingChainBack = null;
                             Logger.Info($"[Agent] Handoff 链回并入: → {agentResult.Handoff.TargetAgent} ({agentResult.Handoff.Label})");
                         }

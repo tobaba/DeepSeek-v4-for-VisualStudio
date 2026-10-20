@@ -2351,69 +2351,13 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
                 };
             }
 
-            // 构建包含所有统计数据的 handoff prompt
-            var sb = new StringBuilder();
-            sb.AppendLine(L["agent.edit.handoffAskPrompt"]);
-            sb.AppendLine();
-            sb.AppendLine($"**{L["edit.summary.taskLabel"]}**: {plan.Title}");
-            sb.AppendLine();
-
-            // ── 步骤执行情况（优先：描述完成了什么）──
-            if (plan.Steps.Count > 0)
-            {
-                sb.AppendLine(L["edit.summary.stepExecutionHeader"]);
-                foreach (var step in plan.Steps)
-                {
-                    string statusIcon = step.Status == AgentStepStatus.Completed ? "✅"
-                        : step.Status == AgentStepStatus.Failed ? "❌"
-                        : step.Status == AgentStepStatus.Skipped ? "⏭️"
-                        : "🔄";
-                    string summary = !string.IsNullOrWhiteSpace(step.ResultSummary)
-                        ? step.ResultSummary!
-                        : LocalizationService.Instance["agent.step.noDetail"];
-                    sb.AppendLine(L.Format("edit.summary.stepLineFormat",
-                        statusIcon, step.Index, step.Title, summary));
-                }
-                sb.AppendLine();
-            }
-
-            // ── 文件变更统计（辅助参考）──
-            if (plan.ChangedFiles.Count > 0)
-            {
-                var mergedFiles = plan.ChangedFiles
-                    .GroupBy(c => NormalizePath(c.FilePath), StringComparer.OrdinalIgnoreCase)
-                    .Select(g => new
-                    {
-                        FileName = Path.GetFileName(g.First().FilePath),
-                        LinesAdded = g.Sum(c => c.LinesAdded),
-                        LinesRemoved = g.Sum(c => c.LinesRemoved),
-                    })
-                    .ToList();
-
-                sb.AppendLine(L.Format("edit.summary.changeStats",
-                    mergedFiles.Sum(c => c.LinesAdded),
-                    mergedFiles.Sum(c => c.LinesRemoved),
-                    mergedFiles.Count));
-                sb.AppendLine();
-                sb.AppendLine(L["edit.summary.modifiedFiles"]);
-                foreach (var file in mergedFiles)
-                {
-                    sb.AppendLine($"- **{file.FileName}** (+{file.LinesAdded} -{file.LinesRemoved})");
-                }
-                sb.AppendLine();
-            }
-
-            // 编译警告（如果有）
-            if (HasBuildWarningsInLogs())
-            {
-                sb.AppendLine(LocalizationService.Instance["agent.edit.handoffBuildWarningHint"]);
-            }
-
+            // 计划统计、步骤结果和构建状态由源 Agent 的 assistant 消息承载；
+            // 总结 user 只保留纯指令，不能把这些结构化执行结果重新塞进用户消息。
             return new AgentHandoff
             {
                 Label = L["agent.edit.handoffAskLabel"],
                 TargetAgent = AgentType.Ask,
-                Prompt = sb.ToString(),
+                Prompt = L["agent.summary.handoffUserPrompt"],
                 AutoSend = true,
                 ShowContinueOn = false,
             };

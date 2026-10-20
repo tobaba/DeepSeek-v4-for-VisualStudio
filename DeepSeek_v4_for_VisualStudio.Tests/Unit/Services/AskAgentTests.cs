@@ -728,6 +728,51 @@ public class AskAgentTests
     }
 
     [Fact]
+    public void EnsureCompletedAssistantInHandoffPrefix_AppendsToExistingSnapshot()
+    {
+        var snapshot = new List<ChatApiMessage>
+        {
+            new() { Role = "system", Content = "stable system" },
+            new() { Role = "user", Content = "补齐执行器测试" },
+            new()
+            {
+                Role = "assistant",
+                Content = "构建验证中",
+                ToolCalls = new List<ToolCall>
+                {
+                    new()
+                    {
+                        Id = "call_build",
+                        Type = "function",
+                        Function = new ToolCallFunction { Name = "build_solution", Arguments = "{}" },
+                    },
+                },
+            },
+            new() { Role = "tool", ToolCallId = "call_build", Name = "build_solution", Content = "构建成功" },
+        };
+
+        bool appended = BaseAgent.EnsureCompletedAssistantInHandoffPrefix(
+            snapshot,
+            new AgentResult { Content = "源 Agent 最终回答", ReasoningContent = "完成验证。" });
+
+        appended.Should().BeTrue();
+        snapshot.Should().HaveCount(5);
+        snapshot[snapshot.Count - 1].Role.Should().Be("assistant");
+        snapshot[snapshot.Count - 1].Content.Should().Be("源 Agent 最终回答");
+    }
+
+    [Fact]
+    public void SummaryHandoffUserPrompt_IsInstructionOnly()
+    {
+        string prompt = LocalizationService.Instance["agent.summary.handoffUserPrompt"];
+
+        prompt.Should().NotContain("步骤执行情况");
+        prompt.Should().NotContain("修改的文件");
+        prompt.Should().NotContain("链回原始请求");
+        prompt.Should().Contain("最终总结");
+    }
+
+    [Fact]
     public void BuildContextualPrompt_WithFileContext_IncludesItWithoutQuestionWrapper()
     {
         var context = new AgentContext

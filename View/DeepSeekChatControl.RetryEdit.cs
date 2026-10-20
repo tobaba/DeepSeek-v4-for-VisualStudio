@@ -440,9 +440,8 @@ namespace DeepSeek_v4_for_VisualStudio.View
                         else if (agentResult.Handoff.AutoSend
                             && agentResult.Handoff.TargetAgent == chainBack.TargetAgent)
                         {
-                            agentResult.Handoff.Prompt = (agentResult.Handoff.Prompt ?? string.Empty)
-                                + "\n\n" + chainBack.Prompt;
-                            agentResult.Handoff.IsChainBackContinuation = true;
+                            // 合并纯续接要求；源 Agent 执行结果已作为 assistant 前缀存在。
+                            MergeChainBackIntoHandoff(agentResult.Handoff, chainBack);
                             pendingChainBack = null;
                             Logger.Info($"[AgentHandoff] Handoff 链回并入: → {agentResult.Handoff.TargetAgent} ({agentResult.Handoff.Label})");
                         }
