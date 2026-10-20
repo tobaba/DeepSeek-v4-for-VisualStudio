@@ -8,8 +8,9 @@ namespace DeepSeek_v4_for_VisualStudio.Services
     /// <summary>
     /// 测试服务接口 — 为 Agent 提供"运行单元测试"能力。
     ///
-    /// 与 <see cref="IBuildService"/> 的分工：编译由 VS SDK（build_solution）负责，
-    /// 本服务只负责在已构建产物上执行测试，不隐式触发构建。
+    /// 与 <see cref="IBuildService"/> 的分工：本服务自带构建，跑测试时会先编译测试项目
+    /// （含其依赖项目）再执行用例，因此"验证"可以一步完成，无需在计划里单列构建步骤。
+    /// 需要 VS SDK 原生编译（例如修复编译错误）时仍走 build_solution。
     /// </summary>
     public interface ITestService
     {

@@ -15,6 +15,47 @@ public class RunTestsToolTests
         new RunTestsTool().Name.Should().Be("run_tests");
     }
 
+    /// <summary>
+    /// 回归：工具实例必须携带可用的测试服务。
+    /// WPF 控件曾直接 new BuiltInToolService(...) 漏传 ITestService，
+    /// 导致 run_tests 在生产环境永远返回"测试服务未初始化"。
+    /// 这里通过真实执行路径断言：缺少服务时返回明确错误，注入了服务时不应再报未初始化。
+    /// </summary>
+    [Fact]
+    public async Task ExecuteAsync_WithoutService_ReportsServiceNotInit()
+    {
+        string result = await new RunTestsTool(null).ExecuteAsync(
+            new System.Collections.Generic.Dictionary<string, System.Text.Json.JsonElement>(),
+            null);
+
+        result.Should().Contain("run_tests");
+        result.Should().Contain("Error:");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_WithService_DoesNotReportServiceNotInit()
+    {
+        // 用独占的空目录，避免扫描到并行用例创建的临时工程文件
+        string dir = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(), "ds-runtests-" + System.Guid.NewGuid().ToString("N"));
+        System.IO.Directory.CreateDirectory(dir);
+
+        try
+        {
+            string result = await new RunTestsTool(new TestService()).ExecuteAsync(
+                new System.Collections.Generic.Dictionary<string, System.Text.Json.JsonElement>(),
+                dir);
+
+            // 空目录里没有测试项目，应返回"没有测试项目"而不是"服务未初始化"
+            result.Should().NotContain("测试服务未初始化");
+            result.Should().StartWith(RunTestsTool.NoTestProjectMarker);
+        }
+        finally
+        {
+            System.IO.Directory.Delete(dir, recursive: true);
+        }
+    }
+
     [Fact]
     public void FormatResult_AllPassed_ReportsCounts()
     {

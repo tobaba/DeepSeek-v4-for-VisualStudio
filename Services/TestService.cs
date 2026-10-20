@@ -16,8 +16,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services
     ///
     /// 设计取舍：
     /// - 只跑 .NET 测试项目。C++ 测试需要按框架指定 test adapter 路径，留待后续扩展。
-    /// - 不隐式构建：测试程序集应由 build_solution 先编译好，这里只负责执行，
-    ///   避免与"编译走 VS SDK"的既有分工冲突。
+    /// - 自带构建：dotnet test 会先编译测试项目（含其依赖项目）再运行用例，
+    ///   这样"跑测试"本身就是一次完整验证，不需要额外先调 build_solution。
     /// - 不解析控制台文本，而是用 TRX 日志（XML）取结构化结果，避免被本地化输出影响。
     /// </summary>
     public partial class TestService : ITestService
@@ -274,8 +274,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             var args = new StringBuilder();
             args.Append("test \"").Append(projectPath).Append('"');
 
-            // 测试程序集由 build_solution 预先编译，这里不重复构建
-            args.Append(" --no-build");
+            // 自带构建：dotnet test 默认先编译测试项目（含其依赖项目）再运行，
+            // 这样"跑测试"是一个自洽动作，不需要在计划里单列"构建"步骤。
             args.Append(" --nologo");
             args.Append(" --logger \"trx;LogFileName=").Append(trxPath).Append('"');
 

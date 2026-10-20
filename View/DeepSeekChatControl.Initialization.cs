@@ -67,7 +67,10 @@ namespace DeepSeek_v4_for_VisualStudio.View
             // ── 创建内置工具服务 ──
             var buildService = new BuildService();
             _memoryService = new MemoryService();
-            _builtInToolService = new BuiltInToolService(_mcpManager, _webSearchService, buildService, _memoryService);
+            // 测试服务与构建服务并列注入：漏传会让 run_tests 永久返回"测试服务未初始化"。
+            _builtInToolService = new BuiltInToolService(
+                _mcpManager, _webSearchService, buildService, _memoryService,
+                skillService: null, testService: new TestService());
             _builtInToolService.CurrentSolutionPath = _solutionPath;
             _builtInToolService.ApiService = _apiService; // 注入 API 服务以启用 apply_patch Healing
             // 联网搜索开关只决定 web_search 工具是否加入工具集，此处按当前开关状态同步。
