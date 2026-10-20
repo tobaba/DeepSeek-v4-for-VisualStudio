@@ -617,8 +617,13 @@ namespace DeepSeek_v4_for_VisualStudio.Services
                 ? $"<button id='edit-btn-{messageIndex}' class='msg-action-btn edit-btn' onclick='window.__editMessage({messageIndex})' title='{L["chat.html.editButtonTitle"]}'>{EscapeHtml(L["chat.html.editButton"])}</button>"
                 : "";
 
-            // ── 文件附件 
-            string fileBlocksHtml = BuildFileAttachmentHtml(attachedFiles);
+            // ── 文件附件 ──
+            // 图片已经通过 attached-images 渲染为缩略图时，不再重复显示“按需读取”文件标签。
+            string fileBlocksHtml = BuildFileAttachmentHtml(
+                FilterFileAttachmentsForThumbnails(
+                    attachedFiles,
+                    attachedImageFileNames,
+                    attachedImagePaths));
             string imagePreviewHtml = BuildImageThumbnailHtml(
                 attachedImageDataUris,
                 attachedImageFileNames,
@@ -646,10 +651,13 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             // ── 气泡 + 头像水平对齐（无标签）
             sb.Append("<div class='msg-wrapper user'>");
             sb.Append("<div class='msg-bubble user'>");
+            // 蓝色气泡必须包住附件缩略图和正文；编辑按钮保留在气泡外。
+            sb.Append("<div class='user-message-bubble'>");
             sb.Append(fileBlocksHtml);
             sb.Append(imagePreviewHtml);
             sb.Append(agentBadgeHtml);
             sb.Append($"<div class='msg-content' id='msg-body-{messageIndex}'>{body}</div>");
+            sb.Append("</div>");
             sb.Append(editBtnHtml);
             sb.Append("</div>");
             sb.Append("<div class='msg-avatar user'>U</div>");
@@ -728,6 +736,46 @@ namespace DeepSeek_v4_for_VisualStudio.Services
             }
             sb.Append("</div>");
             return sb.ToString();
+        }
+
+        /// <summary>
+        /// 过滤已经由缩略图展示的图片附件，避免同一图片同时出现文件标签和缩略图。
+        /// 只按路径或文件名匹配，不影响普通文件、PDF 或尚未生成缩略图的图片。
+        /// </summary>
+        private static List<FileParseResult>? FilterFileAttachmentsForThumbnails(
+            List<FileParseResult>? attachedFiles,
+            IReadOnlyList<string>? imageFileNames,
+            IReadOnlyList<string>? imagePaths)
+        {
+            if (attachedFiles == null || attachedFiles.Count == 0)
+                return null;
+
+            var thumbnailPaths = new HashSet<string>(
+                (imagePaths ?? Array.Empty<string>()).Where(p => !string.IsNullOrWhiteSpace(p)),
+                StringComparer.OrdinalIgnoreCase);
+            var thumbnailNames = new HashSet<string>(
+                (imageFileNames ?? Array.Empty<string>()).Where(n => !string.IsNullOrWhiteSpace(n)),
+                StringComparer.OrdinalIgnoreCase);
+
+            if (thumbnailPaths.Count == 0 && thumbnailNames.Count == 0)
+                return attachedFiles;
+
+            var filtered = attachedFiles.Where(file =>
+            {
+                string extension = string.IsNullOrWhiteSpace(file.FileExtension)
+                    ? Path.GetExtension(file.FileName)
+                    : file.FileExtension;
+                if (!IsImageExtension(extension))
+                    return true;
+
+                bool hasThumbnail = (!string.IsNullOrWhiteSpace(file.FilePath)
+                        && thumbnailPaths.Contains(file.FilePath))
+                    || (!string.IsNullOrWhiteSpace(file.FileName)
+                        && thumbnailNames.Contains(file.FileName));
+                return !hasThumbnail;
+            }).ToList();
+
+            return filtered.Count > 0 ? filtered : null;
         }
 
         /// <summary>

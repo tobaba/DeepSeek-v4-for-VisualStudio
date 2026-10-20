@@ -732,6 +732,36 @@ public class ChatHtmlServiceTests
     #region 用户消息 @ / 蓝色渲染
 
     [Fact]
+    public void BuildUserMessageHtml_ImageOnly_RendersOneThumbnailInsideUserBubbleWithoutFileReference()
+    {
+        var image = new FileParseResult
+        {
+            FileName = "clipboard_20261021_004426_416.png",
+            FileExtension = ".png",
+            FilePath = @"C:\Temp\clipboard_20261021_004426_416.png",
+            Success = true,
+        };
+
+        string html = ChatHtmlService.BuildUserMessageHtml(
+            string.Empty,
+            new List<FileParseResult> { image },
+            messageIndex: 7,
+            attachedImageDataUris: new List<string> { "data:image/png;base64,AAAA" },
+            attachedImageFileNames: new List<string> { image.FileName },
+            attachedImagePaths: new List<string> { image.FilePath });
+
+        html.Should().Contain("class='msg-bubble user'");
+        html.Should().Contain("class='user-message-bubble'");
+        html.Should().Contain("class='attached-image-thumb'");
+        html.Should().NotContain("file-attachment-reference",
+            "已有缩略图时不应再渲染重复的“按需读取”图片文件标签");
+        System.Text.RegularExpressions.Regex.Matches(html, "class='attached-image-thumb'")
+            .Count.Should().Be(1);
+        html.IndexOf("class='user-message-bubble'", StringComparison.Ordinal)
+            .Should().BeLessThan(html.IndexOf("class='attached-image-thumb'", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void BuildUserMessageHtml_AgentToken_WrapsInBlueMentionSpan()
     {
         string html = ChatHtmlService.BuildUserMessageHtml("@ask");
