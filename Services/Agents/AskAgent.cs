@@ -78,7 +78,8 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
         /// 
         /// 说明：Git/终端只读边界、各工具的参数与使用条件已下沉到对应工具的
         /// description（见 tool.git.desc / tool.run_in_terminal.desc 等），
-        /// 这里只保留角色定位、探索策略、记忆与移交规则，避免与工具描述重复而浪费 token。
+        /// 这里只保留角色定位、探索策略、记忆、执行类请求的边界与移交规则，
+        /// 避免与工具描述重复而浪费 token。
         /// </summary>
         private static string BuildSystemPrompt()
         {
@@ -295,31 +296,6 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             // 正常完成，或虽未完成但已停止推进（存在失败步骤 / 已取消）→ 都需要出总结
             return plan.IsCompleted || plan.IsCancelled
                 || plan.Steps.Any(s => s.Status == AgentStepStatus.Failed);
-        }
-
-        /// <summary>
-        /// 把用于日志的提示词压缩成一行摘要。
-        /// 提示词常达数 KB（含步骤清单、复用历史提示、模板说明），
-        /// 原文写日志既刷屏又难以定位，故只保留首行与总长度。
-        /// </summary>
-        /// <param name="message">原始用户消息或 Handoff 提示词。</param>
-        private static string SummarizeForLog(string? message)
-        {
-            if (string.IsNullOrWhiteSpace(message))
-                return "(empty)";
-
-            string normalized = message.Replace("\r\n", "\n").Trim();
-            int newlineIdx = normalized.IndexOf('\n');
-            string firstLine = newlineIdx >= 0 ? normalized.Substring(0, newlineIdx).Trim() : normalized;
-
-            const int maxFirstLine = 120;
-            if (firstLine.Length > maxFirstLine)
-                firstLine = firstLine.Substring(0, maxFirstLine) + "…";
-
-            int totalLines = normalized.Split('\n').Length;
-            return totalLines > 1
-                ? $"{firstLine} …(共 {normalized.Length} 字符 / {totalLines} 行)"
-                : firstLine;
         }
 
         /// <summary>

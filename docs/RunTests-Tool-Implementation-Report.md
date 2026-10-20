@@ -174,7 +174,15 @@ dotnet test <项目> --nologo --logger "trx;LogFileName=<临时文件>"
 
 ### 4.4 其他后续项
 
-- 只读 Agent（Ask / Explore）目前不提供 `run_tests`；是否放行留给后续决策（跑测试本身不改文件）
+顺带修复了 Ask 移交到 Build 后**内部提示词泄漏到 UI 时间线**的问题：Build / Plan / Explore 的
+启动日志原先把整段入参（用户请求或 Handoff 提示词）经 `AddLog` 广播，而 `AddLog` 会渲染进过程折叠块，
+于是用户会看到本该只给模型的指令（例如测试移交时那句「优先复用对话历史中已读取的文件内容…」）。
+现在原文只经 `SummarizeForLog` 压缩后写日志文件，时间线固定使用不含占位符的
+`agent.log.*StartedShort` 文案；`SummarizeForLog` 已从 AskAgent 提升到 `BaseAgent` 供四个 Agent 共用。
+
+- 只读 Agent（Ask / Explore）不提供 `run_tests` / `build_solution`：这两个工具虽出现在全体 Agent 共用的工具
+  JSON 里（前缀缓存需要固定工具表），但调用会被客户端白名单拒绝。Ask 的提示词已写明这一点，并把**单纯的
+  构建 / 测试请求**路由给 Build Agent（它同时持有 `build_solution` 与 `run_tests`），改代码类请求仍交给 Edit Agent
 - 覆盖率：VS 安装目录已有 `Microsoft.CodeCoverage.IO.dll` + `datacollector.exe`，
   但产物 vsix 未打包它们，若要出覆盖率需一并处理打包
 - 多测试项目场景（.NET 与 C++ 同样）目前要求显式指定 `project`；

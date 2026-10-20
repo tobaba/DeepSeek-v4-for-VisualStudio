@@ -171,6 +171,57 @@ public class AskAgentTests
         AskAgent.AskTools.Should().NotContain("create_directory");
         AskAgent.AskTools.Should().NotContain("delete_file");
         AskAgent.AskTools.Should().NotContain("apply_patch");
+
+        // 执行类工具同样不能在 Ask 工具集里：
+        // Ask 无法跑测试/构建，缺失的 run_tests 曾让模型在"能不能调用"上反复摇摆。
+        AskAgent.AskTools.Should().NotContain("run_tests");
+        AskAgent.AskTools.Should().NotContain("build_solution");
+    }
+
+    #endregion
+
+    #region Execution Boundary Prompt
+
+    /// <summary>
+    /// 回归：Ask 系统提示词必须显式说明"没有 run_tests / build_solution，遇到执行类请求直接移交"。
+    /// 否则模型会看到用户要求跑测试、又找不到对应工具，进而在思考里反复自我说服。
+    /// </summary>
+    [Fact]
+    public void SystemPrompt_StatesExecutionToolsAreUnavailableAndHandoffIsRequired()
+    {
+        string prompt = LocalizationService.Instance["agent.ask.systemPromptFragment"]
+            + LocalizationService.Instance["system.agent.askPromptFragment"];
+
+        // 只断言语言无关的标识符：工具名与移交目标，避免在非中文语言环境下误报。
+        prompt.Should().Contain("run_tests");
+        prompt.Should().Contain("build_solution");
+        prompt.Should().Contain("request_handoff");
+        prompt.Should().Contain("Edit");
+        // 明确禁止用终端顶替专用工具（否则模型会用 run_in_terminal 绕一圈）
+        prompt.Should().Contain("run_in_terminal");
+    }
+
+    /// <summary>
+    /// 回归：单纯的构建/测试请求要交给 Build Agent（它同时持有 build_solution 与 run_tests），
+    /// 而不是 Edit —— 前者只需一个结果，后者才是改代码的场景。
+    /// </summary>
+    [Fact]
+    public void SystemPrompt_RoutesPlainBuildAndTestRequestsToBuildAgent()
+    {
+        string prompt = LocalizationService.Instance["system.agent.askPromptFragment"];
+
+        // 移交清单里，构建/测试两项的目标必须是 Build
+        prompt.Should().Contain("Build");
+        prompt.Should().Contain("run_tests");
+        prompt.Should().Contain("build_solution");
+
+        // 移交清单里「运行测试」那一条必须指向 Build（断言语言无关：只找含 run_tests 的清单项）
+        var testLine = prompt
+            .Split('\n')
+            .FirstOrDefault(l => l.TrimStart().StartsWith("- ") && l.Contains("run_tests"));
+        testLine.Should().NotBeNull("移交清单必须给出运行测试的目标 Agent");
+        testLine!.Should().Contain("Build", "运行测试应移交给 Build Agent");
+        testLine.Should().NotContain("Edit", "运行测试不应再移交给 Edit Agent");
     }
 
     #endregion
@@ -844,7 +895,8 @@ const y = 2;
 
     private static string SummarizeForLogPublic(string? message)
     {
-        var method = typeof(AskAgent).GetMethod("SummarizeForLog",
+        // SummarizeForLog 已提升到 BaseAgent，供 Ask/Build/Plan/Explore 共用
+        var method = typeof(BaseAgent).GetMethod("SummarizeForLog",
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
         return (string)method!.Invoke(null, new object?[] { message })!;
     }
@@ -915,6 +967,29 @@ const y = 2;
         result.Should().NotContain("**任务**");
         // 首行本身被保留（它是提示词的入口句），但整段不得原样透出
         result.Length.Should().BeLessThan(prompt.Length);
+    }
+
+    /// <summary>
+    /// 回归：Agent 启动行必须走不带 {0} 的 *Short 键写时间线。
+    ///
+    /// 原实现把整段 Handoff prompt 经 AddLog("INFO", ...) 广播 → 渲染进 UI 过程折叠块，
+    /// 用户会看到本该给 AI 的指令（例如 Build 收到测试请求时那条
+    /// 「优先复用对话历史中已读取的文件内容…」）。
+    /// 现在长文案只写日志文件，时间线固定用短句。
+    /// </summary>
+    [Theory]
+    [InlineData("agent.log.buildStartedShort")]
+    [InlineData("agent.log.planStartedShort")]
+    [InlineData("agent.log.exploreStartedShort")]
+    [InlineData("agent.log.askStartedShort")]
+    public void AgentStartTimelineKeys_AreStaticAndHaveNoPromptPlaceholder(string key)
+    {
+        string text = LocalizationService.Instance[key];
+
+        // 有值（键存在），且不含 {0} 占位符——否则仍会把输入拼进 UI 时间线
+        text.Should().NotStartWith("[", "本地化键必须存在");
+        text.Should().NotContain("{0}", "时间线文案不得包含提示词占位符");
+        text.Length.Should().BeLessThan(120);
     }
 
     [Fact]

@@ -126,13 +126,11 @@ namespace DeepSeek_v4_for_VisualStudio.Services.Agents
             // ── 清理上次执行的移交状态 ──
             PendingHandoffRequest = null;
 
-            // 日志只显示用户消息的第一行（实际任务描述），
-            // 后续行是 PlanAgent 注入的结构上下文等元数据，无需在日志中展示
-            string logMessage = userMessage;
-            int firstNewline = userMessage.IndexOf('\n');
-            if (firstNewline > 0)
-                logMessage = userMessage.Substring(0, firstNewline).TrimEnd('\r');
-            AddLog("INFO", LocalizationService.Instance.Format("agent.log.exploreStarted", logMessage));
+            // 时间线只显示稳定短句：任务描述尾部是 PlanAgent / AskAgent 注入的结构上下文与提示词，
+            // 经 AddLog 会渲染进 UI，把内部提示词显示给用户。原文压缩后只写日志文件。
+            Logger.Info(LocalizationService.Instance.Format(
+                "agent.log.exploreStarted", SummarizeForLog(userMessage)));
+            AddLog("INFO", LocalizationService.Instance["agent.log.exploreStartedShort"]);
 
             var result = new AgentResult
             {
