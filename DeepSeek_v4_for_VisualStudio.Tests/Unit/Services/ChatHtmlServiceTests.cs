@@ -35,6 +35,27 @@ public class ChatHtmlServiceTests
     }
 
     [Fact]
+    public void RenderMarkdownToHtml_Table_WrapsInHorizontalScrollContainer()
+    {
+        string markdown = "| 项 | 性质 | 影响 | 建议 |\n|---|---|---|---|\n| 失败 | 功能缺陷 | 多索引场景 | fix(index) |";
+
+        string result = ChatHtmlService.RenderMarkdownToHtml(markdown);
+
+        result.Should().Contain("<div class=\"table-scroll\"><table>");
+        result.Should().Contain("</table></div>");
+    }
+
+    [Fact]
+    public void BuildInitialPage_IncludesResponsiveTableStyles()
+    {
+        string html = ChatHtmlService.BuildInitialPage(new List<ChatMessage>());
+
+        html.Should().Contain(".table-scroll{");
+        html.Should().Contain("overflow-x:auto");
+        html.Should().Contain("overflow-wrap:anywhere");
+    }
+
+    [Fact]
     public void BuildAssistantDisplayContent_CombinesTimelineAndFinalAnswer()
     {
         string result = ChatHtmlService.BuildAssistantDisplayContent(

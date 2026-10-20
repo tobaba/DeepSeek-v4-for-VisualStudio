@@ -69,6 +69,13 @@ namespace DeepSeek_v4_for_VisualStudio.Services
         private static readonly Regex EventHandlerRegex = new(
             @"\bon\w+\s*=", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+        /// <summary>
+        /// 为 Markdig 生成的表格增加横向滚动容器，防止宽表或超长路径撑破消息气泡。
+        /// </summary>
+        private static readonly Regex MarkdownTableRegex = new(
+            @"<table\b[^>]*>.*?</table>",
+            RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Compiled);
+
 
         #endregion
 
@@ -1125,6 +1132,11 @@ namespace DeepSeek_v4_for_VisualStudio.Services
 
                 // ── 文件名/符号名可点击导航处理 ──
                 htmlContent = MakeFileAndSymbolLinks(htmlContent);
+
+                // ── 宽表格单独横向滚动，避免撑破消息气泡边界 ──
+                htmlContent = MarkdownTableRegex.Replace(
+                    htmlContent,
+                    match => "<div class=\"table-scroll\">" + match.Value + "</div>");
 
                 return htmlContent;
             }
