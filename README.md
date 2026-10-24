@@ -298,7 +298,7 @@ sent to the `/beta/completions` endpoint (256 tokens, temperature 0) with a smal
 as grey ghost text using the editor's own font metrics: <kbd>Tab</kbd> accepts, <kbd>Esc</kbd> dismisses,
 <kbd>Enter</kbd> restarts the timer.
 
-![Inline code completion](https://raw.githubusercontent.com/zmy15/DeepSeek-for-VisualStudio/master/docs/images/en_us/12.gif)
+![Inline code completion](https://raw.githubusercontent.com/zmy15/DeepSeek-for-VisualStudio/master/docs/images/en_us/13.gif)
 
 ---
 
@@ -309,7 +309,7 @@ The extension generates an edit, previews it as a diff, applies it with <kbd>Ent
 <kbd>Esc</kbd>. The binding is scoped to the text editor and does not interfere with the system incremental
 search.
 
-> **Screenshot placeholder (GIF)** — `docs/images/inline-edit.gif`
+![Inline Edit](https://raw.githubusercontent.com/zmy15/DeepSeek-for-VisualStudio/master/docs/images/en_us/12.gif)
 
 ---
 

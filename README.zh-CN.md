@@ -282,7 +282,7 @@ Ask Agent 也可以在多选题不足以决策时，弹出结构化提问卡片�
 （256 token，温度 0），并带有小型 LRU 缓存。建议以灰色幽灵文本渲染，使用编辑器自身字体度量：
 <kbd>Tab</kbd> 接受，<kbd>Esc</kbd> 取消，<kbd>Enter</kbd> 重启定时器。
 
-![内联代码补全](https://raw.githubusercontent.com/zmy15/DeepSeek-for-VisualStudio/master/docs/images/zh_cn/12.gif)
+![内联代码补全](https://raw.githubusercontent.com/zmy15/DeepSeek-for-VisualStudio/master/docs/images/zh_cn/13.gif)
 
 ---
 
@@ -292,7 +292,7 @@ Ask Agent 也可以在多选题不足以决策时，弹出结构化提问卡片�
 扩展会生成修改并以差异形式预览，按 <kbd>Enter</kbd> 应用，按 <kbd>Esc</kbd> 取消。
 该快捷键限定在文本编辑器作用域内，不会影响系统增量搜索。
 
-> **截图占位（动图）** —— `docs/images/inline-edit.gif`
+![内联编辑](https://raw.githubusercontent.com/zmy15/DeepSeek-for-VisualStudio/master/docs/images/zh_cn/12.gif)
 
 ---
 
