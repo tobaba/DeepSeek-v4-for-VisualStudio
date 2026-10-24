@@ -70,8 +70,8 @@ jobs:
         $updates = @(
           @{ Path = 'source.extension.vsixmanifest'; Pattern = '(<Identity\b[^>]*?Version=")[^"]*(")'; Replacement = '${1}' + $version + '${2}' },
           @{ Path = 'DeepSeek_v4_for_VisualStudioPackage.cs'; Pattern = '(public const string Version = ")[^"]*(")'; Replacement = '${1}' + $version + '${2}' },
-          @{ Path = 'README.md'; Pattern = '(version-)[0-9.]+(-blue)'; Replacement = '${1}' + $version + '${2}' },
-          @{ Path = 'README.zh-CN.md'; Pattern = '(version-)[0-9.]+(-blue)'; Replacement = '${1}' + $version + '${2}' },
+          @{ Path = 'README.md'; Pattern = '(badge/VSIX-)[0-9.]+(-success)'; Replacement = '${1}' + $version + '${2}' },
+          @{ Path = 'README.zh-CN.md'; Pattern = '(badge/VSIX-)[0-9.]+(-success)'; Replacement = '${1}' + $version + '${2}' },
           @{ Path = 'benchmark/tasks.sample.json'; Pattern = '("extension_version"\s*:\s*")[^"]*(")'; Replacement = '${1}' + $version + '${2}' }
         )
 
