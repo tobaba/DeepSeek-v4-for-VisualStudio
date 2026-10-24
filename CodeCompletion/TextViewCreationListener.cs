@@ -18,9 +18,26 @@ namespace DeepSeek_v4_for_VisualStudio.CodeCompletion
     /// <summary>
     /// MEF 导出：为每个可编辑代码视图绑定内联预测管理器和命令过滤器。
     /// 这是代码补全功能的入口点。
+    ///
+    /// 内容类型：<c>code</c> 覆盖 C#/VB/F#/Python 等继承自 code 的语言；
+    /// 其余 [ContentType] 覆盖 C/C++（不继承 code）与 JSON/XML/YAML/Markdown 等
+    /// 配置、文档类型。清单集中在 <see cref="DeepSeekCompletionContentTypes"/>。
     /// </summary>
     [Export(typeof(IVsTextViewCreationListener))]
     [ContentType("code")]
+    [ContentType(DeepSeekCompletionContentTypes.Cpp)]
+    [ContentType(DeepSeekCompletionContentTypes.Java)]
+    [ContentType(DeepSeekCompletionContentTypes.Sql)]
+    [ContentType(DeepSeekCompletionContentTypes.Cmake)]
+    [ContentType(DeepSeekCompletionContentTypes.Json)]
+    [ContentType(DeepSeekCompletionContentTypes.Xml)]
+    [ContentType(DeepSeekCompletionContentTypes.Yaml)]
+    [ContentType(DeepSeekCompletionContentTypes.Ini)]
+    [ContentType(DeepSeekCompletionContentTypes.Html)]
+    [ContentType(DeepSeekCompletionContentTypes.Css)]
+    [ContentType(DeepSeekCompletionContentTypes.Razor)]
+    [ContentType(DeepSeekCompletionContentTypes.Markdown)]
+    [ContentType(DeepSeekCompletionContentTypes.PlainText)]
     [TextViewRole(PredefinedTextViewRoles.Editable)]
     internal class TextViewCreationListener : IVsTextViewCreationListener
     {
@@ -93,6 +110,17 @@ namespace DeepSeek_v4_for_VisualStudio.CodeCompletion
             }
 
             Logger.Info(LocalizationService.Instance["autocomplete.viewCreated"]);
+
+            // 记录内容类型：便于确认目标文件走的是哪条内容类型分支
+            // （C/C++、json、markdown 等非 code 类型依赖显式 [ContentType] 声明）。
+            try
+            {
+                Logger.Info($"[补全] 内容类型=[{view.TextBuffer.ContentType.TypeName}]");
+            }
+            catch (Exception ex)
+            {
+                Logger.Info($"[补全] 读取内容类型失败（忽略）: {ex.Message}");
+            }
 
             // 修复 VS 挂起 (perfwatsonhang ~700 hits)：
             // 旧实现通过 ThreadHelper.JoinableTaskFactory.Run(...) → LoadPackage 同步加载包。
