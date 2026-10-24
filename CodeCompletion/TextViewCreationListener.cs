@@ -20,8 +20,9 @@ namespace DeepSeek_v4_for_VisualStudio.CodeCompletion
     /// 这是代码补全功能的入口点。
     ///
     /// 内容类型：<c>code</c> 覆盖 C#/VB/F#/Python 等继承自 code 的语言；
-    /// 其余 [ContentType] 覆盖 C/C++（不继承 code）与 JSON/XML/YAML/Markdown 等
-    /// 配置、文档类型。清单集中在 <see cref="DeepSeekCompletionContentTypes"/>。
+    /// 其余 [ContentType] 覆盖 C/C++（不继承 code）与 JSON/XML/YAML 等
+    /// 配置文件类型。清单集中在 <see cref="DeepSeekCompletionContentTypes"/>。
+    /// Markdown/纯文本等文档类型刻意不支持。
     /// </summary>
     [Export(typeof(IVsTextViewCreationListener))]
     [ContentType("code")]
@@ -36,8 +37,6 @@ namespace DeepSeek_v4_for_VisualStudio.CodeCompletion
     [ContentType(DeepSeekCompletionContentTypes.Html)]
     [ContentType(DeepSeekCompletionContentTypes.Css)]
     [ContentType(DeepSeekCompletionContentTypes.Razor)]
-    [ContentType(DeepSeekCompletionContentTypes.Markdown)]
-    [ContentType(DeepSeekCompletionContentTypes.PlainText)]
     [TextViewRole(PredefinedTextViewRoles.Editable)]
     internal class TextViewCreationListener : IVsTextViewCreationListener
     {
